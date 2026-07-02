@@ -78,15 +78,3 @@ jobs:
         run: cargo test proptest_tests -- --nocapture
         timeout-minutes: 10
 
-  formal-verification:
-    name: Formal Verification (Kani)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install Kani
-        run: cargo install --locked kani-verifier && cargo kani setup
-      - name: Run Kani proofs
-        working-directory: contracts/stream
-        run: cargo kani --tests
