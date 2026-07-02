@@ -19,13 +19,13 @@
 //! ## Emergency rollback
 //! Store the previous WASM hash before upgrading. Call `upgrade(previous_hash)` to revert.
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, String};
+use soroban_sdk::{contract, contractimpl, contracterror, Address, BytesN, Env, Symbol, String};
 
 const ADMIN_KEY: &str = "admin";
 const IMPL_HASH_KEY: &str = "impl";
 const STORAGE_VERSION_KEY: &str = "sv";
 
-#[contracttype]
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ProxyError {
@@ -160,7 +160,7 @@ impl ProxyContract {
         to_version: String,
     ) -> Result<(), ProxyError> {
         let _admin = check_admin(&env);
-        env.invoke_contract::<Result<(), soroban_sdk::Error>>(
+        let _ = env.invoke_contract::<Result<(), soroban_sdk::Error>>(
             &impl_contract,
             &Symbol::new(&env, "migrate"),
             soroban_sdk::vec![
@@ -197,8 +197,8 @@ mod test {
         let c = ProxyContractClient::new(&env, &contract_id);
 
         c.initialize(&admin, &impl_hash, &0u32);
-        assert_eq!(c.get_admin(), Ok(admin));
-        assert_eq!(c.get_impl_hash(), Ok(impl_hash));
+        assert_eq!(c.get_admin(), admin);
+        assert_eq!(c.get_impl_hash(), impl_hash);
         assert_eq!(c.get_storage_version(), 0u32);
     }
 
@@ -221,7 +221,7 @@ mod test {
         let new_hash = BytesN::from_array(&env, &[2u8; 32]);
         c.upgrade(&new_hash, &1u32, &2u32);
 
-        assert_eq!(c.get_impl_hash(), Ok(new_hash));
+        assert_eq!(c.get_impl_hash(), new_hash);
         assert_eq!(c.get_storage_version(), 2u32);
     }
 
@@ -245,6 +245,6 @@ mod test {
 
         let new_admin = Address::generate(&env);
         c.set_admin(&new_admin);
-        assert_eq!(c.get_admin(), Ok(new_admin));
+        assert_eq!(c.get_admin(), new_admin);
     }
 }

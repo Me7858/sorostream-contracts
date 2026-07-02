@@ -89,7 +89,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         results.push(measure(&b.env, "create_stream"));
     }
@@ -103,7 +102,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(500);
         cl.withdraw(&stream_id, &b.recipient);
@@ -119,7 +117,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         cl.top_up(&stream_id, &b.sender, &b.token_id, &50_000);
         results.push(measure(&b.env, "top_up"));
@@ -134,7 +131,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(300);
         cl.cancel_stream(&stream_id, &b.sender);
@@ -150,7 +146,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(200);
         cl.partial_cancel_stream(&stream_id, &b.sender, &30_000);
@@ -208,7 +203,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         std::println!("stream_id: {}", _stream_id); cl.get_stream(&_stream_id);
         results.push(measure(&b.env, "get_stream"));
@@ -223,7 +217,6 @@ fn generate_storage_baseline() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(500);
         cl.get_claimable(&_stream_id);
@@ -268,7 +261,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         current.push(("create_stream", measure(&b.env, "create_stream")));
     }
@@ -282,7 +274,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(500);
         cl.withdraw(&stream_id, &b.recipient);
@@ -298,7 +289,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         cl.top_up(&stream_id, &b.sender, &b.token_id, &50_000);
         current.push(("top_up", measure(&b.env, "top_up")));
@@ -313,7 +303,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(300);
         cl.cancel_stream(&stream_id, &b.sender);
@@ -329,7 +318,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(200);
         cl.partial_cancel_stream(&stream_id, &b.sender, &30_000);
@@ -385,7 +373,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         std::println!("stream_id: {}", _stream_id); cl.get_stream(&_stream_id);
         current.push(("get_stream", measure(&b.env, "get_stream")));
@@ -400,7 +387,6 @@ fn check_storage_baseline_regression() {
             &b.sender, &b.recipient, &b.token_id,
             &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-            &Bytes::new(&b.env),
         );
         b.env.ledger().set_timestamp(500);
         cl.get_claimable(&_stream_id);

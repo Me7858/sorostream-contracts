@@ -16,7 +16,7 @@
 //! configuration changes.
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracterror, contracttype, Address, Bytes, Env, Symbol, Vec,
 };
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -56,7 +56,7 @@ pub struct Intent {
     pub approval_count: u32,
 }
 
-#[contracttype]
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum MultiSigError {

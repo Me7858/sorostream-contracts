@@ -162,7 +162,7 @@ pub trait SoroStreamInterface {
     /// * `nonce` - Caller-supplied deduplication nonce (unique per sender).
     /// * `auto_renew` - Whether the stream restarts automatically upon completion.
     /// * `lock_until` - Ledger timestamp before which withdrawals are not permitted.
-    /// * `metadata` - Optional metadata bytes (max 64 bytes) attached to the stream.
+    /// * `allow_recipient_termination` - Whether the recipient may cancel the stream early.
     ///
     /// # Returns
     /// The unique stream ID (u64) of the newly created stream.
@@ -186,7 +186,6 @@ pub trait SoroStreamInterface {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
-        metadata: Bytes,
     ) -> Result<u64, StreamError>;
 
     /// Sets the global withdrawal cooldown in seconds.

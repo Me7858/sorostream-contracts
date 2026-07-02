@@ -74,7 +74,6 @@ fn integration_full_lifecycle() {
         &false,
         &0u64,
         &false,
-        &Bytes::new(&ie.env),
     );
 
     assert_eq!(balance(&ie, &ie.sender), 0);
@@ -294,7 +293,6 @@ fn integration_zero_fee_no_treasury_deduction() {
         &false,
         &0u64,
         &false,
-        &Bytes::new(&ie.env),
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -370,7 +368,6 @@ fn integration_multi_stream_interleaved() {
         &false,
         &0u64,
         &false,
-        &Bytes::new(&ie.env),
     );
     let s2 = c.create_stream(
         &ie.sender,
@@ -437,7 +434,6 @@ fn integration_partial_cancel_lifecycle() {
         &false,
         &0u64,
         &false,
-        &Bytes::new(&ie.env),
     );
 
     // At t=200, partial cancel reclaiming 300_000
@@ -538,40 +534,6 @@ fn integration_query_streams_by_sender_recipient() {
     let s3 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &2u64, &false, &0u64,
         &false,
-        &ie.sender,
-        &ie.recipient,
-        &ie.token,
-        &1_000_000,
-        &1000,
-        &0,
-        &0u64,
-        &false,
-        &0u64,
-        &Bytes::new(&ie.env),
-    );
-    let s2 = c.create_stream(
-        &ie.sender,
-        &r2,
-        &ie.token,
-        &1_000_000,
-        &1000,
-        &0,
-        &1u64,
-        &false,
-        &0u64,
-        &Bytes::new(&ie.env),
-    );
-    let s3 = c.create_stream(
-        &ie.sender,
-        &ie.recipient,
-        &ie.token,
-        &1_000_000,
-        &1000,
-        &0,
-        &2u64,
-        &false,
-        &0u64,
-        &Bytes::new(&ie.env),
     );
 
     // By sender: should find all 3
@@ -613,28 +575,6 @@ fn integration_stats_reflect_lifecycle() {
     c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &2_000_000, &2000, &0, &1u64, &false, &0u64,
         &false,
-        &ie.sender,
-        &ie.recipient,
-        &ie.token,
-        &1_000_000,
-        &1000,
-        &0,
-        &0u64,
-        &false,
-        &0u64,
-        &Bytes::new(&ie.env),
-    );
-    c.create_stream(
-        &ie.sender,
-        &ie.recipient,
-        &ie.token,
-        &2_000_000,
-        &2000,
-        &0,
-        &1u64,
-        &false,
-        &0u64,
-        &Bytes::new(&ie.env),
     );
 
     let stats = c.get_stats();
@@ -706,7 +646,6 @@ fn integration_treasury_contract_balance_tracking() {
         &false,
         &0u64,
         &false,
-        &Bytes::new(&ie.env),
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -758,7 +697,6 @@ fn integration_treasury_contract_withdraw() {
         &false,
         &0u64,
         &false,
-        &Bytes::new(&ie.env),
     );
 
     ie.env.ledger().set_timestamp(500);

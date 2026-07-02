@@ -230,6 +230,7 @@ pub fn auto_renew_cancelled(env: &Env, stream_id: u64) {
 }
 
 /// Emitted when a stream is renewed.
+#[allow(dead_code)]
 pub fn stream_renewed(env: &Env, old_stream_id: u64, new_stream_id: u64) {
     env.events().publish(
         (Symbol::new(env, "StreamRenewed"), old_stream_id),

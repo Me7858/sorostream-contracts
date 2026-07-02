@@ -249,6 +249,7 @@ pub fn mark_nonce_used(env: &Env, sender: &Address, nonce: u64) {
 }
 
 /// Returns whether the contract is currently paused.
+#[allow(dead_code)]
 pub fn is_paused(env: &Env) -> bool {
     env.storage()
         .instance()

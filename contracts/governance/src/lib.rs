@@ -11,7 +11,7 @@
 //! 5. The guardian may `veto` a queued proposal before it executes.
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ pub struct Proposal {
     pub votes_against: u64,
 }
 
-#[contracttype]
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum GovernanceError {
@@ -144,6 +144,7 @@ fn get_u64(env: &Env, key: &str, default: u64) -> u64 {
 #[contract]
 pub struct GovernanceContract;
 
+#[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl GovernanceContract {
     /// Initialises the governance contract.
@@ -153,6 +154,7 @@ impl GovernanceContract {
     /// * `quorum` — minimum total votes (for + against) required for a proposal to pass.
     /// * `voting_period` — seconds the voting window stays open (0 = default 7 days).
     /// * `timelock_period` — seconds between queue and execution (0 = default 48 h).
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,

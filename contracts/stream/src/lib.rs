@@ -99,7 +99,7 @@ impl SoroStreamContract {
         check_admin(&env);
         set_paused(&env, true);
         let ts = env.ledger().timestamp();
-        let expiry = ts.checked_add(MAX_PAUSE_DURATION).unwrap_or(u64::MAX);
+        let expiry = ts.saturating_add(MAX_PAUSE_DURATION);
         set_pause_expiry(&env, expiry);
         let admin = read_admin(&env).unwrap();
         events::contract_paused(&env, &admin, ts);
@@ -171,7 +171,7 @@ impl SoroStreamContract {
         }
         set_paused(&env, true);
         let ts = env.ledger().timestamp();
-        let expiry = ts.checked_add(MAX_PAUSE_DURATION).unwrap_or(u64::MAX);
+        let expiry = ts.saturating_add(MAX_PAUSE_DURATION);
         set_pause_expiry(&env, expiry);
         env.events().publish(
             (Symbol::new(&env, "Paused"), guardian.clone()),
@@ -314,7 +314,6 @@ impl SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
-        metadata: Bytes,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -329,9 +328,6 @@ impl SoroStreamContract {
         }
         if cliff_seconds >= duration_seconds {
             return Err(StreamError::InvalidCliff);
-        }
-        if metadata.len() > 64 {
-            return Err(StreamError::MetadataTooLong);
         }
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
             return Err(StreamError::RecipientNotWhitelisted);
@@ -407,7 +403,7 @@ impl SoroStreamContract {
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
-            metadata: metadata.clone(),
+            metadata: Bytes::new(&env),
         };
 
         save_stream(&env, &stream);
@@ -975,7 +971,7 @@ impl SoroStreamContract {
             env.ledger().timestamp()
         };
 
-        let effective_now = now.min(stream.end_time);
+        let _effective_now = now.min(stream.end_time);
         let elapsed_since_withdraw = now.saturating_sub(stream.last_withdraw_time);
         let earned = checked_flow_amount(stream.flow_rate, elapsed_since_withdraw)?;
 
@@ -1288,11 +1284,11 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
         let paused_duration = now.saturating_sub(stream.last_pause_time);
 
-        stream.end_time = stream.end_time.checked_add(paused_duration).unwrap_or(u64::MAX);
-        stream.cliff_time = stream.cliff_time.checked_add(paused_duration).unwrap_or(u64::MAX);
-        stream.start_time = stream.start_time.checked_add(paused_duration).unwrap_or(u64::MAX);
-        stream.last_withdraw_time = stream.last_withdraw_time.checked_add(paused_duration).unwrap_or(u64::MAX);
-        stream.lock_until = stream.lock_until.checked_add(paused_duration).unwrap_or(u64::MAX);
+        stream.end_time = stream.end_time.saturating_add(paused_duration);
+        stream.cliff_time = stream.cliff_time.saturating_add(paused_duration);
+        stream.start_time = stream.start_time.saturating_add(paused_duration);
+        stream.last_withdraw_time = stream.last_withdraw_time.saturating_add(paused_duration);
+        stream.lock_until = stream.lock_until.saturating_add(paused_duration);
 
         stream.status = StreamStatus::Active;
         stream.last_pause_time = 0;
@@ -1680,7 +1676,7 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
-        let unlock_time = now.checked_add(7 * 24 * 60 * 60).unwrap_or(u64::MAX);
+        let unlock_time = now.saturating_add(7 * 24 * 60 * 60);
 
         write_pending_fee_proposal(&env, new_fee_bps, unlock_time);
         events::fee_change_proposed(&env, new_fee_bps, unlock_time);
@@ -1843,7 +1839,6 @@ impl SoroStreamInterface for SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
-        metadata: Bytes,
     ) -> Result<u64, StreamError> {
         Self::create_stream(
             env,
@@ -1857,7 +1852,6 @@ impl SoroStreamInterface for SoroStreamContract {
             auto_renew,
             lock_until,
             allow_recipient_termination,
-            metadata,
         )
     }
 

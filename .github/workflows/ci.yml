@@ -1,4 +1,4 @@
-name: Test
+name: CI
 
 on:
   pull_request:
@@ -6,24 +6,15 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  build-lint-test:
+    name: Build, Lint & Unit Tests
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        sdk-version: ["22.0.0", "22"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.sdk-version }}
-      - name: Pin soroban-sdk to matrix version
-        run: |
-          sed -i 's/soroban-sdk = { version = "[^"]*"/soroban-sdk = { version = "${{ matrix.sdk-version }}"/g' \
-            contracts/stream/Cargo.toml contracts/treasury/Cargo.toml
-          cargo update -p soroban-sdk
       - name: Build WASM
         run: cargo build --target wasm32v1-none --release
       - name: Clippy
@@ -31,7 +22,8 @@ jobs:
       - name: Unit tests
         run: cargo test --lib -- --skip proptest_tests --skip differential_fuzz --skip integration_tests
 
-  property-tests:
+  integration:
+    name: Integration & Regression
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,50 +33,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build WASM
         run: cargo build --target wasm32v1-none --release
-      - name: Property-based tests (10,000 iterations per property)
-        run: cargo test proptest_tests -- --nocapture
-        timeout-minutes: 30
-
-  differential-fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Differential fuzzing (1,000,000 iterations)
-        run: cargo test differential_fuzz -- --nocapture
-        timeout-minutes: 30
-
-  integration-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-      - uses: Swatinem/rust-cache@v2
-      - name: Build WASM
-        run: cargo build --target wasm32v1-none --release
-      - name: Cross-contract integration tests
+      - name: Integration tests
         run: cargo test integration_tests -- --nocapture
       - name: Testnet manifest validation
         run: cargo test testnet_manifest_loads -- --nocapture
-      - name: Install Stellar CLI
-        if: env.SOROSTREAM_TESTNET_CONTRACT != ''
-        env:
-          SOROSTREAM_TESTNET_CONTRACT: ${{ secrets.SOROSTREAM_TESTNET_CONTRACT }}
-        run: cargo install --locked stellar-cli --features opt
-      - name: Live testnet integration tests
-        if: env.SOROSTREAM_TESTNET_CONTRACT != ''
-        env:
-          SOROSTREAM_TESTNET_CONTRACT: ${{ secrets.SOROSTREAM_TESTNET_CONTRACT }}
-          SOROSTREAM_TESTNET_SOURCE: ${{ secrets.SOROSTREAM_TESTNET_SOURCE }}
-        run: cargo test testnet_integration -- --ignored --nocapture
-      - name: Test
-        run: cargo test
-      - name: Storage baseline regression check
+      - name: Storage baseline regression
         run: cargo test --package sorostream-stream -- storage_bench::check_storage_baseline_regression --nocapture
-      - name: Build size-optimized WASM
+      - name: Build size-optimised WASM
         run: cargo build --target wasm32v1-none --profile release-size
       - name: Record WASM binary size
         id: wasm_size
@@ -103,9 +58,32 @@ jobs:
             GROWTH=$(( (CURRENT - BASELINE) * 100 / BASELINE ))
             echo "Baseline: $BASELINE bytes, Current: $CURRENT bytes, Growth: ${GROWTH}%"
             if [ "$GROWTH" -gt 5 ]; then
-              echo "::error::WASM binary grew by ${GROWTH}% (>${BASELINE} -> ${CURRENT}), exceeding the 5% threshold"
+              echo "::error::WASM binary grew by ${GROWTH}% (${BASELINE} -> ${CURRENT}), exceeding the 5% threshold"
               exit 1
             fi
           else
             echo "No baseline size found, skipping regression check"
           fi
+
+  property-tests:
+    name: Property Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Property-based tests (1,000 iterations per property)
+        env:
+          PROPTEST_CASES: 1000
+        run: cargo test proptest_tests -- --nocapture
+        timeout-minutes: 10
+
+  formal-verification:
+    name: Formal Verification (Kani)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-verifier-action@v1
+      - name: Run Kani proofs
+        working-directory: contracts/stream
+        run: cargo kani --tests

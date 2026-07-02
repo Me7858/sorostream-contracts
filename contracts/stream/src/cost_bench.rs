@@ -238,8 +238,6 @@ fn bench_create_stream() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     assert_within_limits(&b.env, "create_stream");
 }
 
@@ -253,8 +251,6 @@ fn bench_get_stream() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
 
     c.get_stream(&stream_id);
     assert_within_limits(&b.env, "get_stream");
@@ -270,8 +266,6 @@ fn bench_get_claimable() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     b.env.ledger().set_timestamp(500);
 
     c.get_claimable(&stream_id);
@@ -288,8 +282,6 @@ fn bench_withdraw() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     b.env.ledger().set_timestamp(500);
 
     c.withdraw(&stream_id, &b.recipient);
@@ -306,8 +298,6 @@ fn bench_cancel_stream() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     b.env.ledger().set_timestamp(300);
 
     c.cancel_stream(&stream_id, &b.sender);
@@ -324,8 +314,6 @@ fn bench_top_up() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
 
     c.top_up(&stream_id, &b.sender, &b.token_id, &50_000);
     assert_within_limits(&b.env, "top_up");
@@ -345,8 +333,6 @@ fn bench_partial_cancel_stream() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     b.env.ledger().set_timestamp(200);
 
     c.partial_cancel_stream(&stream_id, &b.sender, &30_000);
@@ -366,8 +352,6 @@ fn bench_get_streams_by_sender_n1() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
 
     c.get_streams_by_sender(&b.sender, &0, &20);
     assert_within_limits(&b.env, "get_streams_by_sender (N=1)");
@@ -427,8 +411,6 @@ fn bench_get_streams_by_recipient_n1() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
 
     c.get_streams_by_recipient(&b.recipient, &0, &20);
     assert_within_limits(&b.env, "get_streams_by_recipient (N=1)");
@@ -804,8 +786,6 @@ fn cost_regression_create_stream() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     assert_no_regression(&b.env, "create_stream", BASELINE_CREATE_STREAM);
 }
 
@@ -819,8 +799,6 @@ fn cost_regression_withdraw() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     b.env.ledger().set_timestamp(500);
 
     c.withdraw(&stream_id, &b.recipient);
@@ -837,8 +815,6 @@ fn cost_regression_top_up() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
 
     c.top_up(&stream_id, &b.sender, &b.token_id, &50_000);
     assert_no_regression(&b.env, "top_up", BASELINE_TOP_UP);
@@ -854,8 +830,6 @@ fn cost_regression_cancel_stream() {
         &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
     );
-    &Bytes::new(&t.env),
-);
     b.env.ledger().set_timestamp(300);
 
     c.cancel_stream(&stream_id, &b.sender);
