@@ -12,3 +12,6 @@ Thumbs.db
 
 # misc
 *.log
+
+# Soroban test snapshots — auto-generated, not source
+test_snapshots/
