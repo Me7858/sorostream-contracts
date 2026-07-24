@@ -2055,3 +2055,163 @@ fn test_emergency_resume_unblocks_withdraw_186() {
 
     c.withdraw(&stream_id, &t.recipient);
 }
+
+// --- #249: cancel_stream properly cleans up sender/recipient index ---
+
+/// Issue #249 – After cancellation, get_streams_by_sender and get_streams_by_recipient
+/// must no longer return the cancelled stream.
+#[test]
+fn test_cancel_stream_removes_from_sender_and_recipient_index_249() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+    );
+
+    let sender_streams_before = c.get_streams_by_sender(&t.sender, &0u32, &10u32);
+    assert_eq!(sender_streams_before.len(), 1);
+
+    let recipient_streams_before = c.get_streams_by_recipient(&t.recipient, &0u32, &10u32);
+    assert_eq!(recipient_streams_before.len(), 1);
+
+    t.env.ledger().set_timestamp(300);
+    c.cancel_stream(&stream_id, &t.sender);
+
+    let sender_streams_after = c.get_streams_by_sender(&t.sender, &0u32, &10u32);
+    assert_eq!(sender_streams_after.len(), 0, "sender index must be empty after cancel");
+
+    let recipient_streams_after = c.get_streams_by_recipient(&t.recipient, &0u32, &10u32);
+    assert_eq!(recipient_streams_after.len(), 0, "recipient index must be empty after cancel");
+
+    assert!(c.try_get_stream(&stream_id).is_err(), "stream must not exist after cancel");
+}
+
+// --- #251: cliff_end_time == end_time boundary ---
+
+/// Issue #251 – When cliff_end_time == end_time, the entire deposit becomes
+/// claimable at exactly cliff_end_time. Nothing is claimable one second before.
+#[test]
+fn test_cliff_equals_end_time_boundary_251() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let duration = 100u64;
+    let cliff = 100u64;
+    let deposit = 100_000i128;
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &cliff, &0u64, &false, &0u64, &false,
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.cliff_time, stream.end_time, "cliff_time must equal end_time");
+
+    t.env.ledger().set_timestamp(99);
+    let claimable_before = c.get_claimable(&stream_id);
+    assert_eq!(claimable_before, 0, "nothing claimable one second before cliff");
+
+    t.env.ledger().set_timestamp(100);
+    let claimable_at_cliff = c.get_claimable(&stream_id);
+    assert_eq!(claimable_at_cliff, deposit, "entire deposit claimable at cliff == end_time");
+}
+
+// --- #252: get_claimable at exactly end_time ---
+
+/// Issue #252 – At a stream's exact end_time, all of the deposit should be
+/// claimable. After end_time, claimable must not increase further.
+#[test]
+fn test_get_claimable_at_exact_end_time_252() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let duration = 100u64;
+    let deposit = 100_000i128;
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &0, &0u64, &false, &0u64, &false,
+    );
+
+    t.env.ledger().set_timestamp(100);
+    let claimable_at_end = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_at_end, deposit,
+        "full deposit must be claimable at exactly end_time"
+    );
+
+    t.env.ledger().set_timestamp(101);
+    let claimable_after = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_after, deposit,
+        "claimable must not increase beyond end_time"
+    );
+}
+
+/// Issue #252 – Non-zero cliff: at end_time the full deposit is still claimable
+/// provided the cliff has already passed.
+#[test]
+fn test_get_claimable_at_end_time_with_cliff_252() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let duration = 100u64;
+    let cliff = 10u64;
+    let deposit = 100_000i128;
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &cliff, &0u64, &false, &0u64, &false,
+    );
+
+    t.env.ledger().set_timestamp(100);
+    let claimable_at_end = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_at_end, deposit,
+        "full deposit claimable at end_time even with non-zero cliff"
+    );
+}
+
+// --- #254: concurrent create and cancel in same ledger sequence ---
+
+/// Issue #254 – Creating a stream and immediately cancelling it in the same
+/// ledger sequence must produce a consistent final state: either the cancel
+/// completes with a full refund, or it is rejected cleanly.
+#[test]
+fn test_concurrent_create_and_cancel_same_ledger_254() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(100);
+
+    let initial_sender_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+    );
+
+    // No ledger advancement – cancel in the same sequence
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Stream must be fully removed
+    assert!(
+        c.try_get_stream(&stream_id).is_err(),
+        "stream must not exist after cancel in same ledger"
+    );
+
+    // Sender must receive full refund (no time elapsed)
+    let sender_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    assert_eq!(
+        sender_bal, initial_sender_bal,
+        "sender must get full refund when cancel is immediate"
+    );
+
+    // Recipient must have received nothing
+    let recipient_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    assert_eq!(recipient_bal, 0, "recipient gets nothing when cancelled instantly");
+
+    // Index must be clean
+    let sender_streams = c.get_streams_by_sender(&t.sender, &0u32, &10u32);
+    assert_eq!(sender_streams.len(), 0, "sender index empty after same-ledger cancel");
+}

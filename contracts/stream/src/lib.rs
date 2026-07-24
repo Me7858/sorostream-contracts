@@ -326,7 +326,7 @@ impl SoroStreamContract {
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
-        if cliff_seconds >= duration_seconds {
+        if cliff_seconds > duration_seconds {
             return Err(StreamError::InvalidCliff);
         }
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
