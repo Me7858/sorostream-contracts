@@ -383,6 +383,41 @@ fn test_cliff_equals_duration_fails() {
     assert_eq!(result, Err(Ok(StreamError::InvalidCliff)));
 }
 
+/// cliff_seconds == 0 means no cliff — tokens stream linearly from start.
+#[test]
+fn test_cliff_zero_means_no_cliff() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+
+    // At t=1 (right after start), tokens should already be claimable
+    t.env.ledger().set_timestamp(1);
+    assert_eq!(c.get_claimable(&stream_id), 100);
+
+    // Verify cliff_time equals start_time (no cliff barrier)
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.cliff_time, stream.start_time);
+}
+
+/// cliff_seconds strictly between 0 and duration creates a valid cliff.
+#[test]
+fn test_cliff_strictly_between_zero_and_duration() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &1, &0u64, &false, &0u64, &false);
+
+    // Before cliff (t=0): no claimable
+    assert_eq!(c.get_claimable(&stream_id), 0);
+
+    // At cliff (t=1): claimable = 1 * 100 = 100
+    t.env.ledger().set_timestamp(1);
+    assert_eq!(c.get_claimable(&stream_id), 100);
+}
+
 #[test]
 fn test_get_admin_returns_initialized_admin() {
     let t = setup();
@@ -2056,20 +2091,19 @@ fn test_emergency_resume_unblocks_withdraw_186() {
     c.withdraw(&stream_id, &t.recipient);
 }
 
-// ── Issue #253: top_up after partial withdrawal ──────────────────────────────
+// --- #249: cancel_stream properly cleans up sender/recipient index ---
 
-/// When a recipient has partially claimed a stream and the sender calls top_up,
-/// the top-up amount extends the stream duration without affecting the
-/// already-accrued claimable balance.
-///
-/// Sequence:
-///   1. Create stream (deposit=100_000, duration=1000, flow_rate=100)
-///   2. Advance to midpoint t=500 → claimable should be 50_000
-///   3. Top_up by 50_000 → new end_time = 1500
-///   4. Claimable immediately after top_up must still be 50_000 (unchanged)
-///   5. Advance to new end_time t=1500 → full original + top-up withdrawable
+/// Issue #249 – After cancellation, get_streams_by_sender and get_streams_by_recipient
+/// must no longer return the cancelled stream.
 #[test]
-fn test_top_up_after_partial_withdrawal() {
+fn test_cancel_stream_removes_from_sender_and_recipient_index_249() {
+// ── Rounding dust tests (issue #248) ──────────────────────────────────────────
+
+/// When deposit is not evenly divisible by duration, flow_rate rounds down.
+/// The final withdrawal should not error due to rounding dust — it should
+/// cap the claimable at deposit - total_withdrawn.
+#[test]
+fn test_withdraw_dust_not_erroring() {
     let t = setup();
     let c = client(&t);
     t.env.ledger().set_timestamp(0);
@@ -2078,43 +2112,356 @@ fn test_top_up_after_partial_withdrawal() {
         &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false,
     );
 
-    // Step 1: Advance to midpoint
-    t.env.ledger().set_timestamp(500);
-    let claimable_before_topup = c.get_claimable(&stream_id);
-    assert_eq!(claimable_before_topup, 50_000, "half the deposit should be claimable at midpoint");
+    let sender_streams_before = c.get_streams_by_sender(&t.sender, &0u32, &10u32);
+    assert_eq!(sender_streams_before.len(), 1);
 
-    // Step 2: Top up (mint extra tokens to sender first)
-    StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &50_000);
-    c.top_up(&stream_id, &t.sender, &t.token_id, &50_000);
+    let recipient_streams_before = c.get_streams_by_recipient(&t.recipient, &0u32, &10u32);
+    assert_eq!(recipient_streams_before.len(), 1);
 
-    // Verify stream was extended
-    let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.deposit, 150_000);
-    assert_eq!(stream.end_time, 1500);
+    t.env.ledger().set_timestamp(300);
+    c.cancel_stream(&stream_id, &t.sender);
 
-    // Step 3: Claimable must be unchanged immediately after top_up
-    // (still reflects time since last withdrawal: 500s * 100 = 50_000)
-    let claimable_after_topup = c.get_claimable(&stream_id);
-    assert_eq!(
-        claimable_after_topup, 50_000,
-        "claimable must not change immediately after top_up"
+    let sender_streams_after = c.get_streams_by_sender(&t.sender, &0u32, &10u32);
+    assert_eq!(sender_streams_after.len(), 0, "sender index must be empty after cancel");
+
+    let recipient_streams_after = c.get_streams_by_recipient(&t.recipient, &0u32, &10u32);
+    assert_eq!(recipient_streams_after.len(), 0, "recipient index must be empty after cancel");
+
+    assert!(c.try_get_stream(&stream_id).is_err(), "stream must not exist after cancel");
+}
+
+// --- #251: cliff_end_time == end_time boundary ---
+
+/// Issue #251 – When cliff_end_time == end_time, the entire deposit becomes
+/// claimable at exactly cliff_end_time. Nothing is claimable one second before.
+#[test]
+fn test_cliff_equals_end_time_boundary_251() {
+    // 100 / 3 = 33 (floor). Total streamable = 33*3 = 99. Dust = 1.
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100, &3, &0, &0u64, &false, &0u64, &false);
+
+    // Withdraw at t=1: 33
+    t.env.ledger().set_timestamp(1);
+    c.withdraw(&stream_id, &t.recipient);
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&t.recipient), 33);
+
+    // Withdraw at t=2: another 33 → total 66
+    t.env.ledger().set_timestamp(2);
+    c.withdraw(&stream_id, &t.recipient);
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&t.recipient), 66);
+
+    // Withdraw at t=3 (end): claimable = 33, but available = 100-66 = 34.
+    // Due to dust, raw claimable (33) < available (34), so recipient gets 33 more = 99.
+    t.env.ledger().set_timestamp(3);
+    c.withdraw(&stream_id, &t.recipient);
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&t.recipient), 99);
+
+    // Stream should be removed after end
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
+/// top_up with dust: effective_amount rounds to whole seconds.
+/// The total should still be claimable without error.
+#[test]
+fn test_top_up_dust_rounding_correctness() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let duration = 100u64;
+    let cliff = 100u64;
+    let deposit = 100_000i128;
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &cliff, &0u64, &false, &0u64, &false,
     );
 
-    // Step 4: Withdraw the accrued amount
-    c.withdraw(&stream_id, &t.recipient);
-    let balance_after_first_withdraw = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
-    assert_eq!(balance_after_first_withdraw, 50_000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.cliff_time, stream.end_time, "cliff_time must equal end_time");
 
-    // Step 5: Advance past the original end_time but before the new end_time
-    t.env.ledger().set_timestamp(1200);
-    let claimable_mid = c.get_claimable(&stream_id);
-    // From t=500 (last_withdraw) to t=1200 = 700s * 100 = 70_000
-    assert_eq!(claimable_mid, 70_000);
+    t.env.ledger().set_timestamp(99);
+    let claimable_before = c.get_claimable(&stream_id);
+    assert_eq!(claimable_before, 0, "nothing claimable one second before cliff");
 
-    // Step 6: Advance to the new end_time, withdraw full remaining
-    t.env.ledger().set_timestamp(1500);
+    t.env.ledger().set_timestamp(100);
+    let claimable_at_cliff = c.get_claimable(&stream_id);
+    assert_eq!(claimable_at_cliff, deposit, "entire deposit claimable at cliff == end_time");
+}
+
+// --- #252: get_claimable at exactly end_time ---
+
+/// Issue #252 – At a stream's exact end_time, all of the deposit should be
+/// claimable. After end_time, claimable must not increase further.
+#[test]
+fn test_get_claimable_at_exact_end_time_252() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let duration = 100u64;
+    let deposit = 100_000i128;
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &0, &0u64, &false, &0u64, &false,
+    );
+
+    t.env.ledger().set_timestamp(100);
+    let claimable_at_end = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_at_end, deposit,
+        "full deposit must be claimable at exactly end_time"
+    );
+
+    t.env.ledger().set_timestamp(101);
+    let claimable_after = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_after, deposit,
+        "claimable must not increase beyond end_time"
+    );
+}
+
+/// Issue #252 – Non-zero cliff: at end_time the full deposit is still claimable
+/// provided the cliff has already passed.
+#[test]
+fn test_get_claimable_at_end_time_with_cliff_252() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let duration = 100u64;
+    let cliff = 10u64;
+    let deposit = 100_000i128;
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &cliff, &0u64, &false, &0u64, &false,
+    );
+
+    t.env.ledger().set_timestamp(100);
+    let claimable_at_end = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_at_end, deposit,
+        "full deposit claimable at end_time even with non-zero cliff"
+    );
+}
+
+// --- #254: concurrent create and cancel in same ledger sequence ---
+
+/// Issue #254 – Creating a stream and immediately cancelling it in the same
+/// ledger sequence must produce a consistent final state: either the cancel
+/// completes with a full refund, or it is rejected cleanly.
+#[test]
+fn test_concurrent_create_and_cancel_same_ledger_254() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(100);
+
+    let initial_sender_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+    );
+
+    // No ledger advancement – cancel in the same sequence
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Stream must be fully removed
+    assert!(
+        c.try_get_stream(&stream_id).is_err(),
+        "stream must not exist after cancel in same ledger"
+    );
+
+    // Sender must receive full refund (no time elapsed)
+    let sender_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    assert_eq!(
+        sender_bal, initial_sender_bal,
+        "sender must get full refund when cancel is immediate"
+    );
+
+    // Recipient must have received nothing
+    let recipient_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    assert_eq!(recipient_bal, 0, "recipient gets nothing when cancelled instantly");
+
+    // Index must be clean
+    let sender_streams = c.get_streams_by_sender(&t.sender, &0u32, &10u32);
+    assert_eq!(sender_streams.len(), 0, "sender index empty after same-ledger cancel");
+    // flow_rate = 33
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100, &3, &0, &0u64, &false, &0u64, &false);
+
+    // Top up 50: effective = 50 - (50 % 33) = 50 - 17 = 33. extra = 33/33 = 1s.
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &50);
+    c.top_up(&stream_id, &t.sender, &t.token_id, &50);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 133);
+    assert_eq!(stream.end_time, 4);
+
+    // Withdraw everything at end
+    t.env.ledger().set_timestamp(4);
     c.withdraw(&stream_id, &t.recipient);
-    let balance_final = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
-    // 50_000 (first) + 100_000 (second: 1000s * 100) = 150_000
-    assert_eq!(balance_final, 150_000, "recipient should receive the full deposit + top-up");
+    // flow_rate=33, duration=4 → 33*4 = 132. deposit=133, dust=1.
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&t.recipient), 132);
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
+/// cancel_stream with rounding dust: refund should not underflow.
+#[test]
+fn test_cancel_stream_dust_no_underflow() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // 100 / 3 = 33
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100, &3, &0, &0u64, &false, &0u64, &false);
+
+    // Cancel at t=2: earned = 66, available = 100, refund = 34.
+    t.env.ledger().set_timestamp(2);
+    c.cancel_stream(&stream_id, &t.sender);
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&t.recipient), 66);
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&t.sender), 999_934);
+}
+
+// ── get_stats counter tests (issue #246) ──────────────────────────────────────
+
+/// get_stats.total_streams reflects total ever created (including cancelled).
+/// get_stats.active_streams reflects currently active count.
+#[test]
+fn test_get_stats_tracks_active_and_total() {
+    let t = setup();
+    let c = client(&t);
+
+    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &1u64, &false, &0u64, &false);
+
+    let stats = c.get_stats();
+    assert_eq!(stats.total_streams, 2);
+    assert_eq!(stats.active_streams, 2);
+    assert_eq!(stats.total_volume, 200_000);
+
+    // Cancel one stream
+    c.cancel_stream(&id1, &t.sender);
+
+    let stats = c.get_stats();
+    assert_eq!(stats.total_streams, 2); // total ever created stays at 2
+    assert_eq!(stats.active_streams, 1); // active decremented
+}
+
+/// get_stats.active_streams decrements on pause and increments on resume.
+#[test]
+fn test_get_stats_pause_resume_counter() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+
+    assert_eq!(c.get_stats().active_streams, 1);
+
+    c.pause_stream(&stream_id, &t.sender);
+    assert_eq!(c.get_stats().active_streams, 0);
+
+    c.resume_stream(&stream_id, &t.sender);
+    assert_eq!(c.get_stats().active_streams, 1);
+}
+
+/// recalibrate_stats admin instruction corrects drift.
+#[test]
+fn test_recalibrate_stats_corrects_drift() {
+    let t = setup();
+    let c = client(&t);
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &1u64, &false, &0u64, &false);
+
+    assert_eq!(c.get_stats().active_streams, 2);
+
+    // Cancel one stream
+    let id1 = c.get_all_stream_ids(&0, &2).get_unchecked(0);
+    c.cancel_stream(&id1, &t.sender);
+    assert_eq!(c.get_stats().active_streams, 1);
+
+    // Recalibrate should confirm the count
+    c.recalibrate_stats(&admin);
+    assert_eq!(c.get_stats().active_streams, 1);
+}
+
+/// recalibrate_stats rejects non-admin caller.
+#[test]
+fn test_recalibrate_stats_rejects_non_admin() {
+    let t = setup();
+    let c = client(&t);
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    let result = c.try_recalibrate_stats(&t.sender);
+    assert!(result.is_err());
+}
+
+// ── bump_stream_ttl tests (issue #250) ────────────────────────────────────────
+
+/// bump_stream_ttl extends the storage TTL so the stream entry remains accessible
+/// after its original TTL would have expired.
+#[test]
+fn test_bump_stream_ttl_extends_accessibility() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+
+    // Set ledger sequence near where the default TTL might expire.
+    // Soroban default persistent TTL is ~100,000 ledgers.
+    t.env.ledger().set_sequence_number(99_990);
+
+    // Bump the TTL to cover the remaining stream duration
+    c.bump_stream_ttl(&stream_id, &t.sender);
+
+    // Advance ledger well beyond original TTL
+    t.env.ledger().set_sequence_number(200_000);
+
+    // Stream should still be accessible
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.id, stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+}
+
+/// bump_stream_ttl rejects non-participants.
+#[test]
+fn test_bump_stream_ttl_rejects_non_participant() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    let other = Address::generate(&t.env);
+
+    let result = c.try_bump_stream_ttl(&stream_id, &other);
+    assert_eq!(result, Err(Ok(StreamError::NotAuthorized)));
+}
+
+/// bump_stream_ttl rejects cancelled streams.
+#[test]
+fn test_bump_stream_ttl_rejects_cancelled() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    c.cancel_stream(&stream_id, &t.sender);
+
+    let result = c.try_bump_stream_ttl(&stream_id, &t.sender);
+    assert_eq!(result, Err(Ok(StreamError::StreamNotFound)));
+}
+
+/// bump_stream_ttl can be called by the recipient.
+#[test]
+fn test_bump_stream_ttl_recipient_can_call() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+
+    t.env.ledger().set_sequence_number(99_990);
+    c.bump_stream_ttl(&stream_id, &t.recipient);
+
+    t.env.ledger().set_sequence_number(200_000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
 }

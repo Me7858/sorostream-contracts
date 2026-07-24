@@ -655,4 +655,12 @@ pub trait SoroStreamInterface {
 
     /// Returns the current XLM creation fee in stroops (0 = disabled).
     fn get_creation_fee(env: Env) -> i128;
+
+    /// Recalibrates the active stream count by scanning all streams.
+    /// Only callable by admin. Use when counter drift is suspected.
+    fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
+
+    /// Extends the Soroban persistent storage TTL for a stream and its indices.
+    /// Only the sender or recipient may call this.
+    fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
 }
