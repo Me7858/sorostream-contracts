@@ -2055,3 +2055,66 @@ fn test_emergency_resume_unblocks_withdraw_186() {
 
     c.withdraw(&stream_id, &t.recipient);
 }
+
+// ── Issue #253: top_up after partial withdrawal ──────────────────────────────
+
+/// When a recipient has partially claimed a stream and the sender calls top_up,
+/// the top-up amount extends the stream duration without affecting the
+/// already-accrued claimable balance.
+///
+/// Sequence:
+///   1. Create stream (deposit=100_000, duration=1000, flow_rate=100)
+///   2. Advance to midpoint t=500 → claimable should be 50_000
+///   3. Top_up by 50_000 → new end_time = 1500
+///   4. Claimable immediately after top_up must still be 50_000 (unchanged)
+///   5. Advance to new end_time t=1500 → full original + top-up withdrawable
+#[test]
+fn test_top_up_after_partial_withdrawal() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+    );
+
+    // Step 1: Advance to midpoint
+    t.env.ledger().set_timestamp(500);
+    let claimable_before_topup = c.get_claimable(&stream_id);
+    assert_eq!(claimable_before_topup, 50_000, "half the deposit should be claimable at midpoint");
+
+    // Step 2: Top up (mint extra tokens to sender first)
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &50_000);
+    c.top_up(&stream_id, &t.sender, &t.token_id, &50_000);
+
+    // Verify stream was extended
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 150_000);
+    assert_eq!(stream.end_time, 1500);
+
+    // Step 3: Claimable must be unchanged immediately after top_up
+    // (still reflects time since last withdrawal: 500s * 100 = 50_000)
+    let claimable_after_topup = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_after_topup, 50_000,
+        "claimable must not change immediately after top_up"
+    );
+
+    // Step 4: Withdraw the accrued amount
+    c.withdraw(&stream_id, &t.recipient);
+    let balance_after_first_withdraw = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    assert_eq!(balance_after_first_withdraw, 50_000);
+
+    // Step 5: Advance past the original end_time but before the new end_time
+    t.env.ledger().set_timestamp(1200);
+    let claimable_mid = c.get_claimable(&stream_id);
+    // From t=500 (last_withdraw) to t=1200 = 700s * 100 = 70_000
+    assert_eq!(claimable_mid, 70_000);
+
+    // Step 6: Advance to the new end_time, withdraw full remaining
+    t.env.ledger().set_timestamp(1500);
+    c.withdraw(&stream_id, &t.recipient);
+    let balance_final = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    // 50_000 (first) + 100_000 (second: 1000s * 100) = 150_000
+    assert_eq!(balance_final, 150_000, "recipient should receive the full deposit + top-up");
+}

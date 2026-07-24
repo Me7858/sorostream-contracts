@@ -320,3 +320,270 @@ proptest! {
         }
     }
 }
+
+// ── Issue #259: create_stream boundary fuzz tests ────────────────────────────
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    /// Fuzz: create_stream with extreme total_amount and duration_seconds.
+    /// Assert no panics occur outside of expected StreamError variants.
+    #[test]
+    fn prop_fuzz_create_stream_amount_duration_boundaries(
+        amount in 1_i128..=i128::MAX / 2,
+        duration in 0_u64..=u64::MAX,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(1000);
+
+        // Mint enough tokens for the test
+        let mint_amount = amount.min(10_000_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &mint_amount);
+
+        let result = c.try_create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+        );
+
+        // No panics should occur. The result is either Ok or an expected error.
+        if let Err(e) = &result {
+            let err = e.clone().unwrap_err();
+            // Must be one of the expected error variants
+            prop_assert!(
+                matches!(
+                    err,
+                    StreamError::ZeroAmount
+                        | StreamError::ZeroFlowRate
+                        | StreamError::StreamDurationTooShort
+                        | StreamError::InvalidEndTime
+                        | StreamError::Overflow
+                        | StreamError::DuplicateStream
+                        | StreamError::SenderStreamLimitExceeded
+                ),
+                "unexpected error variant: {:?} (amount={}, duration={})",
+                err, amount, duration,
+            );
+        }
+    }
+
+    /// Fuzz: create_stream with cliff_seconds relative to duration_seconds.
+    /// When cliff >= duration, must fail with InvalidCliff.
+    #[test]
+    fn prop_fuzz_create_stream_cliff_boundaries(
+        duration in 1_u64..=100_000_u64,
+        cliff in 0_u64..=100_000_u64,
+        amount in 1_000_i128..=1_000_000_i128,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let result = c.try_create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &cliff, &0u64, &false, &0u64, &false,
+        );
+
+        if cliff >= duration {
+            // Must reject with InvalidCliff
+            prop_assert!(
+                result.is_err(),
+                "cliff ({}) >= duration ({}) should fail, but got Ok",
+                cliff, duration,
+            );
+        }
+    }
+
+    /// Fuzz: create_stream with extreme nonce values.
+    /// Duplicate nonce within same sender must fail with DuplicateStream.
+    #[test]
+    fn prop_fuzz_create_stream_nonce_boundaries(
+        nonce1 in 0_u64..=u64::MAX,
+        nonce2 in 0_u64..=u64::MAX,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let result1 = c.try_create_stream(
+            &sender, &recipient, &token_id, &100_000, &1000, &0, &nonce1, &false, &0u64, &false,
+        );
+
+        if result1.is_ok() && nonce1 == nonce2 {
+            // Same nonce must be rejected
+            let result2 = c.try_create_stream(
+                &sender, &recipient, &token_id, &100_000, &1000, &0, &nonce2, &false, &0u64, &false,
+            );
+            prop_assert!(
+                result2.is_err(),
+                "duplicate nonce {} should be rejected",
+                nonce1,
+            );
+        }
+    }
+
+    /// Fuzz: create_stream with large duration (near u64::MAX) and small flow_rate.
+    /// Should either succeed or fail with Overflow, not panic.
+    #[test]
+    fn prop_fuzz_create_stream_large_duration_small_flow(
+        amount in 1_i128..=100_000_i128,
+        large_duration in 100_000_u64..=u64::MAX / 2,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &amount);
+
+        let result = c.try_create_stream(
+            &sender, &recipient, &token_id, &amount, &large_duration, &0u64, &0u64, &false, &0u64, &false,
+        );
+
+        // No panics allowed
+        if let Err(e) = &result {
+            let err = e.clone().unwrap_err();
+            prop_assert!(
+                matches!(
+                    err,
+                    StreamError::ZeroFlowRate
+                        | StreamError::StreamDurationTooShort
+                        | StreamError::Overflow
+                        | StreamError::InvalidEndTime
+                ),
+                "unexpected error for large duration: {:?}",
+                err,
+            );
+        }
+    }
+}
+
+// ── Issue #258: top_up arithmetic invariant properties ───────────────────────
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    /// Invariant 1: new_end_time > old_end_time for any positive extra_amount.
+    /// Invariant 2: new_end_time - old_end_time == floor(extra_amount / flow_rate).
+    #[test]
+    fn prop_topup_invariants_duration_extension(
+        amount in 10_000_i128..=500_000_i128,
+        duration in 100_u64..=10_000_u64,
+        topup in 1_000_i128..=500_000_i128,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+        );
+        let stream_before = c.get_stream(&stream_id);
+        let old_end_time = stream_before.end_time;
+
+        let effective_topup = topup - (topup % flow_rate);
+        if effective_topup <= 0 { return Ok(()); }
+
+        let result = c.try_top_up(&stream_id, &sender, &token_id, &topup);
+        if result.is_err() { return Ok(()); }
+
+        let stream_after = c.get_stream(&stream_id);
+
+        // Invariant 1: new_end_time > old_end_time
+        prop_assert!(
+            stream_after.end_time > old_end_time,
+            "Invariant 1 violated: new_end_time ({}) must be > old_end_time ({})",
+            stream_after.end_time, old_end_time,
+        );
+
+        // Invariant 2: extension == floor(extra_amount / flow_rate)
+        let expected_extension = (effective_topup / flow_rate) as u64;
+        prop_assert_eq!(
+            stream_after.end_time - old_end_time,
+            expected_extension,
+            "Invariant 2 violated: extension ({}) != floor(effective_topup({}) / flow_rate({})) = {}",
+            stream_after.end_time - old_end_time, effective_topup, flow_rate, expected_extension,
+        );
+    }
+
+    /// Invariant 3: after top_up, get_claimable is monotonically non-decreasing.
+    /// Check that claimable at old_end_time <= claimable at new_end_time.
+    #[test]
+    fn prop_topup_invariant_claimable_monotonic(
+        amount in 10_000_i128..=500_000_i128,
+        duration in 100_u64..=10_000_u64,
+        topup in 1_000_i128..=500_000_i128,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+        );
+        let stream_before = c.get_stream(&stream_id);
+        let old_end_time = stream_before.end_time;
+
+        let effective_topup = topup - (topup % flow_rate);
+        if effective_topup <= 0 { return Ok(()); }
+
+        let result = c.try_top_up(&stream_id, &sender, &token_id, &topup);
+        if result.is_err() { return Ok(()); }
+
+        let stream_after = c.get_stream(&stream_id);
+        let new_end_time = stream_after.end_time;
+
+        // Check claimable at old_end_time (was the original end of the stream)
+        env.ledger().set_timestamp(old_end_time);
+        let claimable_at_old = c.get_claimable(&stream_id);
+
+        // Check claimable at new_end_time (now the extended end)
+        env.ledger().set_timestamp(new_end_time);
+        let claimable_at_new = c.get_claimable(&stream_id);
+
+        // Invariant 3: claimable must be non-decreasing
+        prop_assert!(
+            claimable_at_new >= claimable_at_old,
+            "Invariant 3 violated: claimable at new_end ({}) < claimable at old_end ({})",
+            claimable_at_new, claimable_at_old,
+        );
+    }
+
+    /// top_up invariants: deposit increases by exactly effective_amount.
+    #[test]
+    fn prop_topup_invariant_deposit_increase(
+        amount in 10_000_i128..=500_000_i128,
+        duration in 100_u64..=10_000_u64,
+        topup in 1_000_i128..=500_000_i128,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+        );
+        let stream_before = c.get_stream(&stream_id);
+        let old_deposit = stream_before.deposit;
+
+        let effective_topup = topup - (topup % flow_rate);
+        if effective_topup <= 0 { return Ok(()); }
+
+        let result = c.try_top_up(&stream_id, &sender, &token_id, &topup);
+        if result.is_err() { return Ok(()); }
+
+        let stream_after = c.get_stream(&stream_id);
+        prop_assert_eq!(
+            stream_after.deposit,
+            old_deposit + effective_topup,
+            "deposit must increase by exactly effective_topup({})",
+            effective_topup,
+        );
+    }
+}

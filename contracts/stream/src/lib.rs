@@ -31,6 +31,10 @@ mod storage_bench;
 mod integration_tests;
 #[cfg(test)]
 mod testnet_integration_tests;
+#[cfg(test)]
+mod proptest_tests;
+#[cfg(test)]
+mod differential_fuzz;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal};
 use storage::{
