@@ -1,0 +1,13 @@
+# cargo-audit configuration
+# https://github.com/rustsec/rustsec/blob/main/cargo-audit/README.md
+
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+# To ignore a specific advisory, add an entry like:
+# [[advisories.ignore]]
+# id = "RUSTSEC-YYYY-NNNN"
+# reason = "no-fix-available"

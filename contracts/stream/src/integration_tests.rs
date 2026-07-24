@@ -713,3 +713,230 @@ fn integration_treasury_contract_withdraw() {
     assert_eq!(dest_balance, fee);
     assert_eq!(treasury_client.get_balance(&ie.token), 0);
 }
+
+// ── Issue #256: Expired / Completed state transitions after end_time ────────
+
+#[test]
+fn integration_stream_active_past_end_time() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    // flow_rate = 1_000_000 / 1000 = 1000/sec
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // Partial withdraw at t=500
+    ie.env.ledger().set_timestamp(500);
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 500_000);
+
+    // Advance past end_time (t=1200)
+    ie.env.ledger().set_timestamp(1200);
+
+    // Stream is still Active (not yet withdrawn post-end)
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // get_claimable returns remaining: flow_rate * (end_time - last_withdraw_time) = 1000 * (1000 - 500)
+    assert_eq!(c.get_claimable(&stream_id), 500_000);
+
+    // Withdraw drains the remaining amount
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 1_000_000);
+
+    // Stream is removed after final withdrawal (non-auto-renew)
+    assert!(c.try_get_stream(&stream_id).is_err());
+
+    // Total conserved
+    assert_eq!(
+        balance(&ie, &ie.sender) + balance(&ie, &ie.recipient),
+        1_000_000
+    );
+}
+
+#[test]
+fn integration_get_claimable_post_end_time_without_prior_withdrawal() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // No withdrawal before end_time
+    ie.env.ledger().set_timestamp(1500);
+
+    // get_claimable caps at full deposit (flow_rate * (end_time - start_time) = 1000 * 1000)
+    assert_eq!(c.get_claimable(&stream_id), 1_000_000);
+
+    // Withdraw full amount
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 1_000_000);
+
+    // Stream removed
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
+#[test]
+fn integration_get_stream_still_active_at_exact_end_time() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // At exactly end_time
+    ie.env.ledger().set_timestamp(1000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(c.get_claimable(&stream_id), 1_000_000);
+
+    // Withdraw at exact end_time removes stream
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 1_000_000);
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
+#[test]
+fn integration_auto_renew_completed_on_insufficient_funds() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    // Auto-renew stream, sender has exactly 1M (no extra for renewal)
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &true,
+        &0u64,
+        &false,
+    );
+
+    // Withdraw at end_time – triggers auto-renew attempt
+    ie.env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 1_000_000);
+
+    // Sender has 0 balance, so auto-renew fails → status becomes Completed
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Completed);
+
+    // get_claimable returns 0 for Completed stream
+    assert_eq!(c.get_claimable(&stream_id), 0);
+}
+
+// ── Issue #257: Fee accumulation and sweep flow ──────────────────────────────
+
+#[test]
+fn integration_fee_accumulation_and_sweep() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    let destination = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    // Deploy treasury contract
+    let treasury_id = ie.env.register(sorostream_treasury::TreasuryContract, ());
+    let treasury_client = sorostream_treasury::TreasuryContractClient::new(&ie.env, &treasury_id);
+    treasury_client.initialize(&admin);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_protocol_fee(&500u32); // 5%
+    c.set_treasury_address(&treasury_id);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // Withdraw at t=300: claimable = 300K, fee = 15K
+    ie.env.ledger().set_timestamp(300);
+    c.withdraw(&stream_id, &ie.recipient);
+    let fee1 = 300_000_i128 * 500 / 10_000; // 15_000
+    assert_eq!(balance(&ie, &ie.recipient), 300_000 - fee1);
+    assert_eq!(treasury_client.get_balance(&ie.token), fee1);
+
+    // Withdraw at t=600: claimable = 300K, fee = 15K
+    ie.env.ledger().set_timestamp(600);
+    c.withdraw(&stream_id, &ie.recipient);
+    let fee2 = 300_000_i128 * 500 / 10_000; // 15_000
+    assert_eq!(balance(&ie, &ie.recipient), (300_000 - fee1) + (300_000 - fee2));
+    assert_eq!(treasury_client.get_balance(&ie.token), fee1 + fee2);
+
+    // Total accumulated fees
+    let total_fee = fee1 + fee2; // 30_000
+    assert_eq!(total_fee, 30_000);
+
+    // Sweep fees to destination
+    c.withdraw_treasury(&ie.token, &total_fee, &destination);
+
+    // Destination received exact amount
+    assert_eq!(balance(&ie, &destination), total_fee);
+
+    // Treasury balance is now 0
+    assert_eq!(treasury_client.get_balance(&ie.token), 0);
+
+    // Stream still active, withdraw remaining at end_time
+    ie.env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id, &ie.recipient);
+
+    // Remaining = 400K (from t=600 to t=1000), fee = 20K
+    let fee3 = 400_000_i128 * 500 / 10_000; // 20_000
+    let expected_recipient_total = (300_000 - fee1) + (300_000 - fee2) + (400_000 - fee3);
+    assert_eq!(balance(&ie, &ie.recipient), expected_recipient_total);
+
+    // Total conserved: recipient + destination + dust remainder = 1M
+    let total_out = expected_recipient_total + total_fee;
+    assert_eq!(total_out, 1_000_000);
+}
