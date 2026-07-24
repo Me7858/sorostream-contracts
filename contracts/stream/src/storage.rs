@@ -110,19 +110,19 @@ pub fn remove_stream(env: &Env, stream_id: u64) {
 
 // --- Counter helpers (persistent, O(1) per write) ---
 
-fn sender_count_key(env: &Env, addr: &Address) -> (Symbol, Address) {
+pub fn sender_count_key(env: &Env, addr: &Address) -> (Symbol, Address) {
     (Symbol::new(env, "sc"), addr.clone())
 }
 
-fn recipient_count_key(env: &Env, addr: &Address) -> (Symbol, Address) {
+pub fn recipient_count_key(env: &Env, addr: &Address) -> (Symbol, Address) {
     (Symbol::new(env, "rc"), addr.clone())
 }
 
-fn sender_slot_key(env: &Env, addr: &Address, idx: u32) -> (Symbol, Address, u32) {
+pub fn sender_slot_key(env: &Env, addr: &Address, idx: u32) -> (Symbol, Address, u32) {
     (Symbol::new(env, "s"), addr.clone(), idx)
 }
 
-fn recipient_slot_key(env: &Env, addr: &Address, idx: u32) -> (Symbol, Address, u32) {
+pub fn recipient_slot_key(env: &Env, addr: &Address, idx: u32) -> (Symbol, Address, u32) {
     (Symbol::new(env, "r"), addr.clone(), idx)
 }
 
@@ -580,6 +580,8 @@ pub fn set_creation_fee_xlm(env: &Env, fee: i128) {
 
 const XLM_TOKEN_KEY: &str = "xlm_tok";
 
+const ACTIVE_STREAM_COUNT_KEY: &str = "act_cnt";
+
 /// Gets the XLM SAC token contract address used for creation fee collection.
 pub fn get_xlm_token(env: &Env) -> Option<Address> {
     env.storage()
@@ -592,6 +594,36 @@ pub fn set_xlm_token(env: &Env, xlm_token: &Address) {
     env.storage()
         .instance()
         .set(&Symbol::new(env, XLM_TOKEN_KEY), xlm_token);
+}
+
+/// Returns the current count of active streams.
+pub fn get_active_stream_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, ACTIVE_STREAM_COUNT_KEY))
+        .unwrap_or(0u32)
+}
+
+/// Increments the active stream count by 1.
+pub fn increment_active_stream_count(env: &Env) {
+    let key = Symbol::new(env, ACTIVE_STREAM_COUNT_KEY);
+    let current: u32 = env.storage().instance().get(&key).unwrap_or(0u32);
+    env.storage().instance().set(&key, &(current + 1));
+}
+
+/// Decrements the active stream count by 1 (saturates at 0).
+pub fn decrement_active_stream_count(env: &Env) {
+    let key = Symbol::new(env, ACTIVE_STREAM_COUNT_KEY);
+    let current: u32 = env.storage().instance().get(&key).unwrap_or(0u32);
+    if current > 0 {
+        env.storage().instance().set(&key, &(current - 1));
+    }
+}
+
+/// Sets the active stream count directly (for recalibration).
+pub fn set_active_stream_count(env: &Env, count: u32) {
+    let key = Symbol::new(env, ACTIVE_STREAM_COUNT_KEY);
+    env.storage().instance().set(&key, &count);
 }
 
 // --- Reentrancy guard ---
