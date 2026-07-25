@@ -41,4 +41,5 @@ pub enum StreamError {
     ReentrancyDetected = 34,
     InvalidMetadataUri = 35,
     StreamNotComplete = 36,
+    TokenNotWhitelisted = 37,
 }

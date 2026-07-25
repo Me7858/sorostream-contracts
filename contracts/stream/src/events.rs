@@ -274,3 +274,11 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
         (fee_amount, treasury.clone()),
     );
 }
+
+/// Emitted when accumulated protocol fees are swept from the contract to a destination.
+pub fn fee_swept(env: &Env, token: &Address, amount: i128, destination: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeSwept"),),
+        (token.clone(), amount, destination.clone()),
+    );
+}
