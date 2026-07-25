@@ -41,4 +41,11 @@ pub enum StreamError {
     ReentrancyDetected = 34,
     InvalidMetadataUri = 35,
     StreamNotComplete = 36,
+    /// One or more tranches have invalid data (e.g. zero amount, unsorted unlock times,
+    /// total tranche amount does not match deposit, or empty tranche list on step-vesting).
+    InvalidTranches = 37,
+    /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
+    PriceDeviationTooHigh = 38,
+    /// Oracle contract call failed or returned an unexpected value.
+    OracleError = 39,
 }

@@ -274,3 +274,61 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
         (fee_amount, treasury.clone()),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Step-vesting tranche events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a step-vesting stream is created with a tranche schedule.
+pub fn tranche_stream_created(env: &Env, stream_id: u64, sender: &Address, tranche_count: u32, total_amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "TrancheStreamCreated"), stream_id),
+        (sender.clone(), tranche_count, total_amount),
+    );
+}
+
+/// Emitted when one or more tranches are claimed during a withdrawal.
+pub fn tranches_withdrawn(
+    env: &Env,
+    stream_id: u64,
+    recipient: &Address,
+    tranches_claimed: u32,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "TranchesWithdrawn"), stream_id),
+        (recipient.clone(), tranches_claimed, amount),
+    );
+}
+
+/// Emitted when a step-vesting stream is cancelled and unclaimed tranches are refunded.
+pub fn tranche_stream_cancelled(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    unclaimed_tranche_refund: i128,
+    recipient_amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "TrancheStreamCancelled"), stream_id),
+        (sender.clone(), unclaimed_tranche_refund, recipient_amount),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Oracle price-check event
+// ---------------------------------------------------------------------------
+
+/// Emitted when an oracle price check passes successfully.
+pub fn price_check_passed(
+    env: &Env,
+    stream_id: u64,
+    token: &Address,
+    price: i128,
+    deviation_bps: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "PriceCheckPassed"), stream_id),
+        (token.clone(), price, deviation_bps),
+    );
+}

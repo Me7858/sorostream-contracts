@@ -1,4 +1,4 @@
-use crate::types::{AuditEntry, Stream};
+use crate::types::{AuditEntry, Stream, VestingTranche};
 use soroban_sdk::{Address, Bytes, Env, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
@@ -701,4 +701,35 @@ pub fn remove_token_fee_tier(env: &Env, token: &Address) {
 /// Gets the effective fee tier for a token (token-specific or global default).
 pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
     get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
+}
+
+// ---------------------------------------------------------------------------
+// Step-vesting tranche helpers
+// ---------------------------------------------------------------------------
+
+/// Storage key for a stream's tranche list: ("vt", stream_id).
+fn tranche_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "vt"), stream_id)
+}
+
+/// Persists the tranche list for a step-vesting stream.
+pub fn save_tranches(env: &Env, stream_id: u64, tranches: &Vec<VestingTranche>) {
+    env.storage()
+        .persistent()
+        .set(&tranche_key(env, stream_id), tranches);
+}
+
+/// Loads the tranche list for a stream. Returns an empty Vec if not found.
+pub fn load_tranches(env: &Env, stream_id: u64) -> Vec<VestingTranche> {
+    env.storage()
+        .persistent()
+        .get(&tranche_key(env, stream_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Removes the tranche list from storage (called on cancel / completion).
+pub fn remove_tranches(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&tranche_key(env, stream_id));
 }
