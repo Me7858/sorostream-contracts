@@ -63,6 +63,8 @@ stellar contract build
 
 For the full instruction reference with parameters, errors, events, and CLI examples, see [docs/contract-reference.md](./docs/contract-reference.md).
 
+For the stream lifecycle state machine diagram and contract system overview, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Testnet Deployment
 
 | Contract | Address |
