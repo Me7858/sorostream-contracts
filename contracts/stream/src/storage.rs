@@ -702,3 +702,31 @@ pub fn remove_token_fee_tier(env: &Env, token: &Address) {
 pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
     get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
 }
+
+// --- Holdback escrow helpers ---
+
+fn holdback_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "hb"), stream_id)
+}
+
+/// Returns the holdback escrow amount for a stream (0 if not set).
+pub fn get_holdback(env: &Env, stream_id: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&holdback_key(env, stream_id))
+        .unwrap_or(0i128)
+}
+
+/// Stores the holdback escrow amount for a stream.
+pub fn set_holdback(env: &Env, stream_id: u64, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&holdback_key(env, stream_id), &amount);
+}
+
+/// Removes the holdback escrow entry (after claim or claw-back).
+pub fn remove_holdback(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&holdback_key(env, stream_id));
+}

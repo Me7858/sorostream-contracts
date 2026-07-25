@@ -41,20 +41,20 @@ use storage::{
     add_fee_exempt, add_to_whitelist, append_audit_entry, check_admin, clear_pending_fee_proposal,
     clear_reentrancy_lock, decrement_active_stream_count, derive_stream_id, effective_sender_limit,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
-    get_global_stream_at, get_global_stream_count, get_ids_by_recipient, get_ids_by_sender,
-    get_pause_expiry, get_protocol_fee, get_sender_stream_count, get_treasury,
+    get_global_stream_at, get_global_stream_count, get_holdback, get_ids_by_recipient,
+    get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_sender_stream_count, get_treasury,
     get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count, increment_batch_nonce,
     index_by_recipient, index_by_sender, index_global_stream, is_fee_exempt,
     is_paused_or_auto_unpause, is_reentrancy_locked, is_whitelist_enabled, is_whitelisted,
     load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations, read_audit_log,
     read_governance, read_guardian, read_min_duration, read_pending_fee_proposal, read_version,
-    record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist, remove_stream,
-    save_stream, sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_max_streams_per_sender, set_pause_expiry, set_paused, set_protocol_fee,
-    set_reentrancy_lock, set_sender_limit, set_treasury, set_whitelist_enabled,
-    set_withdrawal_cooldown, set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender,
-    write_admin, write_governance, write_guardian, write_min_duration, write_pending_fee_proposal,
-    write_version, MAX_PAUSE_DURATION,
+    record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist, remove_holdback,
+    remove_stream, save_stream, sender_count_key, sender_slot_key, set_active_stream_count,
+    set_creation_fee_xlm, set_delegate, set_holdback, set_max_streams_per_sender, set_pause_expiry,
+    set_paused, set_protocol_fee, set_reentrancy_lock, set_sender_limit, set_treasury,
+    set_whitelist_enabled, set_withdrawal_cooldown, set_xlm_token, stream_exists,
+    unindex_by_recipient, unindex_by_sender, write_admin, write_governance, write_guardian,
+    write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
 };
 
 fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamError> {
@@ -350,6 +350,7 @@ impl SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
+        holdback_amount: i128,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -362,16 +363,12 @@ impl SoroStreamContract {
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
+        // holdback must be non-negative and strictly less than total amount (0 = no holdback)
+        if holdback_amount < 0 || holdback_amount >= amount {
+            return Err(StreamError::ZeroAmount);
+        }
         if cliff_seconds > duration_seconds {
             return Err(StreamError::InvalidCliff);
-        }
-        if cliff_seconds > 0 {
-            let ct = now
-                .checked_add(cliff_seconds)
-                .ok_or(StreamError::Overflow)?;
-            if ct <= now {
-                return Err(StreamError::InvalidCliff);
-            }
         }
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
             return Err(StreamError::RecipientNotWhitelisted);
@@ -382,7 +379,11 @@ impl SoroStreamContract {
             return Err(StreamError::StreamDurationTooShort);
         }
 
-        let flow_rate = amount / duration_seconds as i128;
+        // The streaming portion is the total minus the holdback escrow.
+        let streaming_amount = amount
+            .checked_sub(holdback_amount)
+            .ok_or(StreamError::Overflow)?;
+        let flow_rate = streaming_amount / duration_seconds as i128;
         if flow_rate == 0 {
             return Err(StreamError::ZeroFlowRate);
         }
@@ -424,6 +425,7 @@ impl SoroStreamContract {
             events::creation_fee_collected(&env, creation_fee, &treasury);
         }
 
+        // Transfer total amount (streaming + holdback) from sender into contract escrow.
         token::Client::new(&env, &token).transfer(
             &sender,
             &env.current_contract_address(),
@@ -435,7 +437,7 @@ impl SoroStreamContract {
             sender: sender.clone(),
             recipient: recipient.clone(),
             token,
-            deposit: amount,
+            deposit: streaming_amount,
             flow_rate,
             start_time: now,
             cliff_time,
@@ -448,9 +450,17 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: Bytes::new(&env),
+            metadata_uri: None,
+            milestones: Vec::new(&env),
+            holdback_amount,
+            holdback_claimed: false,
         };
 
         save_stream(&env, &stream);
+        // Store holdback separately so it is tracked independently from the stream deposit.
+        if holdback_amount > 0 {
+            set_holdback(&env, stream_id, holdback_amount);
+        }
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
         index_global_stream(&env, stream_id);
@@ -812,10 +822,20 @@ impl SoroStreamContract {
             decrement_active_stream_count(&env);
         }
 
+        // If the holdback has not yet been settled, include it in the sender refund.
+        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
+            get_holdback(&env, stream_id)
+        } else {
+            0
+        };
+
         // EFFECTS: remove stream before any token transfer
         remove_stream(&env, stream_id);
         unindex_by_sender(&env, &stream.sender, stream_id);
         unindex_by_recipient(&env, &stream.recipient, stream_id);
+        if holdback_refund > 0 {
+            remove_holdback(&env, stream_id);
+        }
 
         // INTERACTIONS
         let token_client = token::Client::new(&env, &stream.token);
@@ -826,15 +846,16 @@ impl SoroStreamContract {
                 &recipient_amount,
             );
         }
-        if refund_amount > 0 {
+        let total_refund = refund_amount.saturating_add(holdback_refund);
+        if total_refund > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
                 &stream.sender,
-                &refund_amount,
+                &total_refund,
             );
         }
 
-        events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
+        events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, recipient_amount);
 
         clear_reentrancy_lock(&env);
         Ok(())
@@ -1097,6 +1118,10 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: stream.metadata.clone(),
+            metadata_uri: stream.metadata_uri.clone(),
+            milestones: Vec::new(&env),
+            holdback_amount: 0,
+            holdback_claimed: false,
         };
 
         save_stream(&env, &new_stream);
@@ -1197,6 +1222,98 @@ impl SoroStreamContract {
             return Err(StreamError::NotSender);
         }
         remove_delegate(&env, stream_id);
+        Ok(())
+    }
+
+    /// Releases the holdback escrow amount to the recipient.
+    ///
+    /// Only the stream sender (or their authorised delegate) may call this.
+    /// The holdback must not have already been settled.
+    /// Emits `HoldbackReleased { stream_id, amount, recipient }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotAuthorized` — caller is neither sender nor delegate.
+    /// - `ZeroAmount` — stream has no holdback configured.
+    /// - `StreamNotActive` — holdback already settled.
+    pub fn release_holdback(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
+        caller.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        let is_sender = stream.sender == caller;
+        let is_delegate = get_delegate(&env, stream_id).map_or(false, |d| d == caller);
+        if !is_sender && !is_delegate {
+            return Err(StreamError::NotAuthorized);
+        }
+        if stream.holdback_amount == 0 {
+            return Err(StreamError::ZeroAmount);
+        }
+        if stream.holdback_claimed {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let escrow = get_holdback(&env, stream_id);
+
+        // EFFECTS: mark settled before transfer
+        stream.holdback_claimed = true;
+        save_stream(&env, &stream);
+        remove_holdback(&env, stream_id);
+
+        // INTERACTIONS
+        token::Client::new(&env, &stream.token).transfer(
+            &env.current_contract_address(),
+            &stream.recipient,
+            &escrow,
+        );
+
+        events::holdback_released(&env, stream_id, escrow, &stream.recipient);
+        Ok(())
+    }
+
+    /// Allows the sender to claw back the holdback escrow before the recipient claims it.
+    ///
+    /// Only the stream sender (or their authorised delegate) may call this.
+    /// The holdback must not have already been settled.
+    /// Emits `HoldbackClawedBack { stream_id, amount, sender }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotAuthorized` — caller is neither sender nor delegate.
+    /// - `ZeroAmount` — stream has no holdback configured.
+    /// - `StreamNotActive` — holdback already settled.
+    pub fn claw_back_holdback(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
+        caller.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        let is_sender = stream.sender == caller;
+        let is_delegate = get_delegate(&env, stream_id).map_or(false, |d| d == caller);
+        if !is_sender && !is_delegate {
+            return Err(StreamError::NotAuthorized);
+        }
+        if stream.holdback_amount == 0 {
+            return Err(StreamError::ZeroAmount);
+        }
+        if stream.holdback_claimed {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let escrow = get_holdback(&env, stream_id);
+
+        // EFFECTS: mark settled before transfer
+        stream.holdback_claimed = true;
+        save_stream(&env, &stream);
+        remove_holdback(&env, stream_id);
+
+        // INTERACTIONS
+        token::Client::new(&env, &stream.token).transfer(
+            &env.current_contract_address(),
+            &stream.sender,
+            &escrow,
+        );
+
+        events::holdback_clawed_back(&env, stream_id, escrow, &stream.sender);
         Ok(())
     }
 
@@ -1471,6 +1588,10 @@ impl SoroStreamContract {
                 last_pause_time: 0,
                 total_withdrawn: 0,
                 metadata: Bytes::new(&env),
+                metadata_uri: None,
+                milestones: Vec::new(&env),
+                holdback_amount: 0,
+                holdback_claimed: false,
             };
 
             save_stream(&env, &stream);

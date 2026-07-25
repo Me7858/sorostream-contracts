@@ -74,6 +74,7 @@ fn integration_full_lifecycle() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     assert_eq!(balance(&ie, &ie.sender), 0);
@@ -121,6 +122,7 @@ fn integration_lifecycle_with_cliff() {
         &0u64,
         &false, &0u64,
         &false,
+        &0i128,
     );
 
     // Before cliff: claimable is zero
@@ -165,6 +167,7 @@ fn integration_create_cancel_split() {
         &0u64,
         &false, &0u64,
         &false,
+        &0i128,
     );
 
     ie.env.ledger().set_timestamp(400);
@@ -202,6 +205,7 @@ fn integration_topup_extends_and_pays() {
         &0u64,
         &false, &0u64,
         &false,
+        &0i128,
     );
 
     // Top up at t=200 with 500_000 more
@@ -251,6 +255,7 @@ fn integration_treasury_fees_on_batch_withdraw() {
         &0u64,
         &false, &0u64,
         &false,
+        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -293,6 +298,7 @@ fn integration_zero_fee_no_treasury_deduction() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -368,6 +374,7 @@ fn integration_multi_stream_interleaved() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
     let s2 = c.create_stream(
         &ie.sender,
@@ -380,6 +387,7 @@ fn integration_multi_stream_interleaved() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     // t=500: withdraw from both
@@ -434,6 +442,7 @@ fn integration_partial_cancel_lifecycle() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     // At t=200, partial cancel reclaiming 300_000
@@ -493,6 +502,7 @@ fn integration_auto_renew_with_sac() {
     let stream_id = c.create_stream(
         &sender, &recipient, &token, &1_000_000, &1000, &0, &0u64, &true, &0u64,
         &false,
+        &0i128,
     );
 
     // Complete first cycle
@@ -526,14 +536,17 @@ fn integration_query_streams_by_sender_recipient() {
     let s1 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &0u64, &false, &0u64,
         &false,
+        &0i128,
     );
     let s2 = c.create_stream(
         &ie.sender, &r2, &ie.token, &1_000_000, &1000, &0, &1u64, &false, &0u64,
         &false,
+        &0i128,
     );
     let s3 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &2u64, &false, &0u64,
         &false,
+        &0i128,
     );
 
     // By sender: should find all 3
@@ -571,10 +584,12 @@ fn integration_stats_reflect_lifecycle() {
     c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &0u64, &false, &0u64,
         &false,
+        &0i128,
     );
     c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &2_000_000, &2000, &0, &1u64, &false, &0u64,
         &false,
+        &0i128,
     );
 
     let stats = c.get_stats();
@@ -646,6 +661,7 @@ fn integration_treasury_contract_balance_tracking() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -697,6 +713,7 @@ fn integration_treasury_contract_withdraw() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -735,6 +752,7 @@ fn integration_stream_active_past_end_time() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     // Partial withdraw at t=500
@@ -784,6 +802,7 @@ fn integration_get_claimable_post_end_time_without_prior_withdrawal() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     // No withdrawal before end_time
@@ -818,6 +837,7 @@ fn integration_get_stream_still_active_at_exact_end_time() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     // At exactly end_time
@@ -867,6 +887,7 @@ fn integration_auto_renew_completed_on_insufficient_funds() {
         &true,  // auto_renew enabled
         &0u64,
         &false,
+        &0i128,
     );
 
     // After create_stream, sender balance is 0 (all tokens locked in contract).
@@ -969,6 +990,7 @@ fn integration_auto_renew_fails_with_partial_sender_balance() {
         &true,  // auto_renew enabled
         &0u64,
         &false,
+        &0i128,
     );
 
     // Sender has 100 stroops — present but less than the 1_000_000 needed for renewal.
@@ -1049,6 +1071,7 @@ fn integration_fee_accumulation_and_sweep() {
         &false,
         &0u64,
         &false,
+        &0i128,
     );
 
     // Withdraw at t=300: claimable = 300K, fee = 15K
