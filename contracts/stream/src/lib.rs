@@ -1179,17 +1179,26 @@ impl SoroStreamContract {
     }
 
     /// Delegates management of a stream to another address.
-    pub fn delegate(env: Env, sender: Address, stream_id: u64, operator: Address) -> Result<(), StreamError> {
+    ///
+    /// Only the stream sender may call this. The delegate may subsequently
+    /// act as the sender on `cancel_stream`, `top_up`, and `bump_stream_ttl`.
+    /// Emits `DelegateSet { stream_id, sender, delegate }`.
+    pub fn set_delegate(env: Env, sender: Address, stream_id: u64, delegate: Address) -> Result<(), StreamError> {
         sender.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         if stream.sender != sender {
             return Err(StreamError::NotSender);
         }
-        set_delegate(&env, stream_id, &operator);
+        set_delegate(&env, stream_id, &delegate);
+        events::delegate_set(&env, stream_id, &sender, &delegate);
         Ok(())
     }
 
     /// Revokes management of a stream from the current delegate.
+    ///
+    /// Only the stream sender may call this. After revocation the delegate
+    /// address can no longer act on behalf of the sender.
+    /// Emits `DelegateRevoked { stream_id, sender }`.
     pub fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
         sender.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -1197,7 +1206,13 @@ impl SoroStreamContract {
             return Err(StreamError::NotSender);
         }
         remove_delegate(&env, stream_id);
+        events::delegate_revoked(&env, stream_id, &sender);
         Ok(())
+    }
+
+    /// Returns the current delegate address for a stream, if one has been set.
+    pub fn get_delegate(env: Env, stream_id: u64) -> Option<Address> {
+        storage::get_delegate(&env, stream_id)
     }
 
     /// Returns the full stream struct for a given stream ID.
@@ -2365,6 +2380,18 @@ impl SoroStreamInterface for SoroStreamContract {
 
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         Self::bump_stream_ttl(env, stream_id, caller)
+    }
+
+    fn set_delegate(env: Env, sender: Address, stream_id: u64, delegate: Address) -> Result<(), StreamError> {
+        Self::set_delegate(env, sender, stream_id, delegate)
+    }
+
+    fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
+        Self::revoke_delegate(env, sender, stream_id)
+    }
+
+    fn get_delegate(env: Env, stream_id: u64) -> Option<Address> {
+        Self::get_delegate(env, stream_id)
     }
 }
 

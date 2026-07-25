@@ -778,4 +778,28 @@ pub trait SoroStreamInterface {
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
     /// Only the sender or recipient may call this.
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
+
+    /// Authorises a delegate address to manage a stream on behalf of the sender.
+    ///
+    /// The delegate may cancel, top-up, and bump-TTL the stream. Only the stream
+    /// sender may set a delegate. Emits `DelegateSet { stream_id, sender, delegate }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not the stream sender.
+    fn set_delegate(env: Env, sender: Address, stream_id: u64, delegate: Address) -> Result<(), StreamError>;
+
+    /// Revokes the current delegate for a stream.
+    ///
+    /// Only the stream sender may call this. After revocation the delegate
+    /// address loses all sender-equivalent permissions.
+    /// Emits `DelegateRevoked { stream_id, sender }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not the stream sender.
+    fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
+
+    /// Returns the current delegate address for a stream, if one is set.
+    fn get_delegate(env: Env, stream_id: u64) -> Option<Address>;
 }
