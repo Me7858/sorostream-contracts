@@ -39,4 +39,6 @@ pub enum StreamError {
     InsufficientXlmForFee = 32,
     DuplicateStreamId = 33,
     ReentrancyDetected = 34,
+    InvalidMetadataUri = 35,
+    StreamNotComplete = 36,
 }

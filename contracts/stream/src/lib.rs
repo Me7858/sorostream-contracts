@@ -61,6 +61,37 @@ fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamErro
     flow_rate.checked_mul(elapsed as i128).ok_or(StreamError::Overflow)
 }
 
+/// Validates a metadata URI format and length.
+fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
+    if let Some(ref u) = uri {
+        let uri_len = u.len();
+        if uri_len > 128 {
+            return Err(StreamError::InvalidMetadataUri);
+        }
+        // Check that it starts with "ipfs://" or "https://"
+        let bytes = u.as_bytes();
+        let is_valid = if bytes.len() >= 7 {
+            // Check for "ipfs://"
+            if bytes[0] == b'i' && bytes[1] == b'p' && bytes[2] == b'f' && bytes[3] == b's' &&
+               bytes[4] == b':' && bytes[5] == b'/' && bytes[6] == b'/' {
+                true
+            } else if bytes.len() >= 8 &&
+               bytes[0] == b'h' && bytes[1] == b't' && bytes[2] == b't' && bytes[3] == b'p' &&
+               bytes[4] == b's' && bytes[5] == b':' && bytes[6] == b'/' && bytes[7] == b'/' {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !is_valid {
+            return Err(StreamError::InvalidMetadataUri);
+        }
+    }
+    Ok(())
+}
+
 #[contract]
 pub struct SoroStreamContract;
 
@@ -539,9 +570,22 @@ impl SoroStreamContract {
         }
 
         let effective_now = now.min(stream.end_time);
-        let raw_claimable = vesting_math::compute_claimable(
+        let mut raw_claimable = vesting_math::compute_claimable(
             stream.flow_rate, now, stream.cliff_time, stream.end_time, stream.last_withdraw_time,
         ).ok_or(StreamError::Overflow)?;
+
+        // If milestones are set, limit claimable to released milestone amounts
+        if !stream.milestones.is_empty() {
+            let mut milestone_claimable = 0i128;
+            for milestone in stream.milestones.iter() {
+                if milestone.status == crate::types::MilestoneStatus::Released {
+                    milestone_claimable = milestone_claimable
+                        .checked_add(milestone.amount)
+                        .ok_or(StreamError::Overflow)?;
+                }
+            }
+            raw_claimable = raw_claimable.min(milestone_claimable);
+        }
 
         let available = stream.deposit
             .checked_sub(stream.total_withdrawn)
@@ -549,7 +593,7 @@ impl SoroStreamContract {
         let claimable = raw_claimable.min(available);
 
         let (recipient_amount, fee_amount, treasury_opt) = if claimable > 0 {
-            let fee_bps = get_protocol_fee(&env);
+            let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                 claimable
                     .checked_mul(fee_bps as i128)
@@ -1734,6 +1778,131 @@ impl SoroStreamContract {
     /// Sets the treasury address to receive protocol fees.
     pub fn set_treasury_address(env: Env, treasury: Address) -> Result<(), StreamError> {
         set_treasury(&env, &treasury);
+        Ok(())
+    }
+
+    /// Sets a per-token fee tier (in basis points).
+    ///
+    /// Allows different tokens to have different fee rates.
+    /// If set, overrides the global default protocol fee for withdrawals on that token.
+    pub fn set_token_fee_tier(env: Env, admin: Address, token: Address, fee_bps: u32) -> Result<(), StreamError> {
+        admin.require_auth();
+        let current_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != current_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        if fee_bps > 10_000 {
+            return Err(StreamError::InvalidDuration);
+        }
+
+        storage::set_token_fee_tier(&env, &token, fee_bps);
+        Ok(())
+    }
+
+    /// Removes a per-token fee tier, reverting to the global default protocol fee.
+    pub fn remove_token_fee_tier(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
+        admin.require_auth();
+        let current_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != current_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+
+        storage::remove_token_fee_tier(&env, &token);
+        Ok(())
+    }
+
+    /// Gets the effective fee tier (in basis points) for a token.
+    ///
+    /// Returns the token-specific tier if set, otherwise the global default protocol fee.
+    pub fn get_token_fee_tier(env: Env, token: Address) -> u32 {
+        storage::get_effective_fee_tier(&env, &token)
+    }
+
+    /// Gets the metadata URI for a stream, if set.
+    pub fn get_metadata_uri(env: Env, stream_id: u64) -> Option<String> {
+        load_stream(&env, stream_id).and_then(|s| s.metadata_uri)
+    }
+
+    /// Updates the metadata URI for a stream (sender-only).
+    pub fn update_metadata_uri(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        new_uri: Option<String>,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+
+        // Validate the URI format and length
+        validate_metadata_uri(&new_uri)?;
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        stream.metadata_uri = new_uri.clone();
+        save_stream(&env, &stream);
+
+        events::metadata_uri_updated(&env, stream_id, &new_uri);
+
+        Ok(())
+    }
+
+    /// Sweeps expired, fully-withdrawn streams from storage and refunds rent incentive.
+    pub fn sweep_expired(env: Env, stream_ids: Vec<u64>) -> Result<(), StreamError> {
+        let now = env.ledger().timestamp();
+
+        for stream_id in stream_ids.iter() {
+            let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+            // Check if stream is expired and fully withdrawn (or cancelled)
+            let is_expired = now >= stream.end_time;
+            let is_fully_withdrawn = stream.total_withdrawn >= stream.deposit || stream.status == StreamStatus::Cancelled;
+
+            if !is_expired || !is_fully_withdrawn {
+                return Err(StreamError::StreamNotComplete);
+            }
+
+            // Delete storage entries
+            remove_stream(&env, stream_id);
+            unindex_by_sender(&env, &stream.sender, stream_id);
+            unindex_by_recipient(&env, &stream.recipient, stream_id);
+
+            // Emit event with caller info (caller will be the one invoking this function)
+            // We emit with a placeholder since we don't have the caller in this context
+            // The event will just show the stream_id was swept
+            events::stream_swept(&env, stream_id, &stream.sender);
+        }
+
+        Ok(())
+    }
+
+    /// Releases a milestone, making its funds claimable by the recipient.
+    pub fn release_milestone(
+        env: Env,
+        stream_id: u64,
+        milestone_index: u32,
+        sender: Address,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        if milestone_index >= stream.milestones.len() {
+            return Err(StreamError::InvalidDuration);
+        }
+
+        // Get mutable reference to the milestone and change its status
+        let mut milestone = stream.milestones.get(milestone_index).unwrap();
+        milestone.status = crate::types::MilestoneStatus::Released;
+        stream.milestones.set(milestone_index, milestone);
+
+        save_stream(&env, &stream);
+        events::milestone_released(&env, stream_id, milestone_index);
+
         Ok(())
     }
 

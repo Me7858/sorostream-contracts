@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, String};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
 /// Status of a payment stream.
 #[contracttype]
@@ -12,6 +12,30 @@ pub enum StreamStatus {
     Completed,
     /// Stream is temporarily paused.
     Paused,
+}
+
+/// Status of a milestone.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MilestoneStatus {
+    /// Milestone is pending (not yet released by sender).
+    Pending,
+    /// Milestone has been released and is claimable.
+    Released,
+    /// Milestone was forfeited (cancelled before release).
+    Forfeited,
+}
+
+/// Represents a single milestone in a gated stream.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Milestone {
+    /// Amount of tokens for this milestone (in stroops).
+    pub amount: i128,
+    /// Hash of the milestone description (for reference).
+    pub description_hash: BytesN<32>,
+    /// Current status of the milestone.
+    pub status: MilestoneStatus,
 }
 
 /// Represents a single payment stream.
@@ -52,6 +76,10 @@ pub struct Stream {
     pub total_withdrawn: i128,
     /// Optional metadata blob associated with the stream.
     pub metadata: Bytes,
+    /// Optional URI pointing to off-chain metadata (IPFS or HTTPS, max 128 bytes).
+    pub metadata_uri: Option<String>,
+    /// Optional milestones for gated release (empty if not milestone-gated).
+    pub milestones: Vec<Milestone>,
 }
 
 /// Aggregate contract statistics.

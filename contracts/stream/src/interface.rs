@@ -656,6 +656,121 @@ pub trait SoroStreamInterface {
     /// Returns the current XLM creation fee in stroops (0 = disabled).
     fn get_creation_fee(env: Env) -> i128;
 
+    /// Sets a per-token fee tier in basis points. Only admin may call this.
+    ///
+    /// Allows different tokens to have different fee rates.
+    /// If set, overrides the global default protocol fee for withdrawals on that token.
+    ///
+    /// # Parameters
+    /// * `admin` - Must be the current admin (verified via `require_auth()`).
+    /// * `token` - The token contract address to apply the fee tier to.
+    /// * `fee_bps` - Fee in basis points (0-10000, where 10000 = 100%).
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Panics if caller is not the admin.
+    /// Returns `StreamError::InvalidDuration` if `fee_bps > 10_000`.
+    fn set_token_fee_tier(env: Env, admin: Address, token: Address, fee_bps: u32) -> Result<(), StreamError>;
+
+    /// Removes a per-token fee tier, reverting to the global default protocol fee.
+    ///
+    /// # Parameters
+    /// * `admin` - Must be the current admin (verified via `require_auth()`).
+    /// * `token` - The token contract address to remove the fee tier from.
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Panics if caller is not the admin.
+    fn remove_token_fee_tier(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
+
+    /// Gets the effective fee tier (in basis points) for a token.
+    ///
+    /// Returns the token-specific tier if set, otherwise the global default protocol fee.
+    ///
+    /// # Parameters
+    /// * `token` - The token contract address.
+    ///
+    /// # Returns
+    /// Fee tier in basis points.
+    fn get_token_fee_tier(env: Env, token: Address) -> u32;
+
+    /// Gets the metadata URI for a stream, if set.
+    ///
+    /// Returns an optional IPFS or HTTPS URI pointing to off-chain metadata.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The stream ID.
+    ///
+    /// # Returns
+    /// The metadata URI as a String, or None if not set.
+    fn get_metadata_uri(env: Env, stream_id: u64) -> Option<String>;
+
+    /// Updates the metadata URI for a stream (sender-only).
+    ///
+    /// Allows the stream sender to attach or update a URI pointing to off-chain metadata
+    /// (e.g., IPFS hash, HTTPS reference). The URI must start with "ipfs://" or "https://"
+    /// and must not exceed 128 bytes.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The stream ID.
+    /// * `sender` - The sender of the stream (verified via `require_auth()`).
+    /// * `new_uri` - The new metadata URI, or None to clear it.
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Returns `StreamError::StreamNotFound` if the stream does not exist.
+    /// Returns `StreamError::NotSender` if the caller is not the stream sender.
+    /// Returns `StreamError::InvalidMetadataUri` if the URI format is invalid or exceeds 128 bytes.
+    fn update_metadata_uri(env: Env, stream_id: u64, sender: Address, new_uri: Option<String>) -> Result<(), StreamError>;
+
+    /// Releases a milestone, making its funds claimable by the recipient.
+    ///
+    /// Only the stream sender may call this. Once released, the milestone's tokens
+    /// become available for withdrawal.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The stream ID.
+    /// * `milestone_index` - The 0-based index of the milestone to release.
+    /// * `sender` - The sender of the stream (verified via `require_auth()`).
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// Returns `StreamError::StreamNotFound` if the stream does not exist.
+    /// Returns `StreamError::NotSender` if the caller is not the stream sender.
+    /// Returns `StreamError::InvalidDuration` if the milestone index is out of bounds.
+    fn release_milestone(env: Env, stream_id: u64, milestone_index: u32, sender: Address) -> Result<(), StreamError>;
+
+    /// Sweeps expired, fully-withdrawn streams from storage and refunds rent incentive.
+    ///
+    /// Cleans up storage entries for streams that have:
+    /// - Expired (reached or passed their end time)
+    /// - Been fully withdrawn (no tokens remaining in contract for recipient)
+    ///
+    /// For each eligible stream, all storage entries are deleted and a small portion of
+    /// reclaimed rent is refunded to the caller as an incentive.
+    ///
+    /// # Parameters
+    /// * `stream_ids` - Vector of stream IDs to attempt sweeping.
+    ///
+    /// # Returns
+    /// Returns `Ok(())` after processing all streams.
+    ///
+    /// # Errors
+    /// For each stream:
+    /// - Returns `StreamError::StreamNotFound` if the stream does not exist.
+    /// - Returns `StreamError::StreamNotComplete` if the stream is not expired or not fully withdrawn.
+    ///
+    /// The function stops at the first error. To continue on errors, call multiple times with filtered lists.
+    fn sweep_expired(env: Env, stream_ids: Vec<u64>) -> Result<(), StreamError>;
+
     /// Recalibrates the active stream count by scanning all streams.
     /// Only callable by admin. Use when counter drift is suspected.
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;

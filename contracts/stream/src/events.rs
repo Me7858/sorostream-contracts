@@ -221,6 +221,35 @@ pub fn metadata_updated(env: &Env, stream_id: u64, metadata: &Bytes) {
     );
 }
 
+/// Emitted when a stream's metadata URI is updated.
+pub fn metadata_uri_updated(env: &Env, stream_id: u64, metadata_uri: &Option<String>) {
+    let uri_str = if let Some(uri) = metadata_uri {
+        uri.clone()
+    } else {
+        String::from_slice(env, "")
+    };
+    env.events().publish(
+        (Symbol::new(env, "MetadataUriUpdated"), stream_id),
+        uri_str,
+    );
+}
+
+/// Emitted when an expired stream is swept from storage.
+pub fn stream_swept(env: &Env, stream_id: u64, caller: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamSwept"), stream_id),
+        caller.clone(),
+    );
+}
+
+/// Emitted when a milestone is released by the sender.
+pub fn milestone_released(env: &Env, stream_id: u64, milestone_index: u32) {
+    env.events().publish(
+        (Symbol::new(env, "MilestoneReleased"), stream_id),
+        milestone_index,
+    );
+}
+
 /// Emitted when an auto-renewal is cancelled for a stream.
 pub fn auto_renew_cancelled(env: &Env, stream_id: u64) {
     env.events().publish(
