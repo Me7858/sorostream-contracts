@@ -670,3 +670,35 @@ pub fn record_migration(env: &Env, version: &soroban_sdk::String) {
     applied.push_back(version.clone());
     env.storage().instance().set(&Symbol::new(env, APPLIED_MIGRATIONS_KEY), &applied);
 }
+
+// --- Token fee tier helpers ---
+
+fn token_fee_tier_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "tft"), token.clone())
+}
+
+/// Gets the fee tier (in basis points) for a specific token, if set.
+pub fn get_token_fee_tier(env: &Env, token: &Address) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&token_fee_tier_key(env, token))
+}
+
+/// Sets the fee tier (in basis points) for a specific token.
+pub fn set_token_fee_tier(env: &Env, token: &Address, fee_bps: u32) {
+    env.storage()
+        .persistent()
+        .set(&token_fee_tier_key(env, token), &fee_bps);
+}
+
+/// Removes the fee tier for a specific token (falls back to global default).
+pub fn remove_token_fee_tier(env: &Env, token: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&token_fee_tier_key(env, token));
+}
+
+/// Gets the effective fee tier for a token (token-specific or global default).
+pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
+    get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
+}

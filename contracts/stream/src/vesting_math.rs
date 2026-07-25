@@ -1,6 +1,18 @@
 //! Pure vesting arithmetic functions extracted for formal verification.
 //! These functions have zero Soroban dependencies and operate on primitive types only.
 
+/// Computes the claimable amount from milestones (all released milestones sum).
+/// Returns the total amount from milestones marked as released.
+pub fn compute_claimable_from_milestones(milestones: &[(i128, bool)]) -> i128 {
+    let mut total = 0i128;
+    for (amount, is_released) in milestones {
+        if *is_released {
+            total = total.saturating_add(*amount);
+        }
+    }
+    total
+}
+
 /// Computes the claimable amount with cliff enforcement (for withdrawals).
 /// Returns `None` if the arithmetic overflows `i128`.
 pub fn compute_claimable(
