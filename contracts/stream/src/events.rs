@@ -274,3 +274,11 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
         (fee_amount, treasury.clone()),
     );
 }
+
+/// Emitted when a stream's TTL is bumped to extend its ledger lifetime.
+pub fn ttl_bumped(env: &Env, stream_id: u64, new_expiry_ledger: u32) {
+    env.events().publish(
+        (Symbol::new(env, "TtlBumped"), stream_id),
+        new_expiry_ledger,
+    );
+}

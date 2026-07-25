@@ -2396,10 +2396,11 @@ fn test_recalibrate_stats_rejects_non_admin() {
     assert!(result.is_err());
 }
 
-// ── bump_stream_ttl tests (issue #250) ────────────────────────────────────────
+// ── bump_stream_ttl tests (issue #225) ────────────────────────────────────────
 
 /// bump_stream_ttl extends the storage TTL so the stream entry remains accessible
-/// after its original TTL would have expired.
+/// after its original TTL would have expired. Any caller — not just participants —
+/// may invoke this instruction.
 #[test]
 fn test_bump_stream_ttl_extends_accessibility() {
     let t = setup();
@@ -2408,35 +2409,34 @@ fn test_bump_stream_ttl_extends_accessibility() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
 
     // Set ledger sequence near where the default TTL might expire.
-    // Soroban default persistent TTL is ~100,000 ledgers.
     t.env.ledger().set_sequence_number(99_990);
 
-    // Bump the TTL to cover the remaining stream duration
-    c.bump_stream_ttl(&stream_id, &t.sender);
+    // Bump the TTL — no auth required, any caller works.
+    c.bump_stream_ttl(&stream_id);
 
-    // Advance ledger well beyond original TTL
+    // Advance ledger well beyond original TTL.
     t.env.ledger().set_sequence_number(200_000);
 
-    // Stream should still be accessible
+    // Stream should still be accessible.
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.id, stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
 }
 
-/// bump_stream_ttl rejects non-participants.
+/// bump_stream_ttl can be called by a third party (non-participant).
 #[test]
-fn test_bump_stream_ttl_rejects_non_participant() {
+fn test_bump_stream_ttl_any_caller_can_call() {
     let t = setup();
     let c = client(&t);
 
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
-    let other = Address::generate(&t.env);
-
-    let result = c.try_bump_stream_ttl(&stream_id, &other);
-    assert_eq!(result, Err(Ok(StreamError::NotAuthorized)));
+    // A completely unrelated address can bump TTL — no error expected.
+    c.bump_stream_ttl(&stream_id);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
 }
 
-/// bump_stream_ttl rejects cancelled streams.
+/// bump_stream_ttl rejects cancelled / non-active streams.
 #[test]
 fn test_bump_stream_ttl_rejects_cancelled() {
     let t = setup();
@@ -2446,22 +2446,37 @@ fn test_bump_stream_ttl_rejects_cancelled() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
     c.cancel_stream(&stream_id, &t.sender);
 
-    let result = c.try_bump_stream_ttl(&stream_id, &t.sender);
+    // After cancellation the stream is removed from storage → StreamNotFound.
+    let result = c.try_bump_stream_ttl(&stream_id);
     assert_eq!(result, Err(Ok(StreamError::StreamNotFound)));
 }
 
-/// bump_stream_ttl can be called by the recipient.
+/// bump_stream_ttl works on paused streams as well.
 #[test]
-fn test_bump_stream_ttl_recipient_can_call() {
+fn test_bump_stream_ttl_works_on_paused_stream() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    c.pause_stream(&stream_id, &t.sender);
 
-    t.env.ledger().set_sequence_number(99_990);
-    c.bump_stream_ttl(&stream_id, &t.recipient);
+    // Should succeed — paused streams still need their TTL extended.
+    let result = c.try_bump_stream_ttl(&stream_id);
+    assert!(result.is_ok());
+}
 
-    t.env.ledger().set_sequence_number(200_000);
-    let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Active);
+/// bump_stream_ttl uses a 24-hour buffer so that streams near their end still get bumped.
+#[test]
+fn test_bump_stream_ttl_buffer_applied_for_nearly_expired_stream() {
+    let t = setup();
+    let c = client(&t);
+    // Stream ends in 10 seconds.
+    t.env.ledger().set_timestamp(0);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &10, &0, &0u64, &false, &0u64, &false);
+
+    t.env.ledger().set_timestamp(5); // 5 s before end_time
+    // Should not panic — safety buffer covers the tiny remaining duration.
+    let result = c.try_bump_stream_ttl(&stream_id);
+    assert!(result.is_ok());
 }

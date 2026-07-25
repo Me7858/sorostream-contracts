@@ -1908,59 +1908,70 @@ impl SoroStreamContract {
 
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
     ///
-    /// Bumps the TTL to cover the remaining stream duration plus a safety margin.
-    /// Only the sender or recipient may call this.
-    pub fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
-        caller.require_auth();
+    /// Callable by anyone — no auth required. Bumps the TTL to cover the remaining
+    /// stream duration plus a 24-hour safety buffer (~17280 ledgers). No-op when
+    /// the current TTL is already sufficient (extend_ttl is a no-op if new TTL <=
+    /// current TTL internally).
+    ///
+    /// Emits `TtlBumped { stream_id, new_expiry_ledger }`.
+    pub fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
-        let stream = load_stream(&env, &stream_id).ok_or(StreamError::StreamNotFound)?;
-        if stream.sender != caller && stream.recipient != caller {
-            return Err(StreamError::NotAuthorized);
-        }
-        if stream.status != StreamStatus::Active {
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
         }
 
         let now = env.ledger().timestamp();
         let remaining = stream.end_time.saturating_sub(now);
-        // Average ledger close time on Soroban mainnet is ~5 seconds.
-        // Add 1 extra ledger as safety margin.
-        let ledgers_needed = ((remaining / 5) as u32).saturating_add(1);
 
-        // Bump the stream entry
-        env.storage().persistent().bump(&stream_id, 0, ledgers_needed);
+        // ~5 s per ledger on mainnet; add 17280 ledgers (~24 h) safety buffer.
+        const SAFETY_BUFFER_LEDGERS: u32 = 17_280;
+        let ledgers_for_remaining = (remaining / 5) as u32;
+        let ledgers_needed = ledgers_for_remaining.saturating_add(SAFETY_BUFFER_LEDGERS);
 
-        // Bump the sender index slot
-        let sender_slot = storage::sender_slot_key(&env, &stream.sender, u32::MAX);
-        // Find the correct index by iterating
-        let cnt: u32 = env.storage().persistent().get(
-            &storage::sender_count_key(&env, &stream.sender)
-        ).unwrap_or(0u32);
-        for i in 0..cnt {
+        // extend_ttl only extends if ledgers_needed > current TTL.
+        env.storage()
+            .persistent()
+            .extend_ttl(&stream_id, ledgers_needed, ledgers_needed);
+
+        // Bump the sender index slot that references this stream.
+        let scnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&storage::sender_count_key(&env, &stream.sender))
+            .unwrap_or(0u32);
+        for i in 0..scnt {
             let slot = storage::sender_slot_key(&env, &stream.sender, i);
             if let Some(id) = env.storage().persistent().get::<_, u64>(&slot) {
                 if id == stream_id {
-                    env.storage().persistent().bump(&slot, 0, ledgers_needed);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot, ledgers_needed, ledgers_needed);
                     break;
                 }
             }
         }
 
-        // Bump the recipient index slot
-        let rcnt: u32 = env.storage().persistent().get(
-            &storage::recipient_count_key(&env, &stream.recipient)
-        ).unwrap_or(0u32);
+        // Bump the recipient index slot that references this stream.
+        let rcnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&storage::recipient_count_key(&env, &stream.recipient))
+            .unwrap_or(0u32);
         for i in 0..rcnt {
             let slot = storage::recipient_slot_key(&env, &stream.recipient, i);
             if let Some(id) = env.storage().persistent().get::<_, u64>(&slot) {
                 if id == stream_id {
-                    env.storage().persistent().bump(&slot, 0, ledgers_needed);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot, ledgers_needed, ledgers_needed);
                     break;
                 }
             }
         }
 
-        events::stream_topped_up(&env, stream_id, 0, stream.end_time);
+        let new_expiry_ledger = env.ledger().sequence().saturating_add(ledgers_needed);
+        events::ttl_bumped(&env, stream_id, new_expiry_ledger);
 
         Ok(())
     }
@@ -2363,8 +2374,8 @@ impl SoroStreamInterface for SoroStreamContract {
         Self::recalibrate_stats(env, admin)
     }
 
-    fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
-        Self::bump_stream_ttl(env, stream_id, caller)
+    fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        Self::bump_stream_ttl(env, stream_id)
     }
 }
 
