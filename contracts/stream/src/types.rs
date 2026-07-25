@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, BytesN};
 
 /// Status of a payment stream.
 #[contracttype]
@@ -38,4 +38,26 @@ pub struct Stream {
     pub status: StreamStatus,
     /// Whether the stream auto-renews on completion.
     pub auto_renew: bool,
+    /// Optimistic concurrency version counter. Starts at 1, increments on every write.
+    /// Used to prevent lost-update races (issue #236).
+    pub version: u32,
+}
+
+/// SEP-0010 authentication payload for classic Stellar account streaming (issue #235).
+///
+/// Classic Stellar keypair accounts cannot call Soroban contracts directly. Instead
+/// they sign a challenge payload off-chain (per SEP-0010) and submit this struct
+/// as proof of account ownership. The contract verifies the Ed25519 signature,
+/// checks the nonce for replay protection, and validates the expiration timestamp.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StellarAuth {
+    /// The classic Stellar account public key (G… address on Stellar network).
+    pub account: Address,
+    /// Unique nonce to prevent replay attacks. Must not have been used before.
+    pub nonce: BytesN<32>,
+    /// Unix timestamp (seconds) after which this auth payload is considered expired.
+    pub expires_at: u64,
+    /// Ed25519 signature over `sha256(account || nonce || expires_at)`.
+    pub signature: BytesN<64>,
 }

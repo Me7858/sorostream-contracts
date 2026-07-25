@@ -16,6 +16,22 @@ pub fn stream_created(
     );
 }
 
+/// Emitted when a new stream is created via SEP-0010 classic account auth (issue #235).
+pub fn stream_classic_created(
+    env: &Env,
+    stream_id: u64,
+    classic_account: &Address,
+    recipient: &Address,
+    amount: i128,
+    flow_rate: i128,
+    end_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamClassicCreated"), stream_id),
+        (classic_account.clone(), recipient.clone(), amount, flow_rate, end_time),
+    );
+}
+
 /// Emitted when a recipient withdraws claimable tokens.
 pub fn stream_withdrawn(env: &Env, stream_id: u64, recipient: &Address, amount: i128, timestamp: u64) {
     env.events().publish(

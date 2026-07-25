@@ -19,4 +19,15 @@ pub enum StreamError {
     InvalidDuration = 6,
     /// Contract has insufficient token balance.
     InsufficientBalance = 7,
+    /// Optimistic concurrency version mismatch (issue #236).
+    /// The caller provided an expected_version that does not match the stored version.
+    VersionConflict = 8,
+    /// SEP-0010 auth token has expired (issue #235).
+    AuthTokenExpired = 9,
+    /// SEP-0010 auth nonce has already been used — replay attack rejected (issue #235).
+    AuthNonceReplayed = 10,
+    /// SEP-0010 Ed25519 signature is invalid (issue #235).
+    AuthInvalidSignature = 11,
+    /// Factory: caller is not the admin (issue #237).
+    Unauthorized = 12,
 }
