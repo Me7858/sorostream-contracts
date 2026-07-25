@@ -832,14 +832,30 @@ fn integration_get_stream_still_active_at_exact_end_time() {
     assert!(c.try_get_stream(&stream_id).is_err());
 }
 
+// ── Issue #255: Auto-renewal fails on insufficient sender balance ─────────────
+//
+// When a stream with `auto_renew = true` completes and the sender does not have
+// enough tokens to fund another cycle, the contract must:
+//   1. Complete the stream (status → Completed) rather than restarting it.
+//   2. Pay out the full earned amount to the recipient.
+//   3. Return any dust to the sender.
+//   4. Emit `AutoRenewFailed { stream_id, sender, required }` so off-chain
+//      monitors can alert the sender that renewal was skipped.
+//
+// This test is the integration-level proof for the above invariants (issue #255).
+// The unit-level event structure snapshot lives in test.rs::snapshot_event_auto_renew_failed.
+
 #[test]
 fn integration_auto_renew_completed_on_insufficient_funds() {
+    use soroban_sdk::{IntoVal, Val, Symbol};
+
     let ie = setup_integration();
     let c = client(&ie);
     ie.env.ledger().set_timestamp(0);
     mint(&ie, &ie.sender, &1_000_000);
 
-    // Auto-renew stream, sender has exactly 1M (no extra for renewal)
+    // Sender has exactly 1_000_000 stroops — enough for the stream deposit but
+    // nothing left over when auto-renew tries to re-lock the same amount.
     let stream_id = c.create_stream(
         &ie.sender,
         &ie.recipient,
@@ -848,22 +864,157 @@ fn integration_auto_renew_completed_on_insufficient_funds() {
         &1000,
         &0,
         &0u64,
-        &true,
+        &true,  // auto_renew enabled
         &0u64,
         &false,
     );
 
-    // Withdraw at end_time – triggers auto-renew attempt
+    // After create_stream, sender balance is 0 (all tokens locked in contract).
+    assert_eq!(balance(&ie, &ie.sender), 0);
+    assert_eq!(balance(&ie, &ie.contract), 1_000_000);
+
+    // ── Behaviour assertion 1: recipient receives full earned amount ──────────
+    ie.env.ledger().set_timestamp(1000); // stream end_time reached
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 1_000_000,
+        "recipient should receive the full stream deposit");
+    assert_eq!(balance(&ie, &ie.sender), 0,
+        "sender should receive nothing (no dust when amount is divisible by duration)");
+    assert_eq!(balance(&ie, &ie.contract), 0,
+        "contract should hold nothing after settlement");
+
+    // ── Behaviour assertion 2: stream status becomes Completed (not renewed) ──
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Completed,
+        "stream status must be Completed when auto-renew fails due to insufficient balance");
+
+    // ── Behaviour assertion 3: no further tokens are claimable ───────────────
+    assert_eq!(c.get_claimable(&stream_id), 0,
+        "get_claimable must return 0 for a Completed stream");
+
+    // ── Behaviour assertion 4: AutoRenewFailed event was emitted ─────────────
+    //
+    // Expected event shape:
+    //   topics: (Symbol("AutoRenewFailed"), stream_id: u64)
+    //   data:   (sender: Address, required: i128)
+    //
+    // where `required` is the amount needed for one renewal cycle (== deposit).
+    let all_events = ie.env.events().all();
+    let renewal_failed_events: std::vec::Vec<_> = all_events
+        .iter()
+        .filter(|(_, topics, _)| {
+            let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
+            if topic_vec.is_empty() {
+                return false;
+            }
+            let name: Symbol = topic_vec.get(0).unwrap().into_val(&ie.env);
+            name == Symbol::new(&ie.env, "AutoRenewFailed")
+        })
+        .collect();
+
+    assert_eq!(
+        renewal_failed_events.len(),
+        1,
+        "exactly one AutoRenewFailed event must be emitted when auto-renewal fails"
+    );
+
+    let (emitter, topics, data) = &renewal_failed_events[0];
+
+    // Emitter must be the stream contract itself.
+    assert_eq!(*emitter, ie.contract,
+        "AutoRenewFailed must be emitted by the stream contract");
+
+    // Topic[1] must be the stream_id.
+    let topics_vec: soroban_sdk::Vec<Val> = topics.clone();
+    assert_eq!(topics_vec.len(), 2,
+        "AutoRenewFailed topics must contain exactly (name, stream_id)");
+    let event_stream_id: u64 = topics_vec.get(1).unwrap().into_val(&ie.env);
+    assert_eq!(event_stream_id, stream_id,
+        "AutoRenewFailed stream_id in topics must match the stream");
+
+    // Data must be (sender: Address, required: i128).
+    let event_data: (Address, i128) = data.clone().into_val(&ie.env);
+    assert_eq!(event_data.0, ie.sender,
+        "AutoRenewFailed data[0] must be the sender address");
+    assert_eq!(event_data.1, 1_000_000i128,
+        "AutoRenewFailed data[1] (required) must equal the stream deposit");
+}
+
+/// Partial-balance variant: sender has some tokens but not enough for a full renewal cycle.
+///
+/// This tests the deficit case: sender retains tokens from other activity but falls
+/// short of the renewal deposit. The event's `required` field must still reflect
+/// the full deposit amount (not the shortfall), because that is what renewal needs.
+#[test]
+fn integration_auto_renew_fails_with_partial_sender_balance() {
+    use soroban_sdk::{IntoVal, Val, Symbol};
+
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+
+    // Mint enough for the deposit plus a small leftover (not enough to renew).
+    let deposit: i128 = 1_000_000;
+    let leftover: i128 = 100; // sender will have 100 stroops after stream creation
+    mint(&ie, &ie.sender, &(deposit + leftover));
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &deposit,
+        &1000,
+        &0,
+        &0u64,
+        &true,  // auto_renew enabled
+        &0u64,
+        &false,
+    );
+
+    // Sender has 100 stroops — present but less than the 1_000_000 needed for renewal.
+    assert_eq!(balance(&ie, &ie.sender), leftover);
+
+    // Trigger the auto-renew attempt at stream end.
     ie.env.ledger().set_timestamp(1000);
     c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 1_000_000);
 
-    // Sender has 0 balance, so auto-renew fails → status becomes Completed
+    // Recipient still receives the full earned amount.
+    assert_eq!(balance(&ie, &ie.recipient), deposit);
+
+    // Stream is Completed, not renewed.
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Completed);
 
-    // get_claimable returns 0 for Completed stream
-    assert_eq!(c.get_claimable(&stream_id), 0);
+    // AutoRenewFailed event must be emitted with the correct required amount.
+    let all_events = ie.env.events().all();
+    let renewal_failed_events: std::vec::Vec<_> = all_events
+        .iter()
+        .filter(|(_, topics, _)| {
+            let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
+            if topic_vec.is_empty() {
+                return false;
+            }
+            let name: Symbol = topic_vec.get(0).unwrap().into_val(&ie.env);
+            name == Symbol::new(&ie.env, "AutoRenewFailed")
+        })
+        .collect();
+
+    assert_eq!(
+        renewal_failed_events.len(),
+        1,
+        "exactly one AutoRenewFailed event must be emitted"
+    );
+
+    let (_, topics, data) = &renewal_failed_events[0];
+    let topics_vec: soroban_sdk::Vec<Val> = topics.clone();
+    let event_stream_id: u64 = topics_vec.get(1).unwrap().into_val(&ie.env);
+    assert_eq!(event_stream_id, stream_id);
+
+    let event_data: (Address, i128) = data.clone().into_val(&ie.env);
+    assert_eq!(event_data.0, ie.sender,
+        "data[0] must be the sender who failed to fund the renewal");
+    assert_eq!(event_data.1, deposit,
+        "data[1] (required) must be the full deposit, not just the shortfall");
 }
 
 // ── Issue #257: Fee accumulation and sweep flow ──────────────────────────────
