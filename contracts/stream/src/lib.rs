@@ -1201,8 +1201,47 @@ impl SoroStreamContract {
     }
 
     /// Returns the full stream struct for a given stream ID.
+    ///
+    /// If the stream's `end_time` has passed and the stream was not explicitly
+    /// cancelled, the returned `status` is `StreamStatus::Expired` — even if the
+    /// persisted value is still `Active` or `Completed`. This makes it unnecessary
+    /// for clients to compare timestamps themselves.
     pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
-        load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        // Surface Expired status to callers without requiring an explicit mark_expired call.
+        if stream.status == StreamStatus::Active || stream.status == StreamStatus::Completed {
+            let now = env.ledger().timestamp();
+            if now >= stream.end_time {
+                stream.status = StreamStatus::Expired;
+            }
+        }
+        Ok(stream)
+    }
+
+    /// Explicitly marks an elapsed stream as Expired, compacting its storage entry.
+    ///
+    /// Callable by anyone. The stream must be Active (or Completed) and its
+    /// `end_time` must have passed. Cancelled streams are never transitioned to
+    /// Expired. Emits `StreamExpired { stream_id }`.
+    pub fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        // Only Active or Completed streams can be marked Expired.
+        if stream.status == StreamStatus::Cancelled || stream.status == StreamStatus::Expired {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < stream.end_time {
+            return Err(StreamError::StreamNotComplete);
+        }
+
+        // Transition to Expired and persist the compacted state.
+        stream.status = StreamStatus::Expired;
+        save_stream(&env, &stream);
+
+        events::stream_expired(&env, stream_id);
+        Ok(())
     }
 
     /// Returns a paginated list of all stream IDs that have ever been created.
@@ -2361,6 +2400,10 @@ impl SoroStreamInterface for SoroStreamContract {
 
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError> {
         Self::recalibrate_stats(env, admin)
+    }
+
+    fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        Self::mark_expired(env, stream_id)
     }
 
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
