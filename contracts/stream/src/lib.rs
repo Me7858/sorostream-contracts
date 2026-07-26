@@ -50,7 +50,7 @@ use storage::{
     index_global_stream, is_fee_exempt, is_paused_or_auto_unpause, is_rate_limit_exempt,
     is_reentrancy_locked, is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled,
     is_whitelisted, load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations,
-    read_audit_log, read_governance, read_guardian, read_min_duration, read_pending_fee_proposal,
+    read_audit_log, read_governance, read_guardian, read_max_duration, read_min_duration, read_pending_fee_proposal,
     read_version, record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist,
     remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist, save_stream,
     sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
@@ -59,7 +59,7 @@ use storage::{
     set_reentrancy_lock, set_sender_limit, set_slippage_params, set_token_whitelist_enabled,
     set_treasury, set_whitelist_enabled, set_withdrawal_cooldown, set_xlm_token, stream_exists,
     unindex_by_recipient, unindex_by_sender, write_admin, write_governance, write_guardian,
-    write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
+    write_max_duration, write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
 };
 
 fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamError> {
@@ -428,6 +428,11 @@ impl SoroStreamContract {
             return Err(StreamError::StreamDurationTooShort);
         }
 
+        let max_dur = read_max_duration(&env);
+        if max_dur > 0 && duration_seconds > max_dur {
+            return Err(StreamError::DurationExceedsMax);
+        }
+
         let flow_rate = amount / duration_seconds as i128;
         if flow_rate == 0 {
             return Err(StreamError::ZeroFlowRate);
@@ -523,6 +528,17 @@ impl SoroStreamContract {
     pub fn set_min_duration(env: Env, admin: Address, seconds: u64) {
         admin.require_auth();
         write_min_duration(&env, seconds);
+    }
+
+    /// Returns the maximum allowed stream duration in seconds (0 = unlimited).
+    pub fn max_duration(env: Env) -> u64 {
+        read_max_duration(&env)
+    }
+
+    /// Sets the maximum allowed stream duration in seconds. Setting to 0 disables the cap. Only the admin may call this.
+    pub fn set_max_duration(env: Env, admin: Address, seconds: u64) {
+        admin.require_auth();
+        write_max_duration(&env, seconds);
     }
 
     /// Sets the global withdrawal cooldown in seconds.
@@ -1622,6 +1638,11 @@ impl SoroStreamContract {
             .ok_or(StreamError::Overflow)?;
         if end_time <= now {
             return Err(StreamError::InvalidDuration);
+        }
+
+        let max_dur = read_max_duration(&env);
+        if max_dur > 0 && duration_seconds > max_dur {
+            return Err(StreamError::DurationExceedsMax);
         }
 
         let sender_count = get_sender_stream_count(&env, &sender);

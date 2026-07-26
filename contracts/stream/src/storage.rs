@@ -6,6 +6,7 @@ const PAUSED_KEY: &str = "paused";
 const PROTOCOL_FEE_KEY: &str = "fee_bps";
 const TREASURY_KEY: &str = "treasury";
 const MIN_DURATION_KEY: &str = "min_dur";
+const MAX_DURATION_KEY: &str = "max_dur";
 const VERSION_KEY: &str = "version";
 const MAX_STREAMS_KEY: &str = "max_str";
 const STREAM_COUNT_KEY: &str = "str_cnt";
@@ -375,6 +376,21 @@ pub fn write_min_duration(env: &Env, duration: u64) {
     env.storage()
         .instance()
         .set(&Symbol::new(env, MIN_DURATION_KEY), &duration);
+}
+
+/// Gets the maximum stream duration in seconds (0 = unlimited/no cap).
+pub fn read_max_duration(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, MAX_DURATION_KEY))
+        .unwrap_or(0u64)
+}
+
+/// Sets the maximum stream duration in seconds (0 = unlimited/no cap).
+pub fn write_max_duration(env: &Env, duration: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, MAX_DURATION_KEY), &duration);
 }
 
 // --- Delegate helpers ---

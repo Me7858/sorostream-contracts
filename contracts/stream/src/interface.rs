@@ -607,6 +607,13 @@ pub trait SoroStreamInterface {
     /// Only the admin may call this.
     fn set_min_duration(env: Env, admin: Address, seconds: u64);
 
+    /// Returns the maximum stream duration in seconds (0 = unlimited).
+    fn max_duration(env: Env) -> u64;
+
+    /// Sets the maximum stream duration in seconds (0 = unlimited).
+    /// Only the admin may call this.
+    fn set_max_duration(env: Env, admin: Address, seconds: u64);
+
     /// Runs a one-time migration step after a WASM upgrade. Admin-gated and idempotent.
     fn migrate(env: Env, from_version: String, to_version: String) -> Result<(), StreamError>;
 
