@@ -188,6 +188,57 @@ pub trait SoroStreamInterface {
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError>;
 
+    /// Creates a new payment stream using a federation name (Issue #238).
+    ///
+    /// Resolves the federation name to a Stellar address and creates a stream.
+    /// Federation names must be registered by the admin beforehand.
+    ///
+    /// # Parameters
+    /// * `sender` - The payer who funds the stream (must sign the transaction).
+    /// * `federation_name` - Registered federation name to resolve to recipient address.
+    /// * `token` - The SAC token contract address (e.g., USDC).
+    /// * `amount` - Total tokens to stream (in stroops).
+    /// * `duration_seconds` - Stream duration in seconds.
+    /// * `cliff_seconds` - Seconds from start before any tokens are claimable (0 = no cliff).
+    /// * `nonce` - Caller-supplied deduplication nonce (unique per sender).
+    /// * `auto_renew` - Whether the stream restarts automatically upon completion.
+    /// * `lock_until` - Ledger timestamp before which withdrawals are not permitted.
+    /// * `allow_recipient_termination` - Whether the recipient may cancel the stream early.
+    ///
+    /// # Returns
+    /// The unique stream ID (u64) of the newly created stream.
+    ///
+    /// # Errors
+    /// * `StreamError::StreamNotFound` if the federation name is not registered.
+    /// * Other errors from `create_stream` apply.
+    fn create_stream_with_federation(
+        env: Env,
+        sender: Address,
+        federation_name: String,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+    ) -> Result<u64, StreamError>;
+
+    /// Registers a federation name to a Stellar address (Issue #238).
+    fn register_federation(
+        env: Env,
+        admin: Address,
+        federation_name: String,
+        stellar_address: Address,
+    ) -> Result<(), StreamError>;
+
+    /// Unregisters a federation name (Issue #238).
+    fn unregister_federation(env: Env, admin: Address, federation_name: String) -> Result<(), StreamError>;
+
+    /// Resolves a federation name to its registered Stellar address (Issue #238).
+    fn resolve_federation(env: Env, federation_name: String) -> Result<Address, StreamError>;
+
     /// Sets the global withdrawal cooldown in seconds.
     fn set_withdrawal_cooldown(env: Env, admin: Address, cooldown_seconds: u64) -> Result<(), StreamError>;
 

@@ -358,3 +358,19 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
         enabled,
     );
 }
+
+/// Emitted when a federation name is registered (Issue #238).
+pub fn federation_registered(env: &Env, federation_name: &String, stellar_address: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FederationRegistered"),),
+        (federation_name.clone(), stellar_address.clone()),
+    );
+}
+
+/// Emitted when a federation name is unregistered (Issue #238).
+pub fn federation_unregistered(env: &Env, federation_name: &String) {
+    env.events().publish(
+        (Symbol::new(env, "FederationUnregistered"),),
+        federation_name.clone(),
+    );
+}

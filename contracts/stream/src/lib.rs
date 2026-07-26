@@ -42,25 +42,28 @@ use storage::{
     append_audit_entry, check_admin, clear_pending_fee_proposal, clear_reentrancy_lock,
     decrement_active_stream_count, derive_stream_id, effective_sender_limit,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
-    get_fees_collected, get_global_stream_at, get_global_stream_count, get_ids_by_recipient,
-    get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
-    get_rate_limit_state, get_rate_limit_window, get_sender_stream_count, get_slippage_params,
-    get_stream_creation_cooldown, get_sender_last_creation_time, get_treasury, get_withdrawal_cooldown,
-    get_xlm_token, increment_active_stream_count, increment_batch_nonce, increment_fees_collected,
-    index_by_recipient, index_by_sender, index_global_stream, is_fee_exempt, is_paused_or_auto_unpause,
-    is_rate_limit_exempt, is_reentrancy_locked, is_token_whitelist_enabled, is_token_whitelisted,
-    is_whitelist_enabled, is_whitelisted, load_stream, mark_nonce_used, nonce_used, read_admin,
-    read_applied_migrations, read_audit_log, read_governance, read_guardian, read_min_duration,
-    read_pending_fee_proposal, read_version, record_migration, remove_delegate, remove_fee_exempt,
+    get_federation_address, get_fees_collected, get_global_stream_at, get_global_stream_count,
+    get_ids_by_recipient, get_ids_by_sender, get_pause_expiry, get_protocol_fee,
+    get_rate_limit_max_creations, get_rate_limit_state, get_rate_limit_window,
+    get_sender_stream_count, get_slippage_params, get_stream_creation_cooldown,
+    get_sender_last_creation_time, get_treasury, get_withdrawal_cooldown, get_xlm_token,
+    increment_active_stream_count, increment_batch_nonce, increment_fees_collected,
+    index_by_recipient, index_by_sender, index_global_stream, is_fee_exempt,
+    is_paused_or_auto_unpause, is_rate_limit_exempt, is_reentrancy_locked,
+    is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled, is_whitelisted,
+    load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations, read_audit_log,
+    read_governance, read_guardian, read_min_duration, read_pending_fee_proposal, read_version,
+    record_migration, register_federation_address, remove_delegate, remove_fee_exempt,
     remove_from_whitelist, remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist,
-    save_stream, sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_fees_collected, set_max_streams_per_sender, set_pause_expiry, set_paused,
-    set_protocol_fee, set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window,
-    set_reentrancy_lock, set_sender_limit, set_sender_last_creation_time, set_slippage_params,
-    set_stream_creation_cooldown, set_token_whitelist_enabled, set_treasury, set_whitelist_enabled,
-    set_withdrawal_cooldown, set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender,
-    write_admin, write_governance, write_guardian, write_min_duration, write_pending_fee_proposal,
-    write_version, MAX_PAUSE_DURATION,
+    unregister_federation_address, save_stream, sender_count_key, sender_slot_key,
+    set_active_stream_count, set_creation_fee_xlm, set_delegate, set_fees_collected,
+    set_max_streams_per_sender, set_pause_expiry, set_paused, set_protocol_fee,
+    set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window, set_reentrancy_lock,
+    set_sender_limit, set_sender_last_creation_time, set_slippage_params, set_stream_creation_cooldown,
+    set_token_whitelist_enabled, set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
+    set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender, write_admin,
+    write_governance, write_guardian, write_min_duration, write_pending_fee_proposal, write_version,
+    MAX_PAUSE_DURATION,
 };
 
 fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamError> {
@@ -531,6 +534,38 @@ impl SoroStreamContract {
         Ok(stream_id)
     }
 
+    /// Creates a new payment stream using a federation name (Issue #238).
+    pub fn create_stream_with_federation(
+        env: Env,
+        sender: Address,
+        federation_name: String,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+    ) -> Result<u64, StreamError> {
+        let recipient = get_federation_address(&env, &federation_name)
+            .ok_or(StreamError::StreamNotFound)?;
+
+        Self::create_stream(
+            env,
+            sender,
+            recipient,
+            token,
+            amount,
+            duration_seconds,
+            cliff_seconds,
+            nonce,
+            auto_renew,
+            lock_until,
+            allow_recipient_termination,
+        )
+    }
+
     /// Returns the minimum allowed stream duration in seconds.
     pub fn min_duration(env: Env) -> u64 {
         read_min_duration(&env)
@@ -557,6 +592,40 @@ impl SoroStreamContract {
         admin.require_auth();
         set_stream_creation_cooldown(&env, cooldown_seconds);
         Ok(())
+    }
+
+    /// Registers a federation name to a Stellar address (Issue #238).
+    /// Only the admin may call this function.
+    pub fn register_federation(
+        env: Env,
+        admin: Address,
+        federation_name: String,
+        stellar_address: Address,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        register_federation_address(&env, &federation_name, &stellar_address);
+        events::federation_registered(&env, &federation_name, &stellar_address);
+        Ok(())
+    }
+
+    /// Unregisters a federation name from the registry (Issue #238).
+    /// Only the admin may call this function.
+    pub fn unregister_federation(
+        env: Env,
+        admin: Address,
+        federation_name: String,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        unregister_federation_address(&env, &federation_name);
+        events::federation_unregistered(&env, &federation_name);
+        Ok(())
+    }
+
+    /// Resolves a federation name to its registered Stellar address.
+    pub fn resolve_federation(env: Env, federation_name: String) -> Result<Address, StreamError> {
+        get_federation_address(&env, &federation_name).ok_or(StreamError::StreamNotFound)
     }
 
     /// Enables or disables recipient whitelisting.

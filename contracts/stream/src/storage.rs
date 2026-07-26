@@ -917,3 +917,30 @@ pub fn set_sender_last_creation_time(env: &Env, sender: &Address, timestamp: u64
         .persistent()
         .set(&sender_last_creation_key(env, sender), &timestamp);
 }
+
+// --- Federation Address Registry (Issue #238) ---
+
+fn federation_registry_key(env: &Env, federation_name: &String) -> (Symbol, String) {
+    (Symbol::new(env, "fed"), federation_name.clone())
+}
+
+/// Gets the Stellar address registered for a federation name.
+pub fn get_federation_address(env: &Env, federation_name: &String) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&federation_registry_key(env, federation_name))
+}
+
+/// Registers a federation name to a Stellar address.
+pub fn register_federation_address(env: &Env, federation_name: &String, address: &Address) {
+    env.storage()
+        .persistent()
+        .set(&federation_registry_key(env, federation_name), address);
+}
+
+/// Unregisters a federation name from the registry.
+pub fn unregister_federation_address(env: &Env, federation_name: &String) {
+    env.storage()
+        .persistent()
+        .remove(&federation_registry_key(env, federation_name));
+}
