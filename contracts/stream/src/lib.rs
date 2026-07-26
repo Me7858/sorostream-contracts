@@ -1677,6 +1677,8 @@ impl SoroStreamContract {
         for i in 0..n {
             let recipient = recipients.get_unchecked(i);
             let amount = amounts.get_unchecked(i);
+            let token = tokens.get_unchecked(i);
+
             if amount <= 0 {
                 return Err(StreamError::ZeroAmount);
             }
@@ -1684,6 +1686,10 @@ impl SoroStreamContract {
             if flow_rate == 0 {
                 return Err(StreamError::ZeroFlowRate);
             }
+
+            // Validate token is a deployed SAC (Issue #243) - do this in validation phase
+            validate_token_address(&env, &token)?;
+
             let stream_id = derive_stream_id(&env, &sender, &recipient, now, i as u64);
             if stream_exists(&env, stream_id) {
                 return Err(StreamError::DuplicateStreamId);
@@ -1702,9 +1708,6 @@ impl SoroStreamContract {
             let token = tokens.get_unchecked(i);
             let flow_rate = amount / duration_seconds as i128;
             let stream_id = batch_ids.get_unchecked(i);
-
-            // Validate token is a deployed SAC (Issue #243)
-            validate_token_address(&env, &token)?;
 
             token::Client::new(&env, &token).transfer(
                 &sender,
