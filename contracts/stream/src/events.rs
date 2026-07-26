@@ -274,3 +274,67 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
         (fee_amount, treasury.clone()),
     );
 }
+
+/// Emitted when fees are swept from the contract.
+pub fn fee_swept(env: &Env, token: &Address, amount: i128, destination: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeSwept"),),
+        (token.clone(), amount, destination.clone()),
+    );
+}
+
+/// Emitted when slippage threshold is exceeded.
+pub fn slippage_exceeded(env: &Env, stream_id: u64, current_price: i128, max_slippage_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "SlippageExceeded"), stream_id),
+        (current_price, max_slippage_bps),
+    );
+}
+
+/// Emitted when slippage is within 80% of the limit (warning).
+pub fn slippage_warning(env: &Env, stream_id: u64, current_deviation_bps: u32, max_slippage_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "SlippageWarning"), stream_id),
+        (current_deviation_bps, max_slippage_bps),
+    );
+}
+
+/// Emitted when an address hits the rate limit.
+pub fn rate_limit_exceeded(env: &Env, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RateLimitExceeded"),),
+        sender.clone(),
+    );
+}
+
+/// Emitted when rate limit parameters are updated.
+pub fn rate_limit_updated(env: &Env, window_seconds: u64, max_creations: u32) {
+    env.events().publish(
+        (Symbol::new(env, "RateLimitUpdated"),),
+        (window_seconds, max_creations),
+    );
+}
+
+/// Emitted when a token is added to the whitelist.
+pub fn token_whitelisted(env: &Env, token: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "TokenWhitelisted"),),
+        token.clone(),
+    );
+}
+
+/// Emitted when a token is removed from the whitelist.
+pub fn token_dwhitelisted(env: &Env, token: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "TokenDewhitelisted"),),
+        token.clone(),
+    );
+}
+
+/// Emitted when token whitelist is toggled.
+pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "TokenWhitelistToggled"),),
+        enabled,
+    );
+}
