@@ -802,4 +802,67 @@ pub trait SoroStreamInterface {
 
     /// Returns the current delegate address for a stream, if one is set.
     fn get_delegate(env: Env, stream_id: u64) -> Option<Address>;
+    // ── Issue #217: Rate Limiting ────────────────────────────────────────────
+
+    /// Sets the rate limiting window size in seconds.
+    /// Only admin may call this. Default: 3600 seconds.
+    fn set_rate_limit_window(env: Env, admin: Address, window_seconds: u64) -> Result<(), StreamError>;
+
+    /// Sets the max creations per rate limit window.
+    /// Only admin may call this. Default: 20 creations per window.
+    fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError>;
+
+    /// Adds an address to the rate limit exempt list.
+    /// Exempt addresses can create streams without rate limiting.
+    /// Only admin may call this.
+    fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError>;
+
+    /// Removes an address from the rate limit exempt list.
+    /// Only admin may call this.
+    fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError>;
+
+    /// Returns the remaining quota for an address within the current rate limit window.
+    /// Returns u32::MAX if the address is exempt.
+    fn remaining_quota(env: Env, address: Address) -> u32;
+
+    // ── Issue #221: Token Whitelist ──────────────────────────────────────────
+
+    /// Enables or disables token whitelisting.
+    /// When enabled, create_stream only accepts whitelisted tokens.
+    /// Only admin may call this.
+    fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
+
+    /// Adds a token to the whitelist.
+    /// Only admin may call this.
+    fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
+
+    /// Removes a token from the whitelist.
+    /// Only admin may call this.
+    fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
+
+    // ── Issue #222: Fee Sweep ────────────────────────────────────────────────
+
+    /// Sweeps accumulated fees or contract balance of a token to a destination.
+    /// Only admin may call this.
+    fn sweep_fees(env: Env, admin: Address, token: Address, destination: Address) -> Result<(), StreamError>;
+
+    // ── Issue #218: Slippage Protection ──────────────────────────────────────
+
+    /// Updates slippage protection parameters for a stream.
+    /// Only the stream sender may call this.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The stream ID.
+    /// * `reference_price` - Reference price in basis points for slippage calculation.
+    /// * `max_slippage_bps` - Maximum acceptable slippage in basis points (0-10000).
+    ///
+    /// # Errors
+    /// Returns `StreamError::InvalidSlippage` if max_slippage_bps > 10000.
+    fn set_slippage_params(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        reference_price: i128,
+        max_slippage_bps: u32,
+    ) -> Result<(), StreamError>;
 }

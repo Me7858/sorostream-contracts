@@ -38,23 +38,28 @@ mod differential_fuzz;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal};
 use storage::{
-    add_fee_exempt, add_to_whitelist, append_audit_entry, check_admin, clear_pending_fee_proposal,
-    clear_reentrancy_lock, decrement_active_stream_count, derive_stream_id, effective_sender_limit,
+    add_fee_exempt, add_rate_limit_exempt, add_to_whitelist, add_token_to_whitelist,
+    append_audit_entry, check_admin, clear_pending_fee_proposal, clear_reentrancy_lock,
+    decrement_active_stream_count, derive_stream_id, effective_sender_limit,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
-    get_global_stream_at, get_global_stream_count, get_ids_by_recipient, get_ids_by_sender,
-    get_pause_expiry, get_protocol_fee, get_sender_stream_count, get_treasury,
-    get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count, increment_batch_nonce,
-    index_by_recipient, index_by_sender, index_global_stream, is_fee_exempt,
-    is_paused_or_auto_unpause, is_reentrancy_locked, is_whitelist_enabled, is_whitelisted,
-    load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations, read_audit_log,
-    read_governance, read_guardian, read_min_duration, read_pending_fee_proposal, read_version,
-    record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist, remove_stream,
-    save_stream, sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_max_streams_per_sender, set_pause_expiry, set_paused, set_protocol_fee,
-    set_reentrancy_lock, set_sender_limit, set_treasury, set_whitelist_enabled,
-    set_withdrawal_cooldown, set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender,
-    write_admin, write_governance, write_guardian, write_min_duration, write_pending_fee_proposal,
-    write_version, MAX_PAUSE_DURATION,
+    get_fees_collected, get_global_stream_at, get_global_stream_count, get_ids_by_recipient,
+    get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
+    get_rate_limit_state, get_rate_limit_window, get_sender_stream_count, get_slippage_params,
+    get_treasury, get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count,
+    increment_batch_nonce, increment_fees_collected, index_by_recipient, index_by_sender,
+    index_global_stream, is_fee_exempt, is_paused_or_auto_unpause, is_rate_limit_exempt,
+    is_reentrancy_locked, is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled,
+    is_whitelisted, load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations,
+    read_audit_log, read_governance, read_guardian, read_min_duration, read_pending_fee_proposal,
+    read_version, record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist,
+    remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist, save_stream,
+    sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
+    set_delegate, set_fees_collected, set_max_streams_per_sender, set_pause_expiry, set_paused,
+    set_protocol_fee, set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window,
+    set_reentrancy_lock, set_sender_limit, set_slippage_params, set_token_whitelist_enabled,
+    set_treasury, set_whitelist_enabled, set_withdrawal_cooldown, set_xlm_token, stream_exists,
+    unindex_by_recipient, unindex_by_sender, write_admin, write_governance, write_guardian,
+    write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
 };
 
 fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamError> {
@@ -88,6 +93,43 @@ fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
         if !is_valid {
             return Err(StreamError::InvalidMetadataUri);
         }
+    }
+    Ok(())
+}
+
+/// Checks rate limiting for stream creation.
+/// Returns Ok if the sender is allowed to create a stream, Err otherwise.
+fn check_rate_limit(env: &Env, sender: &Address, now: u64) -> Result<(), StreamError> {
+    // Exempt addresses bypass rate limiting entirely
+    if is_rate_limit_exempt(env, sender) {
+        return Ok(());
+    }
+
+    let window_seconds = get_rate_limit_window(env);
+    let max_creations = get_rate_limit_max_creations(env);
+    let (window_start, count) = get_rate_limit_state(env, sender);
+
+    // If window has elapsed, reset counter
+    let (new_start, new_count) = if now >= window_start + window_seconds {
+        // New window
+        (now, 1u32)
+    } else {
+        // Still in current window
+        if count >= max_creations {
+            events::rate_limit_exceeded(env, sender);
+            return Err(StreamError::RateLimitExceeded);
+        }
+        (window_start, count + 1)
+    };
+
+    set_rate_limit_state(env, sender, new_start, new_count);
+    Ok(())
+}
+
+/// Validates that a token is whitelisted (if token whitelist is enabled).
+fn check_token_whitelist(env: &Env, token: &Address) -> Result<(), StreamError> {
+    if is_token_whitelist_enabled(env) && !is_token_whitelisted(env, token) {
+        return Err(StreamError::TokenNotWhitelisted);
     }
     Ok(())
 }
@@ -356,6 +398,10 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
+
+        // Get current time early for validations
+        let now = env.ledger().timestamp();
+
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
         }
@@ -393,9 +439,14 @@ impl SoroStreamContract {
             return Err(StreamError::SenderStreamLimitExceeded);
         }
 
+        // Check rate limiting (Issue #217)
+        check_rate_limit(&env, &sender, now)?;
+
+        // Check token whitelist (Issue #221)
+        check_token_whitelist(&env, &token)?;
+
         mark_nonce_used(&env, &sender, nonce);
 
-        let now = env.ledger().timestamp();
         let end_time = now
             .checked_add(duration_seconds)
             .ok_or(StreamError::Overflow)?;
@@ -503,6 +554,156 @@ impl SoroStreamContract {
         check_admin(&env);
         admin.require_auth();
         remove_from_whitelist(&env, &recipient);
+        Ok(())
+    }
+
+    /// Sets the rate limiting window size in seconds (Issue #217).
+    pub fn set_rate_limit_window(env: Env, admin: Address, window_seconds: u64) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_rate_limit_window(&env, window_seconds);
+        events::rate_limit_updated(&env, window_seconds, get_rate_limit_max_creations(&env));
+        Ok(())
+    }
+
+    /// Sets the max creations per rate limit window (Issue #217).
+    pub fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_rate_limit_max_creations(&env, max_creations);
+        events::rate_limit_updated(&env, get_rate_limit_window(&env), max_creations);
+        Ok(())
+    }
+
+    /// Adds an address to the rate limit exempt list (Issue #217).
+    pub fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        add_rate_limit_exempt(&env, &address);
+        Ok(())
+    }
+
+    /// Removes an address from the rate limit exempt list (Issue #217).
+    pub fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        remove_rate_limit_exempt(&env, &address);
+        Ok(())
+    }
+
+    /// Returns the remaining quota for an address within the current rate limit window (Issue #217).
+    pub fn remaining_quota(env: Env, address: Address) -> u32 {
+        if is_rate_limit_exempt(&env, &address) {
+            return u32::MAX;
+        }
+
+        let now = env.ledger().timestamp();
+        let window_seconds = get_rate_limit_window(&env);
+        let max_creations = get_rate_limit_max_creations(&env);
+        let (window_start, count) = get_rate_limit_state(&env, &address);
+
+        if now >= window_start + window_seconds {
+            // New window
+            max_creations
+        } else {
+            // In current window
+            if count >= max_creations {
+                0u32
+            } else {
+                max_creations - count
+            }
+        }
+    }
+
+    /// Enables or disables token whitelisting (Issue #221).
+    pub fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_token_whitelist_enabled(&env, enabled);
+        events::token_whitelist_toggled(&env, enabled);
+        Ok(())
+    }
+
+    /// Adds a token to the whitelist (Issue #221).
+    pub fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        add_token_to_whitelist(&env, &token);
+        events::token_whitelisted(&env, &token);
+        Ok(())
+    }
+
+    /// Removes a token from the whitelist (Issue #221).
+    pub fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        remove_token_from_whitelist(&env, &token);
+        events::token_dwhitelisted(&env, &token);
+        Ok(())
+    }
+
+    /// Sweeps accumulated fees from the contract to a destination address (Issue #222).
+    pub fn sweep_fees(env: Env, admin: Address, token: Address, destination: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+
+        let token_client = token::Client::new(&env, &token);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        
+        if contract_balance <= 0 {
+            return Ok(());
+        }
+
+        token_client.transfer(
+            &env.current_contract_address(),
+            &destination,
+            &contract_balance,
+        );
+
+        events::fee_swept(&env, &token, contract_balance, &destination);
+        Ok(())
+    }
+
+    /// Updates slippage protection parameters for a stream (Issue #218).
+    pub fn set_slippage_params(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        reference_price: i128,
+        max_slippage_bps: u32,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+
+        if max_slippage_bps > 10000 {
+            return Err(StreamError::InvalidSlippage);
+        }
+
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        set_slippage_params(&env, stream_id, reference_price, max_slippage_bps);
+        Ok(())
+    }
+
+    /// Updates metadata URI for a stream.
+    pub fn update_metadata_uri(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        metadata_uri: Option<String>,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+        validate_metadata_uri(&metadata_uri)?;
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        save_stream(&env, &stream);
+        events::metadata_uri_updated(&env, stream_id, &metadata_uri);
         Ok(())
     }
 
