@@ -499,6 +499,7 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: Bytes::new(&env),
+            locked: false,
         };
 
         save_stream(&env, &stream);
@@ -744,10 +745,6 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        if is_reentrancy_locked(&env) {
-            return Err(StreamError::ReentrancyDetected);
-        }
-        set_reentrancy_lock(&env);
 
         recipient.require_auth();
 
@@ -758,6 +755,11 @@ impl SoroStreamContract {
         }
         if stream.status != StreamStatus::Active {
             return Err(StreamError::StreamNotActive);
+        }
+
+        // Stream-specific reentrancy guard
+        if stream.locked {
+            return Err(StreamError::ReentrancyDetected);
         }
 
         let now = env.ledger().timestamp();
@@ -820,6 +822,9 @@ impl SoroStreamContract {
 
         let stream_ended = now >= stream.end_time;
 
+        // Set stream-specific reentrancy lock before any external token transfer
+        stream.locked = true;
+
         if stream_ended {
             let duration = stream.end_time - stream.start_time;
             let dust = stream.deposit.saturating_sub(
@@ -831,6 +836,7 @@ impl SoroStreamContract {
                 let sender_balance = token_client.balance(&stream.sender);
                 if sender_balance < stream.deposit {
                     stream.status = StreamStatus::Completed;
+                    stream.locked = false;
                     save_stream(&env, &stream);
                     decrement_active_stream_count(&env);
 
@@ -872,6 +878,7 @@ impl SoroStreamContract {
                     stream.end_time = new_end;
                     stream.last_withdraw_time = old_end;
                     stream.total_withdrawn = 0;
+                    stream.locked = false;
                     save_stream(&env, &stream);
 
                     // INTERACTIONS
@@ -934,6 +941,7 @@ impl SoroStreamContract {
                 events::stream_completed(&env, stream_id);
             }
         } else {
+            stream.locked = false;
             save_stream(&env, &stream);
 
             // INTERACTIONS
@@ -966,7 +974,10 @@ impl SoroStreamContract {
 
         events::stream_withdrawn(&env, stream_id, &recipient, claimable, now);
 
-        clear_reentrancy_lock(&env);
+        // Clear stream-specific reentrancy lock
+        stream.locked = false;
+        save_stream(&env, &stream);
+
         Ok(())
     }
 

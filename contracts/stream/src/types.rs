@@ -80,6 +80,8 @@ pub struct Stream {
     pub metadata_uri: Option<String>,
     /// Optional milestones for gated release (empty if not milestone-gated).
     pub milestones: Vec<Milestone>,
+    /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
+    pub locked: bool,
 }
 
 /// Aggregate contract statistics.
