@@ -134,6 +134,22 @@ fn check_token_whitelist(env: &Env, token: &Address) -> Result<(), StreamError> 
     Ok(())
 }
 
+/// Validates that the token address is a deployed SAC (Stellar Asset Contract).
+/// Attempts to call symbol() on the token to verify it implements the SAC interface.
+fn validate_token_address(env: &Env, token: &Address) -> Result<(), StreamError> {
+    // Reject zero address
+    let zero_addr = Address::from_contract_id(&env, &BytesN::<32>::from_array(&env, &[0u8; 32]));
+    if token == &zero_addr {
+        return Err(StreamError::InvalidTokenAddress);
+    }
+
+    // Attempt to call symbol() to verify it's a SAC
+    match token::Client::new(&env, token).symbol() {
+        Ok(_) => Ok(()),
+        Err(_) => Err(StreamError::InvalidTokenAddress),
+    }
+}
+
 #[contract]
 pub struct SoroStreamContract;
 
@@ -449,6 +465,9 @@ impl SoroStreamContract {
 
         // Check token whitelist (Issue #221)
         check_token_whitelist(&env, &token)?;
+
+        // Validate token is a deployed SAC (Issue #243)
+        validate_token_address(&env, &token)?;
 
         mark_nonce_used(&env, &sender, nonce);
 
@@ -1683,6 +1702,9 @@ impl SoroStreamContract {
             let token = tokens.get_unchecked(i);
             let flow_rate = amount / duration_seconds as i128;
             let stream_id = batch_ids.get_unchecked(i);
+
+            // Validate token is a deployed SAC (Issue #243)
+            validate_token_address(&env, &token)?;
 
             token::Client::new(&env, &token).transfer(
                 &sender,
