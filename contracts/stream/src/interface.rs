@@ -776,6 +776,11 @@ pub trait SoroStreamInterface {
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
 
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
+    ///
+    /// Callable by anyone (no auth required). Bumps TTL to at least `stream.end_time`
+    /// plus a 24-hour safety buffer. No-op when the current TTL is already sufficient.
+    /// Emits `TtlBumped { stream_id, new_expiry_ledger }`.
+    fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError>;
     /// Only the sender or recipient may call this.
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
 
