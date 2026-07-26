@@ -45,21 +45,22 @@ use storage::{
     get_fees_collected, get_global_stream_at, get_global_stream_count, get_ids_by_recipient,
     get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
     get_rate_limit_state, get_rate_limit_window, get_sender_stream_count, get_slippage_params,
-    get_treasury, get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count,
-    increment_batch_nonce, increment_fees_collected, index_by_recipient, index_by_sender,
-    index_global_stream, is_fee_exempt, is_paused_or_auto_unpause, is_rate_limit_exempt,
-    is_reentrancy_locked, is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled,
-    is_whitelisted, load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations,
-    read_audit_log, read_governance, read_guardian, read_min_duration, read_pending_fee_proposal,
-    read_version, record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist,
-    remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist, save_stream,
-    sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
+    get_stream_creation_cooldown, get_sender_last_creation_time, get_treasury, get_withdrawal_cooldown,
+    get_xlm_token, increment_active_stream_count, increment_batch_nonce, increment_fees_collected,
+    index_by_recipient, index_by_sender, index_global_stream, is_fee_exempt, is_paused_or_auto_unpause,
+    is_rate_limit_exempt, is_reentrancy_locked, is_token_whitelist_enabled, is_token_whitelisted,
+    is_whitelist_enabled, is_whitelisted, load_stream, mark_nonce_used, nonce_used, read_admin,
+    read_applied_migrations, read_audit_log, read_governance, read_guardian, read_min_duration,
+    read_pending_fee_proposal, read_version, record_migration, remove_delegate, remove_fee_exempt,
+    remove_from_whitelist, remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist,
+    save_stream, sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
     set_delegate, set_fees_collected, set_max_streams_per_sender, set_pause_expiry, set_paused,
     set_protocol_fee, set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window,
-    set_reentrancy_lock, set_sender_limit, set_slippage_params, set_token_whitelist_enabled,
-    set_treasury, set_whitelist_enabled, set_withdrawal_cooldown, set_xlm_token, stream_exists,
-    unindex_by_recipient, unindex_by_sender, write_admin, write_governance, write_guardian,
-    write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
+    set_reentrancy_lock, set_sender_limit, set_sender_last_creation_time, set_slippage_params,
+    set_stream_creation_cooldown, set_token_whitelist_enabled, set_treasury, set_whitelist_enabled,
+    set_withdrawal_cooldown, set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender,
+    write_admin, write_governance, write_guardian, write_min_duration, write_pending_fee_proposal,
+    write_version, MAX_PAUSE_DURATION,
 };
 
 fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamError> {
@@ -445,6 +446,15 @@ impl SoroStreamContract {
         // Check rate limiting (Issue #217)
         check_rate_limit(&env, &sender, now)?;
 
+        // Check stream creation cooldown (Issue #239)
+        let creation_cooldown = get_stream_creation_cooldown(&env);
+        if creation_cooldown > 0 {
+            let last_creation_time = get_sender_last_creation_time(&env, &sender);
+            if last_creation_time > 0 && now < last_creation_time.saturating_add(creation_cooldown) {
+                return Err(StreamError::DuplicateStream);
+            }
+        }
+
         // Check token whitelist (Issue #221)
         check_token_whitelist(&env, &token)?;
 
@@ -511,6 +521,9 @@ impl SoroStreamContract {
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
 
+        // Update sender's last stream creation time (Issue #239)
+        set_sender_last_creation_time(&env, &sender, now);
+
         events::stream_created(
             &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
         );
@@ -534,6 +547,15 @@ impl SoroStreamContract {
         check_admin(&env);
         admin.require_auth();
         set_withdrawal_cooldown(&env, cooldown_seconds);
+        Ok(())
+    }
+
+    /// Sets the global stream creation cooldown in seconds (Issue #239).
+    /// Cooldown of 0 disables the mechanism (default).
+    pub fn set_stream_creation_cooldown(env: Env, admin: Address, cooldown_seconds: u64) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_stream_creation_cooldown(&env, cooldown_seconds);
         Ok(())
     }
 
