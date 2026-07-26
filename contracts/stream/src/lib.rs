@@ -66,6 +66,9 @@ fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamErro
     flow_rate.checked_mul(elapsed as i128).ok_or(StreamError::Overflow)
 }
 
+/// Maximum allowed stream duration in seconds (approximately 100 years).
+const MAX_STREAM_DURATION_SECONDS: u64 = 100 * 365 * 24 * 60 * 60; // ~3,155,760,000 seconds
+
 /// Validates a metadata URI format and length.
 fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
     if let Some(ref u) = uri {
@@ -1372,17 +1375,26 @@ impl SoroStreamContract {
         let extra_seconds =
             u64::try_from(extra_seconds_i128).map_err(|_| StreamError::Overflow)?;
 
-        stream.end_time = stream
+        let new_end_time = stream
             .end_time
             .checked_add(extra_seconds)
             .ok_or(StreamError::Overflow)?;
 
+        let now = env.ledger().timestamp();
+        let max_end_time = now
+            .checked_add(MAX_STREAM_DURATION_SECONDS)
+            .ok_or(StreamError::Overflow)?;
+
+        if new_end_time > max_end_time {
+            return Err(StreamError::Overflow);
+        }
+
+        stream.end_time = new_end_time;
         stream.deposit = stream
             .deposit
             .checked_add(effective_amount)
             .ok_or(StreamError::Overflow)?;
 
-        let new_end_time = stream.end_time;
         save_stream(&env, &stream);
 
         events::stream_topped_up(&env, stream_id, effective_amount, new_end_time);
