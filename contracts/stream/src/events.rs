@@ -275,6 +275,21 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+/// Emitted when a delegate is set for a stream.
+pub fn delegate_set(env: &Env, stream_id: u64, sender: &Address, delegate: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "DelegateSet"), stream_id),
+        (sender.clone(), delegate.clone()),
+    );
+}
+
+/// Emitted when a delegate is revoked from a stream.
+pub fn delegate_revoked(env: &Env, stream_id: u64, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "DelegateRevoked"), stream_id),
+        sender.clone(),
+    );
+}
 /// Emitted when fees are swept from the contract.
 pub fn fee_swept(env: &Env, token: &Address, amount: i128, destination: &Address) {
     env.events().publish(
