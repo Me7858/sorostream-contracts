@@ -1548,7 +1548,7 @@ fn test_delegate_can_top_up_and_cancel() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
         &false, &0i128);
 
-    c.delegate(&t.sender, &stream_id, &operator);
+    c.set_delegate(&t.sender, &stream_id, &operator);
 
     // Operator tops up
     c.top_up(&stream_id, &operator, &t.token_id, &50_000);
@@ -1570,7 +1570,7 @@ fn test_delegate_cannot_withdraw() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
         &false, &0i128);
 
-    c.delegate(&t.sender, &stream_id, &operator);
+    c.set_delegate(&t.sender, &stream_id, &operator);
 
     t.env.ledger().set_timestamp(500);
 
@@ -1653,7 +1653,7 @@ fn test_revoke_delegate_strips_capabilities() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
         &false, &0i128);
 
-    c.delegate(&t.sender, &stream_id, &operator);
+    c.set_delegate(&t.sender, &stream_id, &operator);
     c.revoke_delegate(&t.sender, &stream_id);
 
     // Operator tries to top up
@@ -2448,10 +2448,11 @@ fn test_recalibrate_stats_rejects_non_admin() {
     assert!(result.is_err());
 }
 
-// ── bump_stream_ttl tests (issue #250) ────────────────────────────────────────
+// ── bump_stream_ttl tests (issue #225) ────────────────────────────────────────
 
 /// bump_stream_ttl extends the storage TTL so the stream entry remains accessible
-/// after its original TTL would have expired.
+/// after its original TTL would have expired. Any caller — not just participants —
+/// may invoke this instruction.
 #[test]
 fn test_bump_stream_ttl_extends_accessibility() {
     let t = setup();
@@ -2460,24 +2461,23 @@ fn test_bump_stream_ttl_extends_accessibility() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128);
 
     // Set ledger sequence near where the default TTL might expire.
-    // Soroban default persistent TTL is ~100,000 ledgers.
     t.env.ledger().set_sequence_number(99_990);
 
-    // Bump the TTL to cover the remaining stream duration
-    c.bump_stream_ttl(&stream_id, &t.sender);
+    // Bump the TTL — no auth required, any caller works.
+    c.bump_stream_ttl(&stream_id);
 
-    // Advance ledger well beyond original TTL
+    // Advance ledger well beyond original TTL.
     t.env.ledger().set_sequence_number(200_000);
 
-    // Stream should still be accessible
+    // Stream should still be accessible.
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.id, stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
 }
 
-/// bump_stream_ttl rejects non-participants.
+/// bump_stream_ttl can be called by a third party (non-participant).
 #[test]
-fn test_bump_stream_ttl_rejects_non_participant() {
+fn test_bump_stream_ttl_any_caller_can_call() {
     let t = setup();
     let c = client(&t);
 
@@ -2486,9 +2486,14 @@ fn test_bump_stream_ttl_rejects_non_participant() {
 
     let result = c.try_bump_stream_ttl(&stream_id, &other);
     assert_eq!(result, Err(Ok(StreamError::NotAuthorized)));
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    // A completely unrelated address can bump TTL — no error expected.
+    c.bump_stream_ttl(&stream_id);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
 }
 
-/// bump_stream_ttl rejects cancelled streams.
+/// bump_stream_ttl rejects cancelled / non-active streams.
 #[test]
 fn test_bump_stream_ttl_rejects_cancelled() {
     let t = setup();
@@ -2498,24 +2503,229 @@ fn test_bump_stream_ttl_rejects_cancelled() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128);
     c.cancel_stream(&stream_id, &t.sender);
 
-    let result = c.try_bump_stream_ttl(&stream_id, &t.sender);
+    // After cancellation the stream is removed from storage → StreamNotFound.
+    let result = c.try_bump_stream_ttl(&stream_id);
     assert_eq!(result, Err(Ok(StreamError::StreamNotFound)));
 }
 
-/// bump_stream_ttl can be called by the recipient.
+/// bump_stream_ttl works on paused streams as well.
 #[test]
-fn test_bump_stream_ttl_recipient_can_call() {
+fn test_bump_stream_ttl_works_on_paused_stream() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false);
+    c.pause_stream(&stream_id, &t.sender);
 
-    t.env.ledger().set_sequence_number(99_990);
-    c.bump_stream_ttl(&stream_id, &t.recipient);
+    // Should succeed — paused streams still need their TTL extended.
+    let result = c.try_bump_stream_ttl(&stream_id);
+    assert!(result.is_ok());
+}
 
-    t.env.ledger().set_sequence_number(200_000);
+/// bump_stream_ttl uses a 24-hour buffer so that streams near their end still get bumped.
+#[test]
+fn test_bump_stream_ttl_buffer_applied_for_nearly_expired_stream() {
+    let t = setup();
+    let c = client(&t);
+    // Stream ends in 10 seconds.
+    t.env.ledger().set_timestamp(0);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &10, &0, &0u64, &false, &0u64, &false);
+
+    t.env.ledger().set_timestamp(5); // 5 s before end_time
+    // Should not panic — safety buffer covers the tiny remaining duration.
+    let result = c.try_bump_stream_ttl(&stream_id);
+    assert!(result.is_ok());
+}
+
+// ── Delegate management tests (issue #226) ───────────────────────────────────
+
+/// set_delegate stores the delegate and emits DelegateSet event.
+#[test]
+fn test_set_delegate_stores_delegate() {
+    let t = setup();
+    let c = client(&t);
+    let delegate = Address::generate(&t.env);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    c.set_delegate(&t.sender, &stream_id, &delegate);
+
+    let stored = c.get_delegate(&stream_id);
+    assert_eq!(stored, Some(delegate));
+}
+
+/// Only the sender can set a delegate — non-sender is rejected.
+#[test]
+fn test_set_delegate_rejected_for_non_sender() {
+    let t = setup();
+    let c = client(&t);
+    let impostor = Address::generate(&t.env);
+    let delegate = Address::generate(&t.env);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    let result = c.try_set_delegate(&impostor, &stream_id, &delegate);
+    assert_eq!(result, Err(Ok(StreamError::NotSender)));
+}
+
+/// Delegate can cancel a stream in place of the sender.
+#[test]
+fn test_delegate_can_cancel_stream() {
+    let t = setup();
+    let c = client(&t);
+    let delegate = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&delegate, &1_000_000);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    c.set_delegate(&t.sender, &stream_id, &delegate);
+    c.cancel_stream(&stream_id, &delegate);
+
+    // Stream removed after cancel.
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// A non-delegate third party cannot act as sender.
+#[test]
+fn test_non_delegate_cannot_cancel() {
+    let t = setup();
+    let c = client(&t);
+    let impostor = Address::generate(&t.env);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    let result = c.try_cancel_stream(&stream_id, &impostor);
+    assert_eq!(result, Err(Ok(StreamError::NotAuthorized)));
+}
+
+/// After revoke_delegate the former delegate loses all permissions.
+#[test]
+fn test_revoke_delegate_removes_permissions() {
+    let t = setup();
+    let c = client(&t);
+    let delegate = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&delegate, &1_000_000);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    c.set_delegate(&t.sender, &stream_id, &delegate);
+    c.revoke_delegate(&t.sender, &stream_id);
+
+    // get_delegate now returns None.
+    assert_eq!(c.get_delegate(&stream_id), None);
+
+    // Former delegate can no longer cancel.
+    let result = c.try_cancel_stream(&stream_id, &delegate);
+    assert_eq!(result, Err(Ok(StreamError::NotAuthorized)));
+}
+
+/// Sender can resume sole control after revoking delegate.
+#[test]
+fn test_sender_retains_control_after_revoke() {
+    let t = setup();
+    let c = client(&t);
+    let delegate = Address::generate(&t.env);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    c.set_delegate(&t.sender, &stream_id, &delegate);
+    c.revoke_delegate(&t.sender, &stream_id);
+
+    // Sender can still cancel the stream.
+    c.cancel_stream(&stream_id, &t.sender);
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
+/// Delegate address is returned in get_delegate response.
+#[test]
+fn test_get_delegate_returns_correct_address() {
+    let t = setup();
+    let c = client(&t);
+    let delegate = Address::generate(&t.env);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    assert_eq!(c.get_delegate(&stream_id), None);
+
+    c.set_delegate(&t.sender, &stream_id, &delegate);
+    assert_eq!(c.get_delegate(&stream_id), Some(delegate.clone()));
+
+    c.revoke_delegate(&t.sender, &stream_id);
+    assert_eq!(c.get_delegate(&stream_id), None);
+}
+
+
+// ── Expired state & mark_expired tests (issue #228) ──────────────────────────
+
+/// get_stream returns Expired status once the stream's end_time has passed,
+/// even without an explicit mark_expired call.
+#[test]
+fn test_get_stream_returns_expired_after_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    // Before end_time: still Active.
+    t.env.ledger().set_timestamp(500);
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
+
+    // At exactly end_time: Expired.
+    t.env.ledger().set_timestamp(1000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Expired);
+
+    // After end_time: still Expired.
+    t.env.ledger().set_timestamp(2000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Expired);
+}
+
+/// Cancelled streams never transition to Expired via get_stream.
+#[test]
+fn test_cancelled_stream_not_returned_as_expired() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // After cancellation the stream is removed — should return StreamNotFound.
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err());
 }
 
 // ─── Holdback escrow tests (#224) ────────────────────────────────────────────
@@ -2803,4 +3013,77 @@ fn test_holdback_only_sender_can_operate() {
 
     let result2 = c.try_claw_back_holdback(&stream_id, &t.recipient);
     assert_eq!(result2, Err(Ok(StreamError::NotAuthorized)));
+}
+/// mark_expired transitions a stream to Expired after end_time and emits event.
+#[test]
+fn test_mark_expired_succeeds_after_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    // Advance past end_time.
+    t.env.ledger().set_timestamp(1001);
+    c.mark_expired(&stream_id);
+
+    // Persisted status is now Expired.
+    let raw = c.get_stream(&stream_id);
+    assert_eq!(raw.status, StreamStatus::Expired);
+}
+
+/// mark_expired rejects a stream that has not yet reached end_time.
+#[test]
+fn test_mark_expired_rejects_before_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    t.env.ledger().set_timestamp(500); // still before end_time
+    let result = c.try_mark_expired(&stream_id);
+    assert_eq!(result, Err(Ok(StreamError::StreamNotComplete)));
+}
+
+/// mark_expired rejects already-Cancelled streams.
+#[test]
+fn test_mark_expired_rejects_cancelled_stream() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Stream is removed on cancel — StreamNotFound.
+    let result = c.try_mark_expired(&stream_id);
+    assert!(result.is_err());
+}
+
+/// mark_expired is callable by anyone, not only the sender/recipient.
+#[test]
+fn test_mark_expired_callable_by_anyone() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+    t.env.ledger().set_timestamp(1001);
+
+    // A third-party address can call mark_expired.
+    let result = c.try_mark_expired(&stream_id);
+    assert!(result.is_ok());
 }

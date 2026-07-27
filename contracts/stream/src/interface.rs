@@ -821,7 +821,111 @@ pub trait SoroStreamInterface {
     /// Only callable by admin. Use when counter drift is suspected.
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
 
+    /// Explicitly marks an elapsed stream as Expired, compacting its on-chain state.
+    ///
+    /// Callable by anyone. The stream must be Active/Completed and its `end_time`
+    /// must have already passed. Cancelled streams are never transitioned to Expired.
+    /// Emits `StreamExpired { stream_id }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `StreamNotActive` — stream is already Cancelled or Expired.
+    /// - `StreamNotComplete` — `end_time` has not yet been reached.
+    fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError>;
+
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
+    ///
+    /// Callable by anyone (no auth required). Bumps TTL to at least `stream.end_time`
+    /// plus a 24-hour safety buffer. No-op when the current TTL is already sufficient.
+    /// Emits `TtlBumped { stream_id, new_expiry_ledger }`.
+    fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError>;
     /// Only the sender or recipient may call this.
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
+
+    /// Authorises a delegate address to manage a stream on behalf of the sender.
+    ///
+    /// The delegate may cancel, top-up, and bump-TTL the stream. Only the stream
+    /// sender may set a delegate. Emits `DelegateSet { stream_id, sender, delegate }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not the stream sender.
+    fn set_delegate(env: Env, sender: Address, stream_id: u64, delegate: Address) -> Result<(), StreamError>;
+
+    /// Revokes the current delegate for a stream.
+    ///
+    /// Only the stream sender may call this. After revocation the delegate
+    /// address loses all sender-equivalent permissions.
+    /// Emits `DelegateRevoked { stream_id, sender }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not the stream sender.
+    fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
+
+    /// Returns the current delegate address for a stream, if one is set.
+    fn get_delegate(env: Env, stream_id: u64) -> Option<Address>;
+    // ── Issue #217: Rate Limiting ────────────────────────────────────────────
+
+    /// Sets the rate limiting window size in seconds.
+    /// Only admin may call this. Default: 3600 seconds.
+    fn set_rate_limit_window(env: Env, admin: Address, window_seconds: u64) -> Result<(), StreamError>;
+
+    /// Sets the max creations per rate limit window.
+    /// Only admin may call this. Default: 20 creations per window.
+    fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError>;
+
+    /// Adds an address to the rate limit exempt list.
+    /// Exempt addresses can create streams without rate limiting.
+    /// Only admin may call this.
+    fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError>;
+
+    /// Removes an address from the rate limit exempt list.
+    /// Only admin may call this.
+    fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError>;
+
+    /// Returns the remaining quota for an address within the current rate limit window.
+    /// Returns u32::MAX if the address is exempt.
+    fn remaining_quota(env: Env, address: Address) -> u32;
+
+    // ── Issue #221: Token Whitelist ──────────────────────────────────────────
+
+    /// Enables or disables token whitelisting.
+    /// When enabled, create_stream only accepts whitelisted tokens.
+    /// Only admin may call this.
+    fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
+
+    /// Adds a token to the whitelist.
+    /// Only admin may call this.
+    fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
+
+    /// Removes a token from the whitelist.
+    /// Only admin may call this.
+    fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
+
+    // ── Issue #222: Fee Sweep ────────────────────────────────────────────────
+
+    /// Sweeps accumulated fees or contract balance of a token to a destination.
+    /// Only admin may call this.
+    fn sweep_fees(env: Env, admin: Address, token: Address, destination: Address) -> Result<(), StreamError>;
+
+    // ── Issue #218: Slippage Protection ──────────────────────────────────────
+
+    /// Updates slippage protection parameters for a stream.
+    /// Only the stream sender may call this.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The stream ID.
+    /// * `reference_price` - Reference price in basis points for slippage calculation.
+    /// * `max_slippage_bps` - Maximum acceptable slippage in basis points (0-10000).
+    ///
+    /// # Errors
+    /// Returns `StreamError::InvalidSlippage` if max_slippage_bps > 10000.
+    fn set_slippage_params(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        reference_price: i128,
+        max_slippage_bps: u32,
+    ) -> Result<(), StreamError>;
 }

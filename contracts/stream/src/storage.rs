@@ -1,4 +1,4 @@
-use crate::types::{AuditEntry, Stream};
+use crate::types::{AuditEntry, Stream, VestingTranche};
 use soroban_sdk::{Address, Bytes, Env, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
@@ -729,4 +729,208 @@ pub fn remove_holdback(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&holdback_key(env, stream_id));
+// ---------------------------------------------------------------------------
+// Step-vesting tranche helpers
+// ---------------------------------------------------------------------------
+
+/// Storage key for a stream's tranche list: ("vt", stream_id).
+fn tranche_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "vt"), stream_id)
+}
+
+/// Persists the tranche list for a step-vesting stream.
+pub fn save_tranches(env: &Env, stream_id: u64, tranches: &Vec<VestingTranche>) {
+    env.storage()
+        .persistent()
+        .set(&tranche_key(env, stream_id), tranches);
+}
+
+/// Loads the tranche list for a stream. Returns an empty Vec if not found.
+pub fn load_tranches(env: &Env, stream_id: u64) -> Vec<VestingTranche> {
+    env.storage()
+        .persistent()
+        .get(&tranche_key(env, stream_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Removes the tranche list from storage (called on cancel / completion).
+pub fn remove_tranches(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&tranche_key(env, stream_id));
+// --- Rate Limiting ---
+
+const RATE_LIMIT_WINDOW_KEY: &str = "rl_win";
+const RATE_LIMIT_MAX_KEY: &str = "rl_max";
+const RATE_LIMIT_EXEMPT_KEY: &str = "rl_ex";
+
+/// Gets the rate limit window size in seconds (default: 3600).
+pub fn get_rate_limit_window(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, RATE_LIMIT_WINDOW_KEY))
+        .unwrap_or(3600u64)
+}
+
+/// Sets the rate limit window size in seconds.
+pub fn set_rate_limit_window(env: &Env, window_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, RATE_LIMIT_WINDOW_KEY), &window_seconds);
+}
+
+/// Gets the max creations per window (default: 20).
+pub fn get_rate_limit_max_creations(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, RATE_LIMIT_MAX_KEY))
+        .unwrap_or(20u32)
+}
+
+/// Sets the max creations per window.
+pub fn set_rate_limit_max_creations(env: &Env, max_creations: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, RATE_LIMIT_MAX_KEY), &max_creations);
+}
+
+fn rate_limit_key(env: &Env, addr: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "rl"), addr.clone())
+}
+
+/// Gets rate limit state: (window_start_time, count_in_current_window)
+pub fn get_rate_limit_state(env: &Env, addr: &Address) -> (u64, u32) {
+    env.storage()
+        .persistent()
+        .get(&rate_limit_key(env, addr))
+        .unwrap_or((0u64, 0u32))
+}
+
+/// Sets rate limit state.
+pub fn set_rate_limit_state(env: &Env, addr: &Address, window_start: u64, count: u32) {
+    env.storage()
+        .persistent()
+        .set(&rate_limit_key(env, addr), &(window_start, count));
+}
+
+fn rate_limit_exempt_key(env: &Env, addr: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "rle"), addr.clone())
+}
+
+/// Returns whether an address is exempt from rate limiting.
+pub fn is_rate_limit_exempt(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&rate_limit_exempt_key(env, addr))
+        .unwrap_or(false)
+}
+
+/// Adds an address to the rate limit exempt list.
+pub fn add_rate_limit_exempt(env: &Env, addr: &Address) {
+    env.storage()
+        .persistent()
+        .set(&rate_limit_exempt_key(env, addr), &true);
+}
+
+/// Removes an address from the rate limit exempt list.
+pub fn remove_rate_limit_exempt(env: &Env, addr: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&rate_limit_exempt_key(env, addr));
+}
+
+// --- Token Whitelist (for tokens, not recipients) ---
+
+const TOKEN_WHITELIST_ENABLED_KEY: &str = "twl_en";
+
+fn token_whitelist_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "twl"), token.clone())
+}
+
+/// Returns whether token whitelisting is enabled.
+pub fn is_token_whitelist_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, TOKEN_WHITELIST_ENABLED_KEY))
+        .unwrap_or(false)
+}
+
+/// Enables or disables token whitelisting.
+pub fn set_token_whitelist_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, TOKEN_WHITELIST_ENABLED_KEY), &enabled);
+}
+
+/// Returns whether a token is whitelisted.
+pub fn is_token_whitelisted(env: &Env, token: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&token_whitelist_key(env, token))
+        .unwrap_or(false)
+}
+
+/// Adds a token to the whitelist.
+pub fn add_token_to_whitelist(env: &Env, token: &Address) {
+    env.storage()
+        .persistent()
+        .set(&token_whitelist_key(env, token), &true);
+}
+
+/// Removes a token from the whitelist.
+pub fn remove_token_from_whitelist(env: &Env, token: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&token_whitelist_key(env, token));
+}
+
+// --- Fee Sweep Tracking ---
+
+const FEES_COLLECTED_KEY: &str = "fees_coll";
+
+fn fees_collected_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, FEES_COLLECTED_KEY), token.clone())
+}
+
+/// Gets accumulated fees for a token.
+pub fn get_fees_collected(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&fees_collected_key(env, token))
+        .unwrap_or(0i128)
+}
+
+/// Sets accumulated fees for a token.
+pub fn set_fees_collected(env: &Env, token: &Address, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&fees_collected_key(env, token), &amount);
+}
+
+/// Increments accumulated fees for a token.
+pub fn increment_fees_collected(env: &Env, token: &Address, amount: i128) -> Result<(), crate::errors::StreamError> {
+    let current = get_fees_collected(env, token);
+    let new = current.checked_add(amount).ok_or(crate::errors::StreamError::Overflow)?;
+    set_fees_collected(env, token, new);
+    Ok(())
+}
+
+// --- Slippage Protection ---
+
+fn slippage_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "slip"), stream_id)
+}
+
+/// Gets slippage parameters for a stream: (reference_price_bps, max_slippage_bps).
+pub fn get_slippage_params(env: &Env, stream_id: u64) -> Option<(i128, u32)> {
+    env.storage()
+        .persistent()
+        .get(&slippage_key(env, stream_id))
+}
+
+/// Sets slippage parameters for a stream.
+pub fn set_slippage_params(env: &Env, stream_id: u64, reference_price: i128, max_slippage_bps: u32) {
+    env.storage()
+        .persistent()
+        .set(&slippage_key(env, stream_id), &(reference_price, max_slippage_bps));
 }
