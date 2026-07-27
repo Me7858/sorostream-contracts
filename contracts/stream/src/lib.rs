@@ -44,8 +44,9 @@ mod decay_vesting_tests;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal};
 use storage::{
-    add_fee_exempt, add_to_whitelist, append_audit_entry, check_admin, clear_pending_fee_proposal,
-    clear_reentrancy_lock, decrement_active_stream_count, derive_stream_id, effective_sender_limit,
+    add_fee_exempt, add_rate_limit_exempt, add_to_whitelist, add_token_to_whitelist,
+    append_audit_entry, check_admin, clear_pending_fee_proposal, clear_reentrancy_lock,
+    decrement_active_stream_count, derive_stream_id, effective_sender_limit,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
     get_global_stream_at, get_global_stream_count, get_ids_by_recipient, get_ids_by_sender,
     get_pause_expiry, get_protocol_fee, get_sender_stream_count, get_treasury,
@@ -62,6 +63,24 @@ use storage::{
     write_admin, write_governance, write_guardian, write_min_duration, write_pending_fee_proposal,
     write_version, MAX_PAUSE_DURATION,
     load_tranches, save_tranches, remove_tranches,
+    get_fees_collected, get_global_stream_at, get_global_stream_count, get_ids_by_recipient,
+    get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
+    get_rate_limit_state, get_rate_limit_window, get_sender_stream_count, get_slippage_params,
+    get_treasury, get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count,
+    increment_batch_nonce, increment_fees_collected, index_by_recipient, index_by_sender,
+    index_global_stream, is_fee_exempt, is_paused_or_auto_unpause, is_rate_limit_exempt,
+    is_reentrancy_locked, is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled,
+    is_whitelisted, load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations,
+    read_audit_log, read_governance, read_guardian, read_min_duration, read_pending_fee_proposal,
+    read_version, record_migration, remove_delegate, remove_fee_exempt, remove_from_whitelist,
+    remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist, save_stream,
+    sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
+    set_delegate, set_fees_collected, set_max_streams_per_sender, set_pause_expiry, set_paused,
+    set_protocol_fee, set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window,
+    set_reentrancy_lock, set_sender_limit, set_slippage_params, set_token_whitelist_enabled,
+    set_treasury, set_whitelist_enabled, set_withdrawal_cooldown, set_xlm_token, stream_exists,
+    unindex_by_recipient, unindex_by_sender, write_admin, write_governance, write_guardian,
+    write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
 };
 use types::{VestingCurve, VestingTranche};
 
@@ -96,6 +115,43 @@ fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
         if !is_valid {
             return Err(StreamError::InvalidMetadataUri);
         }
+    }
+    Ok(())
+}
+
+/// Checks rate limiting for stream creation.
+/// Returns Ok if the sender is allowed to create a stream, Err otherwise.
+fn check_rate_limit(env: &Env, sender: &Address, now: u64) -> Result<(), StreamError> {
+    // Exempt addresses bypass rate limiting entirely
+    if is_rate_limit_exempt(env, sender) {
+        return Ok(());
+    }
+
+    let window_seconds = get_rate_limit_window(env);
+    let max_creations = get_rate_limit_max_creations(env);
+    let (window_start, count) = get_rate_limit_state(env, sender);
+
+    // If window has elapsed, reset counter
+    let (new_start, new_count) = if now >= window_start + window_seconds {
+        // New window
+        (now, 1u32)
+    } else {
+        // Still in current window
+        if count >= max_creations {
+            events::rate_limit_exceeded(env, sender);
+            return Err(StreamError::RateLimitExceeded);
+        }
+        (window_start, count + 1)
+    };
+
+    set_rate_limit_state(env, sender, new_start, new_count);
+    Ok(())
+}
+
+/// Validates that a token is whitelisted (if token whitelist is enabled).
+fn check_token_whitelist(env: &Env, token: &Address) -> Result<(), StreamError> {
+    if is_token_whitelist_enabled(env) && !is_token_whitelisted(env, token) {
+        return Err(StreamError::TokenNotWhitelisted);
     }
     Ok(())
 }
@@ -364,6 +420,10 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
+
+        // Get current time early for validations
+        let now = env.ledger().timestamp();
+
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
         }
@@ -401,9 +461,14 @@ impl SoroStreamContract {
             return Err(StreamError::SenderStreamLimitExceeded);
         }
 
+        // Check rate limiting (Issue #217)
+        check_rate_limit(&env, &sender, now)?;
+
+        // Check token whitelist (Issue #221)
+        check_token_whitelist(&env, &token)?;
+
         mark_nonce_used(&env, &sender, nonce);
 
-        let now = env.ledger().timestamp();
         let end_time = now
             .checked_add(duration_seconds)
             .ok_or(StreamError::Overflow)?;
@@ -868,6 +933,156 @@ impl SoroStreamContract {
         check_admin(&env);
         admin.require_auth();
         remove_from_whitelist(&env, &recipient);
+        Ok(())
+    }
+
+    /// Sets the rate limiting window size in seconds (Issue #217).
+    pub fn set_rate_limit_window(env: Env, admin: Address, window_seconds: u64) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_rate_limit_window(&env, window_seconds);
+        events::rate_limit_updated(&env, window_seconds, get_rate_limit_max_creations(&env));
+        Ok(())
+    }
+
+    /// Sets the max creations per rate limit window (Issue #217).
+    pub fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_rate_limit_max_creations(&env, max_creations);
+        events::rate_limit_updated(&env, get_rate_limit_window(&env), max_creations);
+        Ok(())
+    }
+
+    /// Adds an address to the rate limit exempt list (Issue #217).
+    pub fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        add_rate_limit_exempt(&env, &address);
+        Ok(())
+    }
+
+    /// Removes an address from the rate limit exempt list (Issue #217).
+    pub fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        remove_rate_limit_exempt(&env, &address);
+        Ok(())
+    }
+
+    /// Returns the remaining quota for an address within the current rate limit window (Issue #217).
+    pub fn remaining_quota(env: Env, address: Address) -> u32 {
+        if is_rate_limit_exempt(&env, &address) {
+            return u32::MAX;
+        }
+
+        let now = env.ledger().timestamp();
+        let window_seconds = get_rate_limit_window(&env);
+        let max_creations = get_rate_limit_max_creations(&env);
+        let (window_start, count) = get_rate_limit_state(&env, &address);
+
+        if now >= window_start + window_seconds {
+            // New window
+            max_creations
+        } else {
+            // In current window
+            if count >= max_creations {
+                0u32
+            } else {
+                max_creations - count
+            }
+        }
+    }
+
+    /// Enables or disables token whitelisting (Issue #221).
+    pub fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_token_whitelist_enabled(&env, enabled);
+        events::token_whitelist_toggled(&env, enabled);
+        Ok(())
+    }
+
+    /// Adds a token to the whitelist (Issue #221).
+    pub fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        add_token_to_whitelist(&env, &token);
+        events::token_whitelisted(&env, &token);
+        Ok(())
+    }
+
+    /// Removes a token from the whitelist (Issue #221).
+    pub fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        remove_token_from_whitelist(&env, &token);
+        events::token_dwhitelisted(&env, &token);
+        Ok(())
+    }
+
+    /// Sweeps accumulated fees from the contract to a destination address (Issue #222).
+    pub fn sweep_fees(env: Env, admin: Address, token: Address, destination: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+
+        let token_client = token::Client::new(&env, &token);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        
+        if contract_balance <= 0 {
+            return Ok(());
+        }
+
+        token_client.transfer(
+            &env.current_contract_address(),
+            &destination,
+            &contract_balance,
+        );
+
+        events::fee_swept(&env, &token, contract_balance, &destination);
+        Ok(())
+    }
+
+    /// Updates slippage protection parameters for a stream (Issue #218).
+    pub fn set_slippage_params(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        reference_price: i128,
+        max_slippage_bps: u32,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+
+        if max_slippage_bps > 10000 {
+            return Err(StreamError::InvalidSlippage);
+        }
+
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        set_slippage_params(&env, stream_id, reference_price, max_slippage_bps);
+        Ok(())
+    }
+
+    /// Updates metadata URI for a stream.
+    pub fn update_metadata_uri(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        metadata_uri: Option<String>,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+        validate_metadata_uri(&metadata_uri)?;
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        save_stream(&env, &stream);
+        events::metadata_uri_updated(&env, stream_id, &metadata_uri);
         Ok(())
     }
 
@@ -1760,17 +1975,26 @@ impl SoroStreamContract {
     }
 
     /// Delegates management of a stream to another address.
-    pub fn delegate(env: Env, sender: Address, stream_id: u64, operator: Address) -> Result<(), StreamError> {
+    ///
+    /// Only the stream sender may call this. The delegate may subsequently
+    /// act as the sender on `cancel_stream`, `top_up`, and `bump_stream_ttl`.
+    /// Emits `DelegateSet { stream_id, sender, delegate }`.
+    pub fn set_delegate(env: Env, sender: Address, stream_id: u64, delegate: Address) -> Result<(), StreamError> {
         sender.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         if stream.sender != sender {
             return Err(StreamError::NotSender);
         }
-        set_delegate(&env, stream_id, &operator);
+        set_delegate(&env, stream_id, &delegate);
+        events::delegate_set(&env, stream_id, &sender, &delegate);
         Ok(())
     }
 
     /// Revokes management of a stream from the current delegate.
+    ///
+    /// Only the stream sender may call this. After revocation the delegate
+    /// address can no longer act on behalf of the sender.
+    /// Emits `DelegateRevoked { stream_id, sender }`.
     pub fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
         sender.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -1778,12 +2002,57 @@ impl SoroStreamContract {
             return Err(StreamError::NotSender);
         }
         remove_delegate(&env, stream_id);
+        events::delegate_revoked(&env, stream_id, &sender);
         Ok(())
     }
 
+    /// Returns the current delegate address for a stream, if one has been set.
+    pub fn get_delegate(env: Env, stream_id: u64) -> Option<Address> {
+        storage::get_delegate(&env, stream_id)
+    }
+
     /// Returns the full stream struct for a given stream ID.
+    ///
+    /// If the stream's `end_time` has passed and the stream was not explicitly
+    /// cancelled, the returned `status` is `StreamStatus::Expired` — even if the
+    /// persisted value is still `Active` or `Completed`. This makes it unnecessary
+    /// for clients to compare timestamps themselves.
     pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
-        load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        // Surface Expired status to callers without requiring an explicit mark_expired call.
+        if stream.status == StreamStatus::Active || stream.status == StreamStatus::Completed {
+            let now = env.ledger().timestamp();
+            if now >= stream.end_time {
+                stream.status = StreamStatus::Expired;
+            }
+        }
+        Ok(stream)
+    }
+
+    /// Explicitly marks an elapsed stream as Expired, compacting its storage entry.
+    ///
+    /// Callable by anyone. The stream must be Active (or Completed) and its
+    /// `end_time` must have passed. Cancelled streams are never transitioned to
+    /// Expired. Emits `StreamExpired { stream_id }`.
+    pub fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        // Only Active or Completed streams can be marked Expired.
+        if stream.status == StreamStatus::Cancelled || stream.status == StreamStatus::Expired {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < stream.end_time {
+            return Err(StreamError::StreamNotComplete);
+        }
+
+        // Transition to Expired and persist the compacted state.
+        stream.status = StreamStatus::Expired;
+        save_stream(&env, &stream);
+
+        events::stream_expired(&env, stream_id);
+        Ok(())
     }
 
     /// Returns a paginated list of all stream IDs that have ever been created.
@@ -2530,59 +2799,75 @@ impl SoroStreamContract {
 
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
     ///
-    /// Bumps the TTL to cover the remaining stream duration plus a safety margin.
-    /// Only the sender or recipient may call this.
-    pub fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
-        caller.require_auth();
+    /// Callable by anyone — no auth required. Bumps the TTL to cover the remaining
+    /// stream duration plus a 24-hour safety buffer (~17280 ledgers). No-op when
+    /// the current TTL is already sufficient (extend_ttl is a no-op if new TTL <=
+    /// current TTL internally).
+    ///
+    /// Emits `TtlBumped { stream_id, new_expiry_ledger }`.
+    pub fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         if stream.sender != caller && stream.recipient != caller {
             return Err(StreamError::NotAuthorized);
         }
         if stream.status != StreamStatus::Active {
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
         }
 
         let now = env.ledger().timestamp();
         let remaining = stream.end_time.saturating_sub(now);
-        // Average ledger close time on Soroban mainnet is ~5 seconds.
-        // Add 1 extra ledger as safety margin.
-        let ledgers_needed = ((remaining / 5) as u32).saturating_add(1);
 
-        // Bump the stream entry
-        env.storage().persistent().bump(&stream_id, 0, ledgers_needed);
+        // ~5 s per ledger on mainnet; add 17280 ledgers (~24 h) safety buffer.
+        const SAFETY_BUFFER_LEDGERS: u32 = 17_280;
+        let ledgers_for_remaining = (remaining / 5) as u32;
+        let ledgers_needed = ledgers_for_remaining.saturating_add(SAFETY_BUFFER_LEDGERS);
 
-        // Bump the sender index slot
-        let sender_slot = storage::sender_slot_key(&env, &stream.sender, u32::MAX);
-        // Find the correct index by iterating
-        let cnt: u32 = env.storage().persistent().get(
-            &storage::sender_count_key(&env, &stream.sender)
-        ).unwrap_or(0u32);
-        for i in 0..cnt {
+        // extend_ttl only extends if ledgers_needed > current TTL.
+        env.storage()
+            .persistent()
+            .extend_ttl(&stream_id, ledgers_needed, ledgers_needed);
+
+        // Bump the sender index slot that references this stream.
+        let scnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&storage::sender_count_key(&env, &stream.sender))
+            .unwrap_or(0u32);
+        for i in 0..scnt {
             let slot = storage::sender_slot_key(&env, &stream.sender, i);
             if let Some(id) = env.storage().persistent().get::<_, u64>(&slot) {
                 if id == stream_id {
-                    env.storage().persistent().bump(&slot, 0, ledgers_needed);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot, ledgers_needed, ledgers_needed);
                     break;
                 }
             }
         }
 
-        // Bump the recipient index slot
-        let rcnt: u32 = env.storage().persistent().get(
-            &storage::recipient_count_key(&env, &stream.recipient)
-        ).unwrap_or(0u32);
+        // Bump the recipient index slot that references this stream.
+        let rcnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&storage::recipient_count_key(&env, &stream.recipient))
+            .unwrap_or(0u32);
         for i in 0..rcnt {
             let slot = storage::recipient_slot_key(&env, &stream.recipient, i);
             if let Some(id) = env.storage().persistent().get::<_, u64>(&slot) {
                 if id == stream_id {
-                    env.storage().persistent().bump(&slot, 0, ledgers_needed);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot, ledgers_needed, ledgers_needed);
                     break;
                 }
             }
         }
 
-        events::stream_topped_up(&env, stream_id, 0, stream.end_time);
+        let new_expiry_ledger = env.ledger().sequence().saturating_add(ledgers_needed);
+        events::ttl_bumped(&env, stream_id, new_expiry_ledger);
 
         Ok(())
     }
@@ -2985,8 +3270,26 @@ impl SoroStreamInterface for SoroStreamContract {
         Self::recalibrate_stats(env, admin)
     }
 
+    fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        Self::mark_expired(env, stream_id)
+    }
+
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         Self::bump_stream_ttl(env, stream_id, caller)
+    fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        Self::bump_stream_ttl(env, stream_id)
+    }
+
+    fn set_delegate(env: Env, sender: Address, stream_id: u64, delegate: Address) -> Result<(), StreamError> {
+        Self::set_delegate(env, sender, stream_id, delegate)
+    }
+
+    fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
+        Self::revoke_delegate(env, sender, stream_id)
+    }
+
+    fn get_delegate(env: Env, stream_id: u64) -> Option<Address> {
+        Self::get_delegate(env, stream_id)
     }
 
     fn migrate(env: Env, from_version: String, to_version: String) -> Result<(), StreamError> {

@@ -48,4 +48,8 @@ pub enum StreamError {
     PriceDeviationTooHigh = 38,
     /// Oracle contract call failed or returned an unexpected value.
     OracleError = 39,
+    RateLimitExceeded = 37,
+    TokenNotWhitelisted = 38,
+    SlippageExceeded = 39,
+    InvalidSlippage = 40,
 }

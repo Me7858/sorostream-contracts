@@ -50,6 +50,8 @@ pub enum StreamStatus {
     Completed,
     /// Stream is temporarily paused.
     Paused,
+    /// Stream has passed its end_time and been explicitly marked as expired.
+    Expired,
 }
 
 /// Status of a milestone.
