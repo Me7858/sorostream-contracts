@@ -41,6 +41,8 @@ mod differential_fuzz;
 mod tranche_oracle_tests;
 #[cfg(test)]
 mod decay_vesting_tests;
+#[cfg(test)]
+mod event_field_tests;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal};
 use storage::{
