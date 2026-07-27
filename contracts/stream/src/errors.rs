@@ -53,4 +53,6 @@ pub enum StreamError {
     TokenNotWhitelisted = 38,
     SlippageExceeded = 39,
     InvalidSlippage = 40,
+    DurationExceedsMax = 41,
+    InvalidTokenAddress = 42,
 }
