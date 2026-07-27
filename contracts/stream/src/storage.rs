@@ -1,4 +1,4 @@
-use crate::types::{AuditEntry, Stream};
+use crate::types::{AuditEntry, Stream, VestingTranche};
 use soroban_sdk::{Address, Bytes, Env, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
@@ -703,6 +703,68 @@ pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
     get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
 }
 
+// --- Accumulated fees per token (sweep_fees #222) ---
+
+fn fees_collected_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "fc"), token.clone())
+}
+
+/// Returns the total accumulated (unsewpt) fees for the given token.
+// --- Holdback escrow helpers ---
+
+fn holdback_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "hb"), stream_id)
+}
+
+/// Returns the holdback escrow amount for a stream (0 if not set).
+pub fn get_holdback(env: &Env, stream_id: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&holdback_key(env, stream_id))
+        .unwrap_or(0i128)
+}
+
+/// Stores the holdback escrow amount for a stream.
+pub fn set_holdback(env: &Env, stream_id: u64, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&holdback_key(env, stream_id), &amount);
+}
+
+/// Removes the holdback escrow entry (after claim or claw-back).
+pub fn remove_holdback(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&holdback_key(env, stream_id));
+// ---------------------------------------------------------------------------
+// Step-vesting tranche helpers
+// ---------------------------------------------------------------------------
+
+/// Storage key for a stream's tranche list: ("vt", stream_id).
+fn tranche_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "vt"), stream_id)
+}
+
+/// Persists the tranche list for a step-vesting stream.
+pub fn save_tranches(env: &Env, stream_id: u64, tranches: &Vec<VestingTranche>) {
+    env.storage()
+        .persistent()
+        .set(&tranche_key(env, stream_id), tranches);
+}
+
+/// Loads the tranche list for a stream. Returns an empty Vec if not found.
+pub fn load_tranches(env: &Env, stream_id: u64) -> Vec<VestingTranche> {
+    env.storage()
+        .persistent()
+        .get(&tranche_key(env, stream_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Removes the tranche list from storage (called on cancel / completion).
+pub fn remove_tranches(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&tranche_key(env, stream_id));
 // --- Rate Limiting ---
 
 const RATE_LIMIT_WINDOW_KEY: &str = "rl_win";
@@ -845,6 +907,30 @@ pub fn get_fees_collected(env: &Env, token: &Address) -> i128 {
         .unwrap_or(0i128)
 }
 
+/// Adds `amount` to the accumulated fees for the given token.
+///
+/// # Panics
+/// Panics on i128 overflow — not reachable in practice.
+pub fn accumulate_fees(env: &Env, token: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let current = get_fees_collected(env, token);
+    let next = current.checked_add(amount).expect("fees_collected overflow");
+    env.storage()
+        .persistent()
+        .set(&fees_collected_key(env, token), &next);
+}
+
+/// Resets accumulated fees for the given token to zero and returns the swept amount.
+pub fn drain_fees_collected(env: &Env, token: &Address) -> i128 {
+    let amount = get_fees_collected(env, token);
+    if amount > 0 {
+        env.storage()
+            .persistent()
+            .remove(&fees_collected_key(env, token));
+    }
+    amount
 /// Sets accumulated fees for a token.
 pub fn set_fees_collected(env: &Env, token: &Address, amount: i128) {
     env.storage()

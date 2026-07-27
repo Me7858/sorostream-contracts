@@ -150,19 +150,23 @@ pub trait SoroStreamInterface {
     /// Creates a new payment stream.
     ///
     /// Locks `amount` tokens for `recipient` over `duration_seconds`. The sender funds the stream
-    /// upfront via token transfer. Tokens are released at a constant flow rate.
+    /// upfront via token transfer. Tokens are released at a constant flow rate. An optional
+    /// `holdback_amount` is held separately in escrow and is only released via
+    /// `release_holdback` or returned via `claw_back_holdback`.
     ///
     /// # Parameters
     /// * `sender` - The payer who funds the stream (must sign the transaction).
     /// * `recipient` - The beneficiary who receives streamed tokens.
     /// * `token` - The SAC token contract address (e.g., USDC).
-    /// * `amount` - Total tokens to stream (in stroops).
+    /// * `amount` - Total tokens to lock (streaming portion + holdback), in stroops.
     /// * `duration_seconds` - Stream duration in seconds.
     /// * `cliff_seconds` - Seconds from start before any tokens are claimable (0 = no cliff).
     /// * `nonce` - Caller-supplied deduplication nonce (unique per sender).
     /// * `auto_renew` - Whether the stream restarts automatically upon completion.
     /// * `lock_until` - Ledger timestamp before which withdrawals are not permitted.
     /// * `allow_recipient_termination` - Whether the recipient may cancel the stream early.
+    /// * `holdback_amount` - Optional escrow portion withheld from streaming (0 = no holdback).
+    ///   Must be >= 0 and strictly less than `amount`.
     ///
     /// # Returns
     /// The unique stream ID (u64) of the newly created stream.
@@ -170,9 +174,9 @@ pub trait SoroStreamInterface {
     /// # Errors
     /// * `StreamError::ContractPaused` if the contract is paused.
     /// * `StreamError::DuplicateStream` if this sender has already used this nonce.
-    /// * `StreamError::ZeroAmount` if `amount <= 0`.
+    /// * `StreamError::ZeroAmount` if `amount <= 0` or `holdback_amount >= amount` or `holdback_amount < 0`.
     /// * `StreamError::InvalidCliff` if `cliff_seconds > duration_seconds`.
-    /// * `StreamError::ZeroFlowRate` if `amount / duration_seconds` rounds down to 0.
+    /// * `StreamError::ZeroFlowRate` if `(amount - holdback_amount) / duration_seconds` rounds down to 0.
     /// * `StreamError::Overflow` if `now + duration_seconds` or `now + cliff_seconds` overflows u64.
     fn create_stream(
         env: Env,
@@ -186,6 +190,7 @@ pub trait SoroStreamInterface {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
+        holdback_amount: i128,
     ) -> Result<u64, StreamError>;
 
     /// Creates a new payment stream using a federation name (Issue #238).
@@ -238,6 +243,46 @@ pub trait SoroStreamInterface {
 
     /// Resolves a federation name to its registered Stellar address (Issue #238).
     fn resolve_federation(env: Env, federation_name: String) -> Result<Address, StreamError>;
+    /// Releases the holdback escrow to the recipient.
+    ///
+    /// Only the stream sender (or their authorised delegate) may call this.
+    /// This represents the sender's explicit approval of delivery / milestone completion.
+    /// The held amount is transferred from contract escrow to the recipient.
+    /// Emits `HoldbackReleased { stream_id, amount, recipient }`.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The ID of the stream whose holdback should be released.
+    /// * `caller` - The sender or delegate address (must sign the transaction).
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * `StreamError::StreamNotFound` if no stream with this ID exists.
+    /// * `StreamError::NotAuthorized` if the caller is neither the sender nor their delegate.
+    /// * `StreamError::ZeroAmount` if the stream has no holdback configured (`holdback_amount == 0`).
+    /// * `StreamError::StreamNotActive` if the holdback has already been settled (released or clawed back).
+    fn release_holdback(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
+
+    /// Allows the sender to reclaim the holdback escrow before the recipient claims it.
+    ///
+    /// Only the stream sender (or their authorised delegate) may call this.
+    /// The held amount is transferred back to the sender.
+    /// Emits `HoldbackClawedBack { stream_id, amount, sender }`.
+    ///
+    /// # Parameters
+    /// * `stream_id` - The ID of the stream whose holdback should be reclaimed.
+    /// * `caller` - The sender or delegate address (must sign the transaction).
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * `StreamError::StreamNotFound` if no stream with this ID exists.
+    /// * `StreamError::NotAuthorized` if the caller is neither the sender nor their delegate.
+    /// * `StreamError::ZeroAmount` if the stream has no holdback configured (`holdback_amount == 0`).
+    /// * `StreamError::StreamNotActive` if the holdback has already been settled (released or clawed back).
+    fn claw_back_holdback(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
 
     /// Sets the global withdrawal cooldown in seconds.
     fn set_withdrawal_cooldown(env: Env, admin: Address, cooldown_seconds: u64) -> Result<(), StreamError>;
@@ -826,6 +871,18 @@ pub trait SoroStreamInterface {
     /// Only callable by admin. Use when counter drift is suspected.
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
 
+    /// Explicitly marks an elapsed stream as Expired, compacting its on-chain state.
+    ///
+    /// Callable by anyone. The stream must be Active/Completed and its `end_time`
+    /// must have already passed. Cancelled streams are never transitioned to Expired.
+    /// Emits `StreamExpired { stream_id }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `StreamNotActive` — stream is already Cancelled or Expired.
+    /// - `StreamNotComplete` — `end_time` has not yet been reached.
+    fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError>;
+
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
     ///
     /// Callable by anyone (no auth required). Bumps TTL to at least `stream.end_time`
@@ -835,6 +892,33 @@ pub trait SoroStreamInterface {
     /// Only the sender or recipient may call this.
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
 
+    /// Returns the total accumulated (unswept) protocol fees for `token`.
+    ///
+    /// # Parameters
+    /// * `token` - The SAC token address.
+    ///
+    /// # Returns
+    /// The amount of fees held in the contract for the given token, in stroops.
+    fn get_fees_collected(env: Env, token: Address) -> i128;
+
+    /// Sweeps all accumulated protocol fees for `token` to `destination`.
+    ///
+    /// Only the admin may call this. If the tracked balance is zero, this is a no-op.
+    ///
+    /// # Parameters
+    /// * `token` - The SAC token whose fees to sweep.
+    /// * `destination` - The address that receives the fees.
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success (including no-op when balance is zero).
+    ///
+    /// # Errors
+    /// Returns `StreamError::NotInitialized` if the contract has not been initialized.
+    /// Panics with authorization failure if the caller is not the admin.
+    ///
+    /// # Events
+    /// Emits `FeeSwept { token, amount, destination }` when `amount > 0`.
+    fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError>;
     /// Authorises a delegate address to manage a stream on behalf of the sender.
     ///
     /// The delegate may cancel, top-up, and bump-TTL the stream. Only the stream
