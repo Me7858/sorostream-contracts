@@ -275,6 +275,19 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+/// Emitted when the sender releases the holdback escrow to the recipient.
+pub fn holdback_released(env: &Env, stream_id: u64, amount: i128, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "HoldbackReleased"), stream_id),
+        (amount, recipient.clone()),
+    );
+}
+
+/// Emitted when the sender claws back the holdback escrow before the recipient claims it.
+pub fn holdback_clawed_back(env: &Env, stream_id: u64, amount: i128, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "HoldbackClawedBack"), stream_id),
+        (amount, sender.clone()),
 // ---------------------------------------------------------------------------
 // Step-vesting tranche events
 // ---------------------------------------------------------------------------

@@ -120,6 +120,11 @@ pub struct Stream {
     pub metadata_uri: Option<String>,
     /// Optional milestones for gated release (empty if not milestone-gated).
     pub milestones: Vec<Milestone>,
+    /// Optional holdback amount kept in escrow until explicitly released (in stroops).
+    /// Deducted from the streaming portion at creation time.
+    pub holdback_amount: i128,
+    /// Whether the holdback has been settled (released to recipient or clawed back to sender).
+    pub holdback_claimed: bool,
 
     // ── Step-vesting (tranche) fields ────────────────────────────────────────
 

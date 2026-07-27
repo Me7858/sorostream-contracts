@@ -53,7 +53,7 @@ proptest! {
         if flow_rate == 0 { return Ok(()); }
 
         c.create_stream(&sender, &recipient, &token_id, &amount, &duration, &cliff, &0u64, &false, &0u64,
-        &false);
+        &false, &0i128);
 
         let sender_after = token.balance(&sender);
         let contract_after = token.balance(&contract_id);
@@ -80,6 +80,7 @@ proptest! {
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &cliff, &0u64, &false, &0u64,
         &false,
+            &0i128,
         );
 
         let stream = c.get_stream(&stream_id);
@@ -115,6 +116,7 @@ proptest! {
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
         &false,
+            &0i128,
         );
         let token = TokenClient::new(&env, &token_id);
 
@@ -160,6 +162,7 @@ proptest! {
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
         &false,
+            &0i128,
         );
         let token = TokenClient::new(&env, &token_id);
 
@@ -193,6 +196,7 @@ proptest! {
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
         &false,
+            &0i128,
         );
         let stream_before = c.get_stream(&stream_id);
 
@@ -235,6 +239,7 @@ proptest! {
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
         &false,
+            &0i128,
         );
 
         let cancel_time = cancel_time.min(duration - 1).max(1);
@@ -267,6 +272,7 @@ proptest! {
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
         &false,
+            &0i128,
         );
 
         env.ledger().set_timestamp(1);
@@ -303,6 +309,7 @@ proptest! {
             let result = c.try_create_stream(
                 &sender, &recipient, &token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
+                &0i128,
             );
             prop_assert!(result.is_err());
 
@@ -314,6 +321,7 @@ proptest! {
                 let result = c.try_create_stream(
                     &sender, &recipient, &token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
         &false,
+                    &0i128,
                 );
                 prop_assert!(result.is_ok());
             }
@@ -343,6 +351,7 @@ proptest! {
 
         let result = c.try_create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+            &0i128,
         );
 
         // No panics should occur. The result is either Ok or an expected error.
@@ -380,6 +389,7 @@ proptest! {
 
         let result = c.try_create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &cliff, &0u64, &false, &0u64, &false,
+            &0i128,
         );
 
         if cliff >= duration {
@@ -405,12 +415,14 @@ proptest! {
 
         let result1 = c.try_create_stream(
             &sender, &recipient, &token_id, &100_000, &1000, &0, &nonce1, &false, &0u64, &false,
+            &0i128,
         );
 
         if result1.is_ok() && nonce1 == nonce2 {
             // Same nonce must be rejected
             let result2 = c.try_create_stream(
                 &sender, &recipient, &token_id, &100_000, &1000, &0, &nonce2, &false, &0u64, &false,
+                &0i128,
             );
             prop_assert!(
                 result2.is_err(),
@@ -435,6 +447,7 @@ proptest! {
 
         let result = c.try_create_stream(
             &sender, &recipient, &token_id, &amount, &large_duration, &0u64, &0u64, &false, &0u64, &false,
+            &0i128,
         );
 
         // No panics allowed
@@ -477,6 +490,7 @@ proptest! {
 
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+            &0i128,
         );
         let stream_before = c.get_stream(&stream_id);
         let old_end_time = stream_before.end_time;
@@ -523,6 +537,7 @@ proptest! {
 
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+            &0i128,
         );
         let stream_before = c.get_stream(&stream_id);
         let old_end_time = stream_before.end_time;
@@ -568,6 +583,7 @@ proptest! {
 
         let stream_id = c.create_stream(
             &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64, &false,
+            &0i128,
         );
         let stream_before = c.get_stream(&stream_id);
         let old_deposit = stream_before.deposit;
