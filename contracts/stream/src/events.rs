@@ -448,3 +448,67 @@ pub fn federation_unregistered(env: &Env, federation_name: &String) {
         federation_name.clone(),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Withdrawal steps & minimum withdrawal amount events
+// ---------------------------------------------------------------------------
+
+/// Emitted alongside `StreamCreated` when a stream is configured with
+/// `withdrawal_steps` or `min_withdrawal_amount` (or both).
+///
+/// Indexers that only listen to `StreamCreated` will still function; this
+/// supplemental event carries the extra configuration for SDK clients that
+/// want to surface step/floor information.
+pub fn stream_config(
+    env: &Env,
+    stream_id: u64,
+    withdrawal_steps: Option<u32>,
+    min_withdrawal_amount: Option<i128>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamConfig"), stream_id),
+        (withdrawal_steps, min_withdrawal_amount),
+    );
+}
+
+/// Emitted when a withdrawal step is completed.
+///
+/// `step_index` is the 1-based step number just completed (1 = first step).
+/// `amount` is the tokens transferred to the recipient for this step.
+pub fn withdrawal_step_completed(
+    env: &Env,
+    stream_id: u64,
+    step_index: u32,
+    total_steps: u32,
+    amount: i128,
+    recipient: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "WithdrawalStepCompleted"), stream_id),
+        (step_index, total_steps, amount, recipient.clone()),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step-interval pure helper (no storage, no env needed)
+// ---------------------------------------------------------------------------
+
+/// Computes the length in seconds of each evenly-spaced withdrawal step.
+///
+/// Returns `None` if `steps` is 0 (division by zero guard).
+///
+/// ```text
+/// step_interval = (end_time - start_time) / steps   (integer division)
+/// ```
+///
+/// The *k*-th step (0-based) boundary is:
+/// ```text
+/// start_time + (k + 1) * step_interval
+/// ```
+pub fn compute_step_interval(start_time: u64, end_time: u64, steps: u32) -> Option<u64> {
+    if steps == 0 {
+        return None;
+    }
+    let duration = end_time.saturating_sub(start_time);
+    Some(duration / steps as u64)
+}

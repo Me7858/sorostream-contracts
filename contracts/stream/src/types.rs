@@ -154,6 +154,68 @@ pub struct Stream {
     /// Release curve governing how tokens become claimable over time.
     /// Defaults to `VestingCurve::Linear` for all existing streams.
     pub curve: VestingCurve,
+
+    // ── Withdrawal steps ─────────────────────────────────────────────────────
+
+    /// Optional number of evenly-spaced withdrawal steps.
+    ///
+    /// When `Some(n)`, the stream duration is divided into `n` equal intervals
+    /// of `(end_time - start_time) / n` seconds each.  Recipients may only call
+    /// `withdraw` at or after the boundary of the next unclaimed step.
+    /// `None` means free-form withdrawal (default behaviour).
+    pub withdrawal_steps: Option<u32>,
+
+    /// Index of the last completed withdrawal step (0-based).
+    /// Starts at 0; incremented each time a step boundary is crossed.
+    /// Only meaningful when `withdrawal_steps` is `Some`.
+    pub current_step: u32,
+
+    // ── Minimum withdrawal amount ─────────────────────────────────────────────
+
+    /// Optional minimum claimable amount required before a withdrawal is accepted.
+    ///
+    /// When `Some(floor)`, `withdraw` rejects any call where the claimable
+    /// amount is below `floor` — unless it is the final claim (i.e. the full
+    /// remaining deposit is being drained), in which case the floor is bypassed.
+    /// `None` means no minimum (default behaviour).
+    pub min_withdrawal_amount: Option<i128>,
+}
+
+/// Health status of a stream's on-chain storage entry, based on its TTL.
+///
+/// Thresholds:
+/// - `Healthy`    — TTL remaining >= 10,000 ledgers
+/// - `TTLWarning` — TTL remaining in [1,000 .. 10,000) ledgers
+/// - `AtRisk`     — TTL remaining < 1,000 ledgers (eviction imminent)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HealthStatus {
+    /// Stream storage TTL is comfortable (>= 10,000 ledgers remaining).
+    Healthy,
+    /// Stream storage TTL is getting low (< 10,000 ledgers remaining).
+    /// Clients should consider calling `bump_stream_ttl` soon.
+    TTLWarning,
+    /// Stream storage TTL is critically low (< 1,000 ledgers remaining).
+    /// The stream is at risk of being evicted from the ledger.
+    AtRisk,
+}
+
+/// Snapshot of a stream's on-chain storage health.
+///
+/// Returned by `get_stream_health(stream_id)`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamHealth {
+    /// Current ledger sequence number at the time of the query.
+    pub current_ledger: u32,
+    /// Stream end timestamp (Unix seconds).
+    pub end_time: u64,
+    /// Ledgers remaining before the stream's persistent storage entry expires.
+    /// A value of 0 means the TTL information could not be determined
+    /// (e.g. the entry has already expired or the query is not supported).
+    pub ttl_remaining_ledgers: u32,
+    /// Derived health classification based on `ttl_remaining_ledgers`.
+    pub status: HealthStatus,
 }
 
 /// Aggregate contract statistics.

@@ -44,15 +44,26 @@ pub enum StreamError {
     TokenNotWhitelisted = 37,
     /// One or more tranches have invalid data (e.g. zero amount, unsorted unlock times,
     /// total tranche amount does not match deposit, or empty tranche list on step-vesting).
-    InvalidTranches = 37,
+    InvalidTranches = 38,
     /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
-    PriceDeviationTooHigh = 38,
+    PriceDeviationTooHigh = 39,
     /// Oracle contract call failed or returned an unexpected value.
-    OracleError = 39,
-    RateLimitExceeded = 37,
-    TokenNotWhitelisted = 38,
-    SlippageExceeded = 39,
-    InvalidSlippage = 40,
-    DurationExceedsMax = 41,
-    InvalidTokenAddress = 42,
+    OracleError = 40,
+    RateLimitExceeded = 41,
+    SlippageExceeded = 42,
+    InvalidSlippage = 43,
+    DurationExceedsMax = 44,
+    InvalidTokenAddress = 45,
+    /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
+    /// existing entry even after the defensive retry increment.  This should never occur
+    /// in normal operation; it indicates a SHA-256 prefix collision or a storage bug.
+    IDCollision = 46,
+    /// A withdrawal was attempted before the next evenly-spaced step threshold has
+    /// been reached.  Callers should wait until
+    /// `start_time + (current_step + 1) * step_interval` passes.
+    NextStepNotReached = 47,
+    /// The claimable amount is below the stream's configured `min_withdrawal_amount`
+    /// floor.  This check is bypassed on the final claim so the recipient can always
+    /// drain the remaining balance.
+    AmountBelowMinimum = 48,
 }
