@@ -113,6 +113,7 @@ use storage::{
     set_treasury, set_whitelist_enabled, set_withdrawal_cooldown, set_xlm_token, stream_exists,
     unindex_by_recipient, unindex_by_sender, write_admin, write_governance, write_guardian,
     write_max_duration, write_min_duration, write_pending_fee_proposal, write_version, MAX_PAUSE_DURATION,
+    read_max_future_start_offset, write_max_future_start_offset, DEFAULT_MAX_FUTURE_START_OFFSET,
 };
 use types::{VestingCurve, VestingTranche};
 
@@ -707,6 +708,25 @@ impl SoroStreamContract {
     pub fn set_max_duration(env: Env, admin: Address, seconds: u64) {
         admin.require_auth();
         write_max_duration(&env, seconds);
+    }
+
+    /// Returns the maximum allowed future start-time offset in seconds.
+    ///
+    /// Scheduled streams must have `start_time <= now + max_future_start_offset`.
+    /// Defaults to 365 days (31_536_000 seconds) when not explicitly configured.
+    pub fn max_future_start_offset(env: Env) -> u64 {
+        read_max_future_start_offset(&env)
+    }
+
+    /// Sets the maximum allowed future start-time offset in seconds.
+    ///
+    /// A value of `0` disables future-dated streams entirely (start_time must equal now).
+    /// Only the admin may call this.
+    pub fn set_max_future_start_offset(env: Env, admin: Address, offset_seconds: u64) {
+        admin.require_auth();
+        write_max_future_start_offset(&env, offset_seconds);
+    }
+
     // ── Step-vesting: create_stream_with_schedule ────────────────────────────
 
     /// Creates a step-vesting stream whose tokens release in discrete tranches.
@@ -1312,6 +1332,170 @@ impl SoroStreamContract {
         save_stream(&env, &stream);
         events::auto_renew_cancelled(&env, stream_id);
         Ok(())
+    }
+
+    /// Creates a payment stream with a future `start_time`.
+    ///
+    /// Identical to [`create_stream`] except the caller supplies an explicit
+    /// `start_time` (Unix timestamp). This is useful for scheduling a stream
+    /// that should begin at a known future date.
+    ///
+    /// # Validation
+    /// - `start_time` must be `>= now` (cannot schedule in the past).
+    /// - `start_time` must be `<= now + max_future_start_offset_seconds`.
+    ///   The default offset is 365 days; the admin can change it via
+    ///   [`set_max_future_start_offset`].
+    ///
+    /// Returns [`StreamError::InvalidStartTime`] when `start_time < now`.
+    /// Returns [`StreamError::StartTimeTooFar`] when the offset limit is exceeded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_scheduled(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        start_time: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+        holdback_amount: i128,
+    ) -> Result<u64, StreamError> {
+        sender.require_auth();
+
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // ── start_time validation ────────────────────────────────────────────
+        if start_time < now {
+            return Err(StreamError::InvalidStartTime);
+        }
+        let max_offset = read_max_future_start_offset(&env);
+        let max_allowed_start = now.checked_add(max_offset).ok_or(StreamError::Overflow)?;
+        if start_time > max_allowed_start {
+            return Err(StreamError::StartTimeTooFar);
+        }
+
+        if nonce_used(&env, &sender, nonce) {
+            return Err(StreamError::DuplicateStream);
+        }
+        if amount <= 0 {
+            return Err(StreamError::ZeroAmount);
+        }
+        if holdback_amount < 0 || holdback_amount >= amount {
+            return Err(StreamError::ZeroAmount);
+        }
+        if cliff_seconds > duration_seconds {
+            return Err(StreamError::InvalidCliff);
+        }
+        if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
+            return Err(StreamError::RecipientNotWhitelisted);
+        }
+
+        let min_dur = read_min_duration(&env);
+        if duration_seconds < min_dur {
+            return Err(StreamError::StreamDurationTooShort);
+        }
+
+        let max_dur = read_max_duration(&env);
+        if max_dur > 0 && duration_seconds > max_dur {
+            return Err(StreamError::DurationExceedsMax);
+        }
+
+        let streaming_amount = amount
+            .checked_sub(holdback_amount)
+            .ok_or(StreamError::Overflow)?;
+        let flow_rate = streaming_amount / duration_seconds as i128;
+        if flow_rate == 0 {
+            return Err(StreamError::ZeroFlowRate);
+        }
+
+        let sender_count = get_sender_stream_count(&env, &sender);
+        let limit = effective_sender_limit(&env, &sender);
+        if sender_count >= limit {
+            return Err(StreamError::SenderStreamLimitExceeded);
+        }
+
+        check_rate_limit(&env, &sender, now)?;
+        check_token_whitelist(&env, &token)?;
+        validate_token_address(&env, &token)?;
+
+        mark_nonce_used(&env, &sender, nonce);
+
+        let end_time = start_time
+            .checked_add(duration_seconds)
+            .ok_or(StreamError::Overflow)?;
+        let cliff_time = start_time
+            .checked_add(cliff_seconds)
+            .ok_or(StreamError::Overflow)?;
+
+        let stream_id = derive_stream_id(&env, &sender, &recipient, start_time, nonce);
+        if stream_exists(&env, stream_id) {
+            return Err(StreamError::StreamIdConflict);
+        }
+
+        let creation_fee = get_creation_fee_xlm(&env);
+        if creation_fee > 0 {
+            let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+            let xlm_token = get_xlm_token(&env).ok_or(StreamError::NotInitialized)?;
+            token::Client::new(&env, &xlm_token).transfer(&sender, &treasury, &creation_fee);
+            events::creation_fee_collected(&env, creation_fee, &treasury);
+        }
+
+        token::Client::new(&env, &token).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let stream = Stream {
+            id: stream_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            token,
+            deposit: streaming_amount,
+            flow_rate,
+            start_time,
+            cliff_time,
+            lock_until,
+            end_time,
+            last_withdraw_time: start_time,
+            status: StreamStatus::Active,
+            auto_renew,
+            allow_recipient_termination,
+            last_pause_time: 0,
+            total_withdrawn: 0,
+            metadata: Bytes::new(&env),
+            locked: false,
+            metadata_uri: None,
+            milestones: Vec::new(&env),
+            holdback_amount,
+            holdback_claimed: false,
+            milestones: soroban_sdk::Vec::new(&env),
+            is_step_vesting: false,
+            tranches_claimed: 0,
+            oracle: None,
+            max_price_deviation_bps: 0,
+            creation_price: 0,
+            curve: VestingCurve::Linear,
+        };
+
+        save_stream(&env, &stream);
+        index_by_sender(&env, &sender, stream_id);
+        index_by_recipient(&env, &recipient, stream_id);
+        index_global_stream(&env, stream_id);
+        increment_active_stream_count(&env);
+        set_sender_last_creation_time(&env, &sender, now);
+
+        events::stream_created(&env, stream_id, &sender, &recipient, amount, flow_rate, end_time);
+
+        Ok(stream_id)
     }
 
     /// Allows the recipient to withdraw all tokens earned since last withdrawal.

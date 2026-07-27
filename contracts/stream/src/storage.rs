@@ -19,6 +19,9 @@ const PAUSE_EXPIRES_KEY: &str = "p_exp";
 /// Maximum pause duration in seconds (72 hours). After this the contract auto-unpauses.
 pub const MAX_PAUSE_DURATION: u64 = 72 * 60 * 60;
 const CREATION_FEE_XLM_KEY: &str = "cf_xlm";
+/// Default maximum start-time offset: 365 days in seconds.
+pub const DEFAULT_MAX_FUTURE_START_OFFSET: u64 = 365 * 24 * 60 * 60;
+const MAX_FUTURE_OFFSET_KEY: &str = "mf_start";
 
 /// Stores the contract admin address.
 pub fn write_admin(env: &Env, admin: &Address) {
@@ -391,6 +394,26 @@ pub fn write_max_duration(env: &Env, duration: u64) {
     env.storage()
         .instance()
         .set(&Symbol::new(env, MAX_DURATION_KEY), &duration);
+}
+
+/// Gets the maximum allowed future start-time offset in seconds.
+///
+/// When a caller creates a scheduled stream with an explicit `start_time`,
+/// `start_time` must satisfy `start_time <= now + max_future_start_offset`.
+/// Defaults to [`DEFAULT_MAX_FUTURE_START_OFFSET`] (365 days) when not set.
+pub fn read_max_future_start_offset(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, MAX_FUTURE_OFFSET_KEY))
+        .unwrap_or(DEFAULT_MAX_FUTURE_START_OFFSET)
+}
+
+/// Sets the maximum allowed future start-time offset in seconds.
+/// Only the admin may call this via the contract's `set_max_future_start_offset` instruction.
+pub fn write_max_future_start_offset(env: &Env, offset_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, MAX_FUTURE_OFFSET_KEY), &offset_seconds);
 }
 
 // --- Delegate helpers ---

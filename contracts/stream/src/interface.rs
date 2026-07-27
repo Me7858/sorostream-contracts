@@ -710,6 +710,35 @@ pub trait SoroStreamInterface {
     /// Only the admin may call this.
     fn set_max_duration(env: Env, admin: Address, seconds: u64);
 
+    /// Returns the maximum allowed future start-time offset in seconds (default: 365 days).
+    fn max_future_start_offset(env: Env) -> u64;
+
+    /// Sets the maximum allowed future start-time offset in seconds.
+    /// Only the admin may call this.
+    fn set_max_future_start_offset(env: Env, admin: Address, offset_seconds: u64);
+
+    /// Creates a payment stream with a caller-supplied `start_time`.
+    ///
+    /// `start_time` must satisfy `now <= start_time <= now + max_future_start_offset`.
+    /// Returns [`StreamError::InvalidStartTime`] for past timestamps and
+    /// [`StreamError::StartTimeTooFar`] when the offset limit is exceeded.
+    #[allow(clippy::too_many_arguments)]
+    fn create_stream_scheduled(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        start_time: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+        holdback_amount: i128,
+    ) -> Result<u64, StreamError>;
+
     /// Runs a one-time migration step after a WASM upgrade. Admin-gated and idempotent.
     fn migrate(env: Env, from_version: String, to_version: String) -> Result<(), StreamError>;
 

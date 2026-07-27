@@ -55,4 +55,7 @@ pub enum StreamError {
     InvalidSlippage = 40,
     DurationExceedsMax = 41,
     InvalidTokenAddress = 42,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 43,
 }
