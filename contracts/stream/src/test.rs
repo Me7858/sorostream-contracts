@@ -3215,3 +3215,189 @@ fn test_sweep_fees_unauthorized_rejected() {
     let result = c.try_sweep_fees(&token_id, &destination);
     assert!(result.is_err(), "non-admin should not be able to sweep fees");
 }
+
+// ── Issue #308 – Minimum valid parameter boundary tests ───────────────────────
+
+/// Minimum valid stream: amount = duration = 1 → flow_rate = 1.
+///
+/// This is the smallest set of parameters that passes every validation gate:
+/// - amount > 0  ✓
+/// - duration >= min_duration (0 after set_min_duration)  ✓
+/// - flow_rate = amount / duration = 1 (non-zero)  ✓
+#[test]
+fn test_create_stream_minimum_valid_parameters() {
+    let t = setup(); // set_min_duration(0) called inside setup()
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1i128,  // minimum amount: 1 stroop
+        &1u64,   // minimum duration: 1 second
+        &0u64,   // no cliff
+        &0u64,   // nonce
+        &false,  // auto_renew
+        &0u64,   // lock_until
+        &false,  // allow_recipient_termination
+        &0i128,  // no holdback
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 1, "deposit should equal the minimum amount");
+    assert_eq!(stream.flow_rate, 1, "flow_rate should be 1 stroop/sec");
+    assert_eq!(stream.status, StreamStatus::Active, "stream should be active");
+    assert_eq!(stream.sender, t.sender);
+    assert_eq!(stream.recipient, t.recipient);
+}
+
+/// get_claimable returns the correct amount at the minimum boundary.
+///
+/// With flow_rate = 1 and elapsed = 1 second the claimable balance should be 1.
+#[test]
+fn test_create_stream_minimum_claimable_after_one_second() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(1000);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1i128,
+        &1u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    // Advance one second — the entire deposit should now be claimable
+    t.env.ledger().set_timestamp(1001);
+
+    let claimable = c.get_claimable(&stream_id);
+    assert_eq!(claimable, 1, "full deposit should be claimable after the stream duration elapses");
+}
+
+/// Minimum amount stream: after the single second elapses, withdraw claims the
+/// full 1-stroop deposit and the stream completes.
+#[test]
+fn test_create_stream_minimum_withdraw_full_deposit() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1i128,
+        &1u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    // Advance past the end
+    t.env.ledger().set_timestamp(2);
+
+    let before = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient);
+    let after = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+
+    assert_eq!(after - before, 1, "recipient should receive exactly 1 stroop");
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Completed, "stream should be completed after full withdrawal");
+}
+
+/// top_up with the minimum valid amount (1 stroop) must extend the end_time by
+/// exactly 1 second (extra_seconds = 1 / flow_rate = 1 / 1 = 1).
+#[test]
+fn test_top_up_minimum_valid_amount() {
+    let t = setup();
+    let c = client(&t);
+
+    // Mint extra tokens so the sender can top up
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &1_000_000);
+
+    t.env.ledger().set_timestamp(0);
+
+    // flow_rate = 100_000 / 1000 = 100; a top-up of 100 adds 1 second.
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    let before = c.get_stream(&stream_id);
+    let expected_extension = 1u64; // 100 stroops / flow_rate 100 = 1 s
+
+    c.top_up(&stream_id, &t.sender, &t.token_id, &100i128);
+
+    let after = c.get_stream(&stream_id);
+    assert_eq!(
+        after.end_time,
+        before.end_time + expected_extension,
+        "end_time should extend by exactly 1 second on minimum top-up"
+    );
+    assert_eq!(
+        after.deposit,
+        before.deposit + 100,
+        "deposit should increase by the top-up amount"
+    );
+}
+
+/// top_up with amount = 1 on a flow_rate = 1 stream adds exactly 1 second —
+/// the smallest possible extension.
+#[test]
+fn test_top_up_minimum_amount_on_minimum_flow_rate_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    // Extra tokens for top-up
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &1_000_000);
+
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with flow_rate = 1 (amount = duration = 100)
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100i128,
+        &100u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    let before = c.get_stream(&stream_id);
+
+    c.top_up(&stream_id, &t.sender, &t.token_id, &1i128);
+
+    let after = c.get_stream(&stream_id);
+    assert_eq!(
+        after.end_time,
+        before.end_time + 1,
+        "1-stroop top-up on a flow_rate=1 stream should add exactly 1 second"
+    );
+}
