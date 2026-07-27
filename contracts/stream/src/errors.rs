@@ -41,6 +41,7 @@ pub enum StreamError {
     ReentrancyDetected = 34,
     InvalidMetadataUri = 35,
     StreamNotComplete = 36,
+    TokenNotWhitelisted = 37,
     /// One or more tranches have invalid data (e.g. zero amount, unsorted unlock times,
     /// total tranche amount does not match deposit, or empty tranche list on step-vesting).
     InvalidTranches = 37,

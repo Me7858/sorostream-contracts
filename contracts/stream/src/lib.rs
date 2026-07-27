@@ -44,6 +44,11 @@ mod decay_vesting_tests;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal};
 use storage::{
+    accumulate_fees, add_fee_exempt, add_to_whitelist, append_audit_entry, check_admin,
+    clear_pending_fee_proposal, clear_reentrancy_lock, decrement_active_stream_count,
+    derive_stream_id, drain_fees_collected, effective_sender_limit,
+    get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
+    get_fees_collected, get_global_stream_at, get_global_stream_count, get_ids_by_recipient,
     add_fee_exempt, add_rate_limit_exempt, add_to_whitelist, add_token_to_whitelist,
     append_audit_entry, check_admin, clear_pending_fee_proposal, clear_reentrancy_lock,
     decrement_active_stream_count, derive_stream_id, effective_sender_limit,
@@ -324,6 +329,39 @@ impl SoroStreamContract {
     /// Returns whether `addr` is currently fee-exempt.
     pub fn is_fee_exempt(env: Env, addr: Address) -> bool {
         is_fee_exempt(&env, &addr)
+    }
+
+    /// Returns the total accumulated (unswept) protocol fees for the given token.
+    pub fn get_fees_collected(env: Env, token: Address) -> i128 {
+        get_fees_collected(&env, &token)
+    }
+
+    /// Sweeps all accumulated protocol fees for `token` to `destination`.
+    ///
+    /// Only the admin may call this.
+    ///
+    /// - If `fees_collected[token]` is zero, this is a no-op (no transfer, no event).
+    /// - Otherwise, transfers the exact tracked amount to `destination`, resets the
+    ///   counter to zero, and emits a `FeeSwept` event.
+    ///
+    /// # Errors
+    /// - `StreamError::NotInitialized` if the contract has not been initialized.
+    /// - `StreamError::NotAuthorized` if the caller is not the admin (panics via `check_admin`).
+    pub fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+
+        let amount = drain_fees_collected(&env, &token);
+
+        if amount > 0 {
+            token::Client::new(&env, &token).transfer(
+                &env.current_contract_address(),
+                &destination,
+                &amount,
+            );
+            events::fee_swept(&env, &token, amount, &destination);
+        }
+
+        Ok(())
     }
 
     /// Upgrades the contract WASM bytecode. Only the admin may call this.
@@ -1325,7 +1363,7 @@ impl SoroStreamContract {
             .ok_or(StreamError::Overflow)?;
         let claimable = raw_claimable.min(available);
 
-        let (recipient_amount, fee_amount, treasury_opt) = if claimable > 0 {
+        let (recipient_amount, fee_amount) = if claimable > 0 {
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                 claimable
@@ -1335,10 +1373,9 @@ impl SoroStreamContract {
             } else {
                 0
             };
-            let treasury = get_treasury(&env);
-            (claimable - fee_amount, fee_amount, treasury)
+            (claimable - fee_amount, fee_amount)
         } else {
-            (0, 0, None)
+            (0, 0)
         };
 
         // EFFECTS: update all state before any external call
@@ -1349,6 +1386,11 @@ impl SoroStreamContract {
                 .ok_or(StreamError::Overflow)?;
         }
         stream.last_withdraw_time = effective_now;
+
+        // Accumulate fees in contract storage (swept via sweep_fees by admin)
+        if fee_amount > 0 {
+            accumulate_fees(&env, &stream.token, fee_amount);
+        }
 
         let stream_ended = now >= stream.end_time;
 
@@ -1373,16 +1415,6 @@ impl SoroStreamContract {
                             &recipient,
                             &recipient_amount,
                         );
-                    }
-                    if fee_amount > 0 {
-                        if let Some(ref t) = treasury_opt {
-                            token_client.transfer(
-                                &env.current_contract_address(),
-                                t,
-                                &fee_amount,
-                            );
-                            events::fee_collected(&env, stream_id, fee_amount, t);
-                        }
                     }
                     if dust > 0 {
                         token_client.transfer(
@@ -1414,16 +1446,6 @@ impl SoroStreamContract {
                             &recipient_amount,
                         );
                     }
-                    if fee_amount > 0 {
-                        if let Some(ref t) = treasury_opt {
-                            token_client.transfer(
-                                &env.current_contract_address(),
-                                t,
-                                &fee_amount,
-                            );
-                            events::fee_collected(&env, stream_id, fee_amount, t);
-                        }
-                    }
                     token_client.transfer(
                         &stream.sender,
                         &env.current_contract_address(),
@@ -1446,16 +1468,6 @@ impl SoroStreamContract {
                         &recipient_amount,
                     );
                 }
-                if fee_amount > 0 {
-                    if let Some(ref t) = treasury_opt {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            t,
-                            &fee_amount,
-                        );
-                        events::fee_collected(&env, stream_id, fee_amount, t);
-                    }
-                }
                 if dust > 0 {
                     token_client.transfer(
                         &env.current_contract_address(),
@@ -1476,16 +1488,6 @@ impl SoroStreamContract {
                     &recipient,
                     &recipient_amount,
                 );
-            }
-            if fee_amount > 0 {
-                if let Some(ref t) = treasury_opt {
-                    token_client.transfer(
-                        &env.current_contract_address(),
-                        t,
-                        &fee_amount,
-                    );
-                    events::fee_collected(&env, stream_id, fee_amount, t);
-                }
             }
             if claimable > 0 {
                 let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
@@ -1790,6 +1792,11 @@ impl SoroStreamContract {
                         .ok_or(StreamError::Overflow)?;
                     stream.last_withdraw_time = effective_now;
 
+                    // Accumulate fees in contract storage (swept via sweep_fees by admin)
+                    if fee_amount > 0 {
+                        accumulate_fees(&env, &stream.token, fee_amount);
+                    }
+
                     let token_client = token::Client::new(&env, &stream.token);
                     if recipient_amount > 0 {
                         token_client.transfer(
@@ -1797,16 +1804,6 @@ impl SoroStreamContract {
                             &current_recipient,
                             &recipient_amount,
                         );
-                    }
-                    if fee_amount > 0 {
-                        if let Some(treasury) = get_treasury(&env) {
-                            token_client.transfer(
-                                &env.current_contract_address(),
-                                &treasury,
-                                &fee_amount,
-                            );
-                            events::fee_collected(&env, stream_id, fee_amount, &treasury);
-                        }
                     }
                     events::stream_withdrawn(&env, stream_id, &current_recipient, claimable, now);
                 }
@@ -2560,6 +2557,11 @@ impl SoroStreamContract {
             }
             stream.last_withdraw_time = effective_now;
 
+            // Accumulate fees in contract storage (swept via sweep_fees by admin)
+            if fee_amount > 0 {
+                accumulate_fees(&env, &stream.token, fee_amount);
+            }
+
             if now >= stream.end_time {
                 let duration = stream.end_time - stream.start_time;
                 let dust = stream.deposit.saturating_sub(
@@ -2587,15 +2589,6 @@ impl SoroStreamContract {
                             &recipient_amount,
                         );
                     }
-                    if fee_amount > 0 {
-                        if let Some(treasury) = get_treasury(&env) {
-                            token_client.transfer(
-                                &env.current_contract_address(),
-                                &treasury,
-                                &fee_amount,
-                            );
-                        }
-                    }
                     token_client.transfer(
                         &stream.sender,
                         &env.current_contract_address(),
@@ -2615,20 +2608,6 @@ impl SoroStreamContract {
                             &recipient,
                             &recipient_amount,
                         );
-                    }
-                    if fee_amount > 0 {
-                        if let Some(treasury) = get_treasury(&env) {
-                            token_client.transfer(
-                                &env.current_contract_address(),
-                                &treasury,
-                                &fee_amount,
-                            );
-                            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
-                                &treasury,
-                                &Symbol::new(&env, "deposit"),
-                                (stream.token.clone(), fee_amount).into_val(&env),
-                            );
-                        }
                     }
                     if dust > 0 {
                         token_client.transfer(
@@ -2650,20 +2629,6 @@ impl SoroStreamContract {
                         &recipient,
                         &recipient_amount,
                     );
-                }
-                if fee_amount > 0 {
-                    if let Some(treasury) = get_treasury(&env) {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &treasury,
-                            &fee_amount,
-                        );
-                        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
-                            &treasury,
-                            &Symbol::new(&env, "deposit"),
-                            (stream.token.clone(), fee_amount).into_val(&env),
-                        );
-                    }
                 }
             }
 

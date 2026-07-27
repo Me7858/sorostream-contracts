@@ -275,6 +275,7 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+/// Emitted when accumulated protocol fees are swept from the contract to a destination.
 /// Emitted when the sender releases the holdback escrow to the recipient.
 pub fn holdback_released(env: &Env, stream_id: u64, amount: i128, recipient: &Address) {
     env.events().publish(

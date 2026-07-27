@@ -703,6 +703,13 @@ pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
     get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
 }
 
+// --- Accumulated fees per token (sweep_fees #222) ---
+
+fn fees_collected_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "fc"), token.clone())
+}
+
+/// Returns the total accumulated (unsewpt) fees for the given token.
 // --- Holdback escrow helpers ---
 
 fn holdback_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
@@ -900,6 +907,30 @@ pub fn get_fees_collected(env: &Env, token: &Address) -> i128 {
         .unwrap_or(0i128)
 }
 
+/// Adds `amount` to the accumulated fees for the given token.
+///
+/// # Panics
+/// Panics on i128 overflow — not reachable in practice.
+pub fn accumulate_fees(env: &Env, token: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let current = get_fees_collected(env, token);
+    let next = current.checked_add(amount).expect("fees_collected overflow");
+    env.storage()
+        .persistent()
+        .set(&fees_collected_key(env, token), &next);
+}
+
+/// Resets accumulated fees for the given token to zero and returns the swept amount.
+pub fn drain_fees_collected(env: &Env, token: &Address) -> i128 {
+    let amount = get_fees_collected(env, token);
+    if amount > 0 {
+        env.storage()
+            .persistent()
+            .remove(&fees_collected_key(env, token));
+    }
+    amount
 /// Sets accumulated fees for a token.
 pub fn set_fees_collected(env: &Env, token: &Address, amount: i128) {
     env.storage()

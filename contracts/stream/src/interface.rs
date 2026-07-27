@@ -842,6 +842,33 @@ pub trait SoroStreamInterface {
     /// Only the sender or recipient may call this.
     fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
 
+    /// Returns the total accumulated (unswept) protocol fees for `token`.
+    ///
+    /// # Parameters
+    /// * `token` - The SAC token address.
+    ///
+    /// # Returns
+    /// The amount of fees held in the contract for the given token, in stroops.
+    fn get_fees_collected(env: Env, token: Address) -> i128;
+
+    /// Sweeps all accumulated protocol fees for `token` to `destination`.
+    ///
+    /// Only the admin may call this. If the tracked balance is zero, this is a no-op.
+    ///
+    /// # Parameters
+    /// * `token` - The SAC token whose fees to sweep.
+    /// * `destination` - The address that receives the fees.
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success (including no-op when balance is zero).
+    ///
+    /// # Errors
+    /// Returns `StreamError::NotInitialized` if the contract has not been initialized.
+    /// Panics with authorization failure if the caller is not the admin.
+    ///
+    /// # Events
+    /// Emits `FeeSwept { token, amount, destination }` when `amount > 0`.
+    fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError>;
     /// Authorises a delegate address to manage a stream on behalf of the sender.
     ///
     /// The delegate may cancel, top-up, and bump-TTL the stream. Only the stream

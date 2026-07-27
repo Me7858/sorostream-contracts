@@ -3087,3 +3087,131 @@ fn test_mark_expired_callable_by_anyone() {
     let result = c.try_mark_expired(&stream_id);
     assert!(result.is_ok());
 }
+
+// ── sweep_fees tests (#222) ───────────────────────────────────────────────────
+
+/// sweep_fees with zero balance is a no-op: no transfer, no event, no error.
+#[test]
+fn test_sweep_fees_zero_balance_is_noop() {
+    let t = setup();
+    let c = client(&t);
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    let destination = Address::generate(&t.env);
+
+    // No fees have been collected yet — should succeed without doing anything.
+    c.sweep_fees(&t.token_id, &destination);
+
+    // Destination balance remains zero.
+    let bal = TokenClient::new(&t.env, &t.token_id).balance(&destination);
+    assert_eq!(bal, 0);
+
+    // fees_collected tracker is still zero.
+    assert_eq!(c.get_fees_collected(&t.token_id), 0);
+}
+
+/// sweep_fees with a non-zero balance transfers the exact amount to destination
+/// and resets the counter.
+#[test]
+fn test_sweep_fees_nonzero_balance_transfers_and_resets() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    // 1% fee = 100 bps
+    c.set_protocol_fee(&100u32);
+
+    // Create a stream with 100_000 stroops over 1000s → flow_rate = 100
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+    );
+
+    // Advance to halfway and withdraw — fee = 1% of 50_000 = 500 stroops
+    t.env.ledger().set_timestamp(500);
+    c.withdraw(&stream_id, &t.recipient);
+
+    // fees_collected should equal the fee deducted (500 stroops)
+    let collected = c.get_fees_collected(&t.token_id);
+    assert_eq!(collected, 500);
+
+    // Recipient should have received 50_000 - 500 = 49_500
+    let recipient_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    assert_eq!(recipient_bal, 49_500);
+
+    // Sweep fees to treasury destination
+    let treasury = Address::generate(&t.env);
+    c.sweep_fees(&t.token_id, &treasury);
+
+    // Treasury received the exact fee amount
+    let treasury_bal = TokenClient::new(&t.env, &t.token_id).balance(&treasury);
+    assert_eq!(treasury_bal, 500);
+
+    // Counter reset to zero after sweep
+    assert_eq!(c.get_fees_collected(&t.token_id), 0);
+}
+
+/// fees accumulate across multiple withdrawals before a single sweep.
+#[test]
+fn test_sweep_fees_accumulates_across_withdrawals() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    // 2% fee = 200 bps
+    c.set_protocol_fee(&200u32);
+
+    // Stream: 100_000 over 1000s → flow_rate = 100, 2% fee
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+    );
+
+    // First withdrawal at t=200: claimable=20_000, fee=400
+    t.env.ledger().set_timestamp(200);
+    c.withdraw(&stream_id, &t.recipient);
+    assert_eq!(c.get_fees_collected(&t.token_id), 400);
+
+    // Second withdrawal at t=600: claimable=40_000, fee=800
+    t.env.ledger().set_timestamp(600);
+    c.withdraw(&stream_id, &t.recipient);
+    assert_eq!(c.get_fees_collected(&t.token_id), 1200);
+
+    // Single sweep collects both
+    let treasury = Address::generate(&t.env);
+    c.sweep_fees(&t.token_id, &treasury);
+    assert_eq!(TokenClient::new(&t.env, &t.token_id).balance(&treasury), 1200);
+    assert_eq!(c.get_fees_collected(&t.token_id), 0);
+}
+
+/// sweep_fees can only be called by admin; non-admin caller panics.
+#[test]
+fn test_sweep_fees_unauthorized_rejected() {
+    let env = Env::default();
+    // Note: do NOT call mock_all_auths so that auth is actually enforced
+    let contract_id = env.register(SoroStreamContract, ());
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+
+    // Initialize with a known admin (mock all auths just for this call)
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&env, "1.0.0"));
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let destination = Address::generate(&env);
+
+    // Now call without mocking auths — should fail auth check
+    let result = c.try_sweep_fees(&token_id, &destination);
+    assert!(result.is_err(), "non-admin should not be able to sweep fees");
+}
