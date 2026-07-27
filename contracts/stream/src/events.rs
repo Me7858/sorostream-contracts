@@ -275,6 +275,11 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+/// Emitted when a stream transitions to the Expired state via mark_expired.
+pub fn stream_expired(env: &Env, stream_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamExpired"), stream_id),
+        (),
 /// Emitted when a stream's TTL is bumped to extend its ledger lifetime.
 pub fn ttl_bumped(env: &Env, stream_id: u64, new_expiry_ledger: u32) {
     env.events().publish(

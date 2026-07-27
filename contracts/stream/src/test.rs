@@ -2619,3 +2619,127 @@ fn test_get_delegate_returns_correct_address() {
     c.revoke_delegate(&t.sender, &stream_id);
     assert_eq!(c.get_delegate(&stream_id), None);
 }
+
+
+// ── Expired state & mark_expired tests (issue #228) ──────────────────────────
+
+/// get_stream returns Expired status once the stream's end_time has passed,
+/// even without an explicit mark_expired call.
+#[test]
+fn test_get_stream_returns_expired_after_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    // Before end_time: still Active.
+    t.env.ledger().set_timestamp(500);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // At exactly end_time: Expired.
+    t.env.ledger().set_timestamp(1000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Expired);
+
+    // After end_time: still Expired.
+    t.env.ledger().set_timestamp(2000);
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Expired);
+}
+
+/// Cancelled streams never transition to Expired via get_stream.
+#[test]
+fn test_cancelled_stream_not_returned_as_expired() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // After cancellation the stream is removed — should return StreamNotFound.
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// mark_expired transitions a stream to Expired after end_time and emits event.
+#[test]
+fn test_mark_expired_succeeds_after_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    // Advance past end_time.
+    t.env.ledger().set_timestamp(1001);
+    c.mark_expired(&stream_id);
+
+    // Persisted status is now Expired.
+    let raw = c.get_stream(&stream_id);
+    assert_eq!(raw.status, StreamStatus::Expired);
+}
+
+/// mark_expired rejects a stream that has not yet reached end_time.
+#[test]
+fn test_mark_expired_rejects_before_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+
+    t.env.ledger().set_timestamp(500); // still before end_time
+    let result = c.try_mark_expired(&stream_id);
+    assert_eq!(result, Err(Ok(StreamError::StreamNotComplete)));
+}
+
+/// mark_expired rejects already-Cancelled streams.
+#[test]
+fn test_mark_expired_rejects_cancelled_stream() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Stream is removed on cancel — StreamNotFound.
+    let result = c.try_mark_expired(&stream_id);
+    assert!(result.is_err());
+}
+
+/// mark_expired is callable by anyone, not only the sender/recipient.
+#[test]
+fn test_mark_expired_callable_by_anyone() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false,
+    );
+    t.env.ledger().set_timestamp(1001);
+
+    // A third-party address can call mark_expired.
+    let result = c.try_mark_expired(&stream_id);
+    assert!(result.is_ok());
+}

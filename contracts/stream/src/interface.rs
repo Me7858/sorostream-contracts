@@ -775,6 +775,18 @@ pub trait SoroStreamInterface {
     /// Only callable by admin. Use when counter drift is suspected.
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
 
+    /// Explicitly marks an elapsed stream as Expired, compacting its on-chain state.
+    ///
+    /// Callable by anyone. The stream must be Active/Completed and its `end_time`
+    /// must have already passed. Cancelled streams are never transitioned to Expired.
+    /// Emits `StreamExpired { stream_id }`.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `StreamNotActive` — stream is already Cancelled or Expired.
+    /// - `StreamNotComplete` — `end_time` has not yet been reached.
+    fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError>;
+
     /// Extends the Soroban persistent storage TTL for a stream and its indices.
     ///
     /// Callable by anyone (no auth required). Bumps TTL to at least `stream.end_time`
