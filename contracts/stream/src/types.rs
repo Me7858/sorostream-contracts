@@ -120,6 +120,8 @@ pub struct Stream {
     pub metadata_uri: Option<String>,
     /// Optional milestones for gated release (empty if not milestone-gated).
     pub milestones: Vec<Milestone>,
+    /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
+    pub locked: bool,
     /// Optional holdback amount kept in escrow until explicitly released (in stroops).
     /// Deducted from the streaming portion at creation time.
     pub holdback_amount: i128,

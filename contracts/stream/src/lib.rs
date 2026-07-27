@@ -53,6 +53,28 @@ use storage::{
     append_audit_entry, check_admin, clear_pending_fee_proposal, clear_reentrancy_lock,
     decrement_active_stream_count, derive_stream_id, effective_sender_limit,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
+    get_federation_address, get_fees_collected, get_global_stream_at, get_global_stream_count,
+    get_ids_by_recipient, get_ids_by_sender, get_pause_expiry, get_protocol_fee,
+    get_rate_limit_max_creations, get_rate_limit_state, get_rate_limit_window,
+    get_sender_stream_count, get_slippage_params, get_stream_creation_cooldown,
+    get_sender_last_creation_time, get_treasury, get_withdrawal_cooldown, get_xlm_token,
+    increment_active_stream_count, increment_batch_nonce, increment_fees_collected,
+    index_by_recipient, index_by_sender, index_global_stream, is_fee_exempt,
+    is_paused_or_auto_unpause, is_rate_limit_exempt, is_reentrancy_locked,
+    is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled, is_whitelisted,
+    load_stream, mark_nonce_used, nonce_used, read_admin, read_applied_migrations, read_audit_log,
+    read_governance, read_guardian, read_min_duration, read_pending_fee_proposal, read_version,
+    record_migration, register_federation_address, remove_delegate, remove_fee_exempt,
+    remove_from_whitelist, remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist,
+    unregister_federation_address, save_stream, sender_count_key, sender_slot_key,
+    set_active_stream_count, set_creation_fee_xlm, set_delegate, set_fees_collected,
+    set_max_streams_per_sender, set_pause_expiry, set_paused, set_protocol_fee,
+    set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window, set_reentrancy_lock,
+    set_sender_limit, set_sender_last_creation_time, set_slippage_params, set_stream_creation_cooldown,
+    set_token_whitelist_enabled, set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
+    set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender, write_admin,
+    write_governance, write_guardian, write_min_duration, write_pending_fee_proposal, write_version,
+    MAX_PAUSE_DURATION,
     get_global_stream_at, get_global_stream_count, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_sender_stream_count, get_treasury,
     get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count, increment_batch_nonce,
@@ -97,6 +119,9 @@ use types::{VestingCurve, VestingTranche};
 fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamError> {
     flow_rate.checked_mul(elapsed as i128).ok_or(StreamError::Overflow)
 }
+
+/// Maximum allowed stream duration in seconds (approximately 100 years).
+const MAX_STREAM_DURATION_SECONDS: u64 = 100 * 365 * 24 * 60 * 60; // ~3,155,760,000 seconds
 
 /// Validates a metadata URI format and length.
 fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
@@ -508,6 +533,15 @@ impl SoroStreamContract {
         // Check rate limiting (Issue #217)
         check_rate_limit(&env, &sender, now)?;
 
+        // Check stream creation cooldown (Issue #239)
+        let creation_cooldown = get_stream_creation_cooldown(&env);
+        if creation_cooldown > 0 {
+            let last_creation_time = get_sender_last_creation_time(&env, &sender);
+            if last_creation_time > 0 && now < last_creation_time.saturating_add(creation_cooldown) {
+                return Err(StreamError::DuplicateStream);
+            }
+        }
+
         // Check token whitelist (Issue #221)
         check_token_whitelist(&env, &token)?;
 
@@ -566,6 +600,7 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: Bytes::new(&env),
+            locked: false,
             metadata_uri: None,
             milestones: Vec::new(&env),
             holdback_amount,
@@ -585,11 +620,46 @@ impl SoroStreamContract {
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
 
+        // Update sender's last stream creation time (Issue #239)
+        set_sender_last_creation_time(&env, &sender, now);
+
         events::stream_created(
             &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
         );
 
         Ok(stream_id)
+    }
+
+    /// Creates a new payment stream using a federation name (Issue #238).
+    pub fn create_stream_with_federation(
+        env: Env,
+        sender: Address,
+        federation_name: String,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+    ) -> Result<u64, StreamError> {
+        let recipient = get_federation_address(&env, &federation_name)
+            .ok_or(StreamError::StreamNotFound)?;
+
+        Self::create_stream(
+            env,
+            sender,
+            recipient,
+            token,
+            amount,
+            duration_seconds,
+            cliff_seconds,
+            nonce,
+            auto_renew,
+            lock_until,
+            allow_recipient_termination,
+        )
     }
 
     /// Returns the minimum allowed stream duration in seconds.
@@ -964,6 +1034,49 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Sets the global stream creation cooldown in seconds (Issue #239).
+    /// Cooldown of 0 disables the mechanism (default).
+    pub fn set_stream_creation_cooldown(env: Env, admin: Address, cooldown_seconds: u64) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_stream_creation_cooldown(&env, cooldown_seconds);
+        Ok(())
+    }
+
+    /// Registers a federation name to a Stellar address (Issue #238).
+    /// Only the admin may call this function.
+    pub fn register_federation(
+        env: Env,
+        admin: Address,
+        federation_name: String,
+        stellar_address: Address,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        register_federation_address(&env, &federation_name, &stellar_address);
+        events::federation_registered(&env, &federation_name, &stellar_address);
+        Ok(())
+    }
+
+    /// Unregisters a federation name from the registry (Issue #238).
+    /// Only the admin may call this function.
+    pub fn unregister_federation(
+        env: Env,
+        admin: Address,
+        federation_name: String,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        unregister_federation_address(&env, &federation_name);
+        events::federation_unregistered(&env, &federation_name);
+        Ok(())
+    }
+
+    /// Resolves a federation name to its registered Stellar address.
+    pub fn resolve_federation(env: Env, federation_name: String) -> Result<Address, StreamError> {
+        get_federation_address(&env, &federation_name).ok_or(StreamError::StreamNotFound)
+    }
+
     /// Enables or disables recipient whitelisting.
     pub fn set_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError> {
         check_admin(&env);
@@ -1175,10 +1288,6 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        if is_reentrancy_locked(&env) {
-            return Err(StreamError::ReentrancyDetected);
-        }
-        set_reentrancy_lock(&env);
 
         recipient.require_auth();
 
@@ -1189,6 +1298,11 @@ impl SoroStreamContract {
         }
         if stream.status != StreamStatus::Active {
             return Err(StreamError::StreamNotActive);
+        }
+
+        // Stream-specific reentrancy guard
+        if stream.locked {
+            return Err(StreamError::ReentrancyDetected);
         }
 
         let now = env.ledger().timestamp();
@@ -1394,6 +1508,9 @@ impl SoroStreamContract {
 
         let stream_ended = now >= stream.end_time;
 
+        // Set stream-specific reentrancy lock before any external token transfer
+        stream.locked = true;
+
         if stream_ended {
             let duration = stream.end_time - stream.start_time;
             let dust = stream.deposit.saturating_sub(
@@ -1405,6 +1522,7 @@ impl SoroStreamContract {
                 let sender_balance = token_client.balance(&stream.sender);
                 if sender_balance < stream.deposit {
                     stream.status = StreamStatus::Completed;
+                    stream.locked = false;
                     save_stream(&env, &stream);
                     decrement_active_stream_count(&env);
 
@@ -1436,6 +1554,7 @@ impl SoroStreamContract {
                     stream.end_time = new_end;
                     stream.last_withdraw_time = old_end;
                     stream.total_withdrawn = 0;
+                    stream.locked = false;
                     save_stream(&env, &stream);
 
                     // INTERACTIONS
@@ -1478,6 +1597,7 @@ impl SoroStreamContract {
                 events::stream_completed(&env, stream_id);
             }
         } else {
+            stream.locked = false;
             save_stream(&env, &stream);
 
             // INTERACTIONS
@@ -1500,7 +1620,10 @@ impl SoroStreamContract {
 
         events::stream_withdrawn(&env, stream_id, &recipient, claimable, now);
 
-        clear_reentrancy_lock(&env);
+        // Clear stream-specific reentrancy lock
+        stream.locked = false;
+        save_stream(&env, &stream);
+
         Ok(())
     }
 
@@ -1981,17 +2104,26 @@ impl SoroStreamContract {
         let extra_seconds =
             u64::try_from(extra_seconds_i128).map_err(|_| StreamError::Overflow)?;
 
-        stream.end_time = stream
+        let new_end_time = stream
             .end_time
             .checked_add(extra_seconds)
             .ok_or(StreamError::Overflow)?;
 
+        let now = env.ledger().timestamp();
+        let max_end_time = now
+            .checked_add(MAX_STREAM_DURATION_SECONDS)
+            .ok_or(StreamError::Overflow)?;
+
+        if new_end_time > max_end_time {
+            return Err(StreamError::Overflow);
+        }
+
+        stream.end_time = new_end_time;
         stream.deposit = stream
             .deposit
             .checked_add(effective_amount)
             .ok_or(StreamError::Overflow)?;
 
-        let new_end_time = stream.end_time;
         save_stream(&env, &stream);
 
         events::stream_topped_up(&env, stream_id, effective_amount, new_end_time);

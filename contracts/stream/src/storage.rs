@@ -965,3 +965,68 @@ pub fn set_slippage_params(env: &Env, stream_id: u64, reference_price: i128, max
         .persistent()
         .set(&slippage_key(env, stream_id), &(reference_price, max_slippage_bps));
 }
+
+// --- Stream Creation Cooldown ---
+
+const STREAM_CREATION_COOLDOWN_KEY: &str = "sc_cd";
+
+fn sender_last_creation_key(env: &Env, sender: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "lc"), sender.clone())
+}
+
+/// Gets the global stream creation cooldown in seconds (0 = disabled).
+pub fn get_stream_creation_cooldown(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, STREAM_CREATION_COOLDOWN_KEY))
+        .unwrap_or(0u64)
+}
+
+/// Sets the global stream creation cooldown in seconds.
+pub fn set_stream_creation_cooldown(env: &Env, cooldown_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, STREAM_CREATION_COOLDOWN_KEY), &cooldown_seconds);
+}
+
+/// Gets the last stream creation time for a sender (0 if never created).
+pub fn get_sender_last_creation_time(env: &Env, sender: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&sender_last_creation_key(env, sender))
+        .unwrap_or(0u64)
+}
+
+/// Updates the last stream creation time for a sender.
+pub fn set_sender_last_creation_time(env: &Env, sender: &Address, timestamp: u64) {
+    env.storage()
+        .persistent()
+        .set(&sender_last_creation_key(env, sender), &timestamp);
+}
+
+// --- Federation Address Registry (Issue #238) ---
+
+fn federation_registry_key(env: &Env, federation_name: &String) -> (Symbol, String) {
+    (Symbol::new(env, "fed"), federation_name.clone())
+}
+
+/// Gets the Stellar address registered for a federation name.
+pub fn get_federation_address(env: &Env, federation_name: &String) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&federation_registry_key(env, federation_name))
+}
+
+/// Registers a federation name to a Stellar address.
+pub fn register_federation_address(env: &Env, federation_name: &String, address: &Address) {
+    env.storage()
+        .persistent()
+        .set(&federation_registry_key(env, federation_name), address);
+}
+
+/// Unregisters a federation name from the registry.
+pub fn unregister_federation_address(env: &Env, federation_name: &String) {
+    env.storage()
+        .persistent()
+        .remove(&federation_registry_key(env, federation_name));
+}
