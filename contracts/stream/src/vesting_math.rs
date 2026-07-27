@@ -1,6 +1,10 @@
 //! Pure vesting arithmetic functions extracted for formal verification.
 //! These functions have zero Soroban dependencies and operate on primitive types only.
 
+// ---------------------------------------------------------------------------
+// Original linear helpers
+// ---------------------------------------------------------------------------
+
 /// Computes the claimable amount from milestones (all released milestones sum).
 /// Returns the total amount from milestones marked as released.
 pub fn compute_claimable_from_milestones(milestones: &[(i128, bool)]) -> i128 {
@@ -71,6 +75,190 @@ pub fn compute_refund(
 /// Computes flow rate from deposit and duration (integer division, floors).
 pub fn compute_flow_rate(deposit: i128, duration_seconds: u64) -> i128 {
     deposit / duration_seconds as i128
+}
+
+// ---------------------------------------------------------------------------
+// Time-decay (exponential front-weighting) helpers
+// ---------------------------------------------------------------------------
+
+/// Window size for the discretised decay computation (1 000 seconds).
+///
+/// The decay factor is applied once per window. Smaller windows give a
+/// smoother curve but cost more iterations; 1 ks is a good balance for
+/// streams up to ~1 year (≤ 32 000 windows).
+pub const DECAY_WINDOW_SECS: u64 = 1_000;
+
+/// Fixed-point scale factor used internally (10^9 = 1 billion).
+///
+/// All intermediate `remaining_weight` values are kept multiplied by this
+/// scale to preserve precision through many iterations of integer division.
+const SCALE: i128 = 1_000_000_000;
+
+/// Computes the **cumulative** amount vested from `start_time` up to `query_time`
+/// under an exponential time-decay curve.
+///
+/// # Formula
+///
+/// The remaining (un-vested) fraction after `k` completed 1 ks windows is:
+///
+/// ```text
+/// remaining_fraction = (1 - decay_factor / 10_000) ^ k
+/// ```
+///
+/// Expressed in fixed-point integer arithmetic (scaled by `SCALE`):
+///
+/// ```text
+/// remaining_scaled[0] = SCALE
+/// remaining_scaled[i] = remaining_scaled[i-1] × (10_000 - decay_factor) / 10_000
+/// ```
+///
+/// Cumulative vested at time `t`:
+///
+/// ```text
+/// vested(t) = deposit × (SCALE - remaining_scaled[windows(t)]) / SCALE
+/// ```
+///
+/// **Convergence guarantee**: when `query_time >= end_time` the function returns
+/// exactly `deposit`, so the full amount is always reachable at stream end.
+///
+/// **Linear fallback**: `decay_factor == 0` ⟹ `remaining_scaled` stays at
+/// `SCALE` for every window, so `vested(t)` falls back to the linear formula
+/// `deposit × elapsed / duration`.
+///
+/// # Parameters
+/// - `deposit`      – total tokens locked (stroops)
+/// - `start_time`   – stream start timestamp
+/// - `end_time`     – stream end timestamp
+/// - `query_time`   – timestamp to evaluate at (clamped to end_time internally)
+/// - `decay_factor` – bps per 1 000-second window (0–9 999)
+///
+/// Returns `None` on arithmetic overflow.
+pub fn compute_cumulative_decay(
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    query_time: u64,
+    decay_factor: u32,
+) -> Option<i128> {
+    if deposit <= 0 || end_time <= start_time {
+        return Some(0);
+    }
+    let duration = end_time - start_time;
+
+    // Clamp to end_time — at or beyond end_time the full deposit is vested.
+    let effective_now = query_time.min(end_time);
+
+    if effective_now <= start_time {
+        return Some(0);
+    }
+
+    // Linear fallback: decay_factor == 0.
+    if decay_factor == 0 {
+        let elapsed = effective_now - start_time;
+        // deposit × elapsed / duration  (no overflow path for reasonable deposits)
+        return deposit
+            .checked_mul(elapsed as i128)?
+            .checked_div(duration as i128);
+    }
+
+    // Guard: decay_factor must be < 10_000 (otherwise remaining goes to zero immediately).
+    let decay_factor = decay_factor.min(9_999) as i128;
+    let keep_bps: i128 = 10_000 - decay_factor; // how many bps of remainder survives each window
+
+    let elapsed = effective_now - start_time;
+
+    // Full windows completed so far.
+    let full_windows = elapsed / DECAY_WINDOW_SECS;
+
+    // Compute remaining_scaled = SCALE × keep_bps^full_windows / 10_000^full_windows
+    // iteratively to avoid huge intermediate values.
+    let mut remaining_scaled: i128 = SCALE;
+    for _ in 0..full_windows {
+        remaining_scaled = remaining_scaled
+            .checked_mul(keep_bps)?
+            .checked_div(10_000)?;
+    }
+
+    // Fraction vested = (SCALE - remaining_scaled) / SCALE
+    // vested = deposit × (SCALE - remaining_scaled) / SCALE
+    let vested_scaled = SCALE.checked_sub(remaining_scaled)?;
+    let vested = deposit
+        .checked_mul(vested_scaled)?
+        .checked_div(SCALE)?;
+
+    // Convergence guarantee: at end_time return full deposit.
+    if effective_now >= end_time {
+        return Some(deposit);
+    }
+
+    // Clamp to [0, deposit] to guard against any edge-case integer drift.
+    Some(vested.max(0).min(deposit))
+}
+
+/// Computes the **incremental** claimable amount since `last_withdraw_time`
+/// under a time-decay curve, with cliff enforcement.
+///
+/// Returns the difference:
+///   `cumulative_decay(now) - cumulative_decay(last_withdraw_time)`
+///
+/// This is always ≥ 0 because `compute_cumulative_decay` is monotone.
+/// Returns `None` on arithmetic overflow.
+pub fn compute_claimable_decay(
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    now: u64,
+    cliff_time: u64,
+    last_withdraw_time: u64,
+    decay_factor: u32,
+) -> Option<i128> {
+    if now < cliff_time {
+        return Some(0);
+    }
+
+    let effective_now = now.min(end_time);
+
+    // Convergence guarantee: at or after end_time the recipient may claim everything
+    // that has not yet been withdrawn.
+    if effective_now >= end_time {
+        let cumulative_at_end = deposit; // full deposit
+        let cumulative_at_last = compute_cumulative_decay(
+            deposit, start_time, end_time, last_withdraw_time, decay_factor,
+        )?;
+        let claimable = cumulative_at_end.saturating_sub(cumulative_at_last);
+        return Some(claimable.max(0));
+    }
+
+    let cumulative_now = compute_cumulative_decay(
+        deposit, start_time, end_time, effective_now, decay_factor,
+    )?;
+    let cumulative_last = compute_cumulative_decay(
+        deposit, start_time, end_time, last_withdraw_time, decay_factor,
+    )?;
+
+    Some(cumulative_now.saturating_sub(cumulative_last).max(0))
+}
+
+/// Off-chain preview utility: returns the **cumulative** amount that would be
+/// claimable (from the start of the stream) at `query_time` under a time-decay
+/// curve.
+///
+/// Does not require a `last_withdraw_time` — it gives the total vested amount
+/// accumulated since stream inception, useful for building unlock schedule UIs.
+///
+/// Returns `None` on arithmetic overflow.
+pub fn simulate_claimable(
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    query_time: u64,
+    cliff_time: u64,
+    decay_factor: u32,
+) -> Option<i128> {
+    if query_time < cliff_time {
+        return Some(0);
+    }
+    compute_cumulative_decay(deposit, start_time, end_time, query_time, decay_factor)
 }
 
 // ---------------------------------------------------------------------------
