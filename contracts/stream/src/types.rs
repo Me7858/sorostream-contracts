@@ -1,5 +1,43 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
+/// Vesting release curve applied to a payment stream.
+///
+/// Choosing `Linear` reproduces the original constant-rate behaviour.
+/// Choosing `TimeDecay` produces a front-weighted (convex) release schedule
+/// where more tokens are claimable early in the stream lifetime.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VestingCurve {
+    /// Constant rate: `claimable = flow_rate × elapsed`.
+    Linear,
+    /// Discretised exponential decay.
+    ///
+    /// `decay_factor` is expressed in **basis points per 1 000 seconds**
+    /// (i.e. the per-mille decay rate per 1 ks window):
+    ///
+    /// ```text
+    /// weight(t) = deposit × (1 − decay_factor/10_000)^(t / 1_000)
+    /// cumulative_claimable(t) = deposit − weight(t)   (clamped to [0, deposit])
+    /// ```
+    ///
+    /// A `decay_factor` of `0` degenerates to linear behaviour.
+    /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
+    TimeDecay {
+        /// Decay rate in basis points per 1 000-second window (0–9 999).
+        decay_factor: u32,
+    },
+}
+
+/// A single step-vesting tranche: tokens that unlock atomically at `unlock_time`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VestingTranche {
+    /// Ledger timestamp at which this tranche becomes claimable.
+    pub unlock_time: u64,
+    /// Amount of tokens (in stroops) that unlock at this timestamp.
+    pub amount: i128,
+}
+
 /// Status of a payment stream.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12,6 +50,8 @@ pub enum StreamStatus {
     Completed,
     /// Stream is temporarily paused.
     Paused,
+    /// Stream has passed its end_time and been explicitly marked as expired.
+    Expired,
 }
 
 /// Status of a milestone.
@@ -80,6 +120,40 @@ pub struct Stream {
     pub metadata_uri: Option<String>,
     /// Optional milestones for gated release (empty if not milestone-gated).
     pub milestones: Vec<Milestone>,
+    /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
+    pub locked: bool,
+    /// Optional holdback amount kept in escrow until explicitly released (in stroops).
+    /// Deducted from the streaming portion at creation time.
+    pub holdback_amount: i128,
+    /// Whether the holdback has been settled (released to recipient or clawed back to sender).
+    pub holdback_claimed: bool,
+
+    // ── Step-vesting (tranche) fields ────────────────────────────────────────
+
+    /// Whether this stream uses step-vesting (tranche-based release).
+    /// When `true`, token release is governed by `tranches` rather than the
+    /// continuous flow rate.
+    pub is_step_vesting: bool,
+    /// Index of the next unclaimed tranche (cursor). Starts at 0.
+    pub tranches_claimed: u32,
+
+    // ── Oracle price-check fields ────────────────────────────────────────────
+
+    /// Optional oracle contract address for on-chain price validation.
+    /// When set, price is checked on stream creation and withdrawal.
+    pub oracle: Option<Address>,
+    /// Maximum allowed price deviation from the creation price, in basis points
+    /// (e.g. 500 = 5 %).  Ignored when `oracle` is `None`.
+    pub max_price_deviation_bps: u32,
+    /// Token price (raw oracle value) recorded at stream-creation time.
+    /// Used as the baseline for deviation calculations on subsequent calls.
+    pub creation_price: i128,
+
+    // ── Vesting curve ────────────────────────────────────────────────────────
+
+    /// Release curve governing how tokens become claimable over time.
+    /// Defaults to `VestingCurve::Linear` for all existing streams.
+    pub curve: VestingCurve,
 }
 
 /// Aggregate contract statistics.

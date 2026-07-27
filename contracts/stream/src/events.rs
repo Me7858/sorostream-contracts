@@ -275,6 +275,80 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+/// Emitted when accumulated protocol fees are swept from the contract to a destination.
+/// Emitted when the sender releases the holdback escrow to the recipient.
+pub fn holdback_released(env: &Env, stream_id: u64, amount: i128, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "HoldbackReleased"), stream_id),
+        (amount, recipient.clone()),
+    );
+}
+
+/// Emitted when the sender claws back the holdback escrow before the recipient claims it.
+pub fn holdback_clawed_back(env: &Env, stream_id: u64, amount: i128, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "HoldbackClawedBack"), stream_id),
+        (amount, sender.clone()),
+// ---------------------------------------------------------------------------
+// Step-vesting tranche events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a step-vesting stream is created with a tranche schedule.
+pub fn tranche_stream_created(env: &Env, stream_id: u64, sender: &Address, tranche_count: u32, total_amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "TrancheStreamCreated"), stream_id),
+        (sender.clone(), tranche_count, total_amount),
+    );
+}
+
+/// Emitted when one or more tranches are claimed during a withdrawal.
+pub fn tranches_withdrawn(
+    env: &Env,
+    stream_id: u64,
+    recipient: &Address,
+    tranches_claimed: u32,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "TranchesWithdrawn"), stream_id),
+        (recipient.clone(), tranches_claimed, amount),
+    );
+}
+
+/// Emitted when a step-vesting stream is cancelled and unclaimed tranches are refunded.
+pub fn tranche_stream_cancelled(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    unclaimed_tranche_refund: i128,
+    recipient_amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "TrancheStreamCancelled"), stream_id),
+        (sender.clone(), unclaimed_tranche_refund, recipient_amount),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Oracle price-check event
+// ---------------------------------------------------------------------------
+
+/// Emitted when an oracle price check passes successfully.
+pub fn price_check_passed(
+    env: &Env,
+    stream_id: u64,
+    token: &Address,
+    price: i128,
+    deviation_bps: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "PriceCheckPassed"), stream_id),
+        (token.clone(), price, deviation_bps),
+/// Emitted when a stream transitions to the Expired state via mark_expired.
+pub fn stream_expired(env: &Env, stream_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamExpired"), stream_id),
+        (),
 /// Emitted when a stream's TTL is bumped to extend its ledger lifetime.
 pub fn ttl_bumped(env: &Env, stream_id: u64, new_expiry_ledger: u32) {
     env.events().publish(
@@ -356,5 +430,21 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     env.events().publish(
         (Symbol::new(env, "TokenWhitelistToggled"),),
         enabled,
+    );
+}
+
+/// Emitted when a federation name is registered (Issue #238).
+pub fn federation_registered(env: &Env, federation_name: &String, stellar_address: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FederationRegistered"),),
+        (federation_name.clone(), stellar_address.clone()),
+    );
+}
+
+/// Emitted when a federation name is unregistered (Issue #238).
+pub fn federation_unregistered(env: &Env, federation_name: &String) {
+    env.events().publish(
+        (Symbol::new(env, "FederationUnregistered"),),
+        federation_name.clone(),
     );
 }
