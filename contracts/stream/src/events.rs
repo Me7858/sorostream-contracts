@@ -23,16 +23,21 @@ pub fn stream_created(
 }
 
 /// Emitted when a recipient withdraws claimable tokens.
+///
+/// `total_withdrawn` reflects the cumulative amount withdrawn from this stream
+/// including the current withdrawal, computed after the stream state has been
+/// updated (checks-effects-interactions order).
 pub fn stream_withdrawn(
     env: &Env,
     stream_id: u64,
     recipient: &Address,
     amount: i128,
     timestamp: u64,
+    total_withdrawn: i128,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamWithdrawn"), stream_id),
-        (recipient.clone(), amount, timestamp),
+        (recipient.clone(), amount, timestamp, total_withdrawn),
     );
 }
 
