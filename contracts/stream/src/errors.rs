@@ -44,15 +44,38 @@ pub enum StreamError {
     TokenNotWhitelisted = 37,
     /// One or more tranches have invalid data (e.g. zero amount, unsorted unlock times,
     /// total tranche amount does not match deposit, or empty tranche list on step-vesting).
-    InvalidTranches = 37,
+    InvalidTranches = 38,
     /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
-    PriceDeviationTooHigh = 38,
+    PriceDeviationTooHigh = 39,
     /// Oracle contract call failed or returned an unexpected value.
-    OracleError = 39,
-    RateLimitExceeded = 37,
-    TokenNotWhitelisted = 38,
-    SlippageExceeded = 39,
-    InvalidSlippage = 40,
-    DurationExceedsMax = 41,
-    InvalidTokenAddress = 42,
+    OracleError = 40,
+    RateLimitExceeded = 41,
+    SlippageExceeded = 42,
+    InvalidSlippage = 43,
+    DurationExceedsMax = 44,
+    InvalidTokenAddress = 45,
+
+    // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
+    /// Expiry warning window must be a positive ledger count.
+    InvalidExpiryWindow = 46,
+
+    // ── Feature (b): Sender reputation cap ───────────────────────────────────
+    /// Sender is below the promotion threshold and has hit the new-sender stream cap.
+    NewSenderStreamCapExceeded = 47,
+
+    // ── Feature (c): Stream redirect ─────────────────────────────────────────
+    /// The redirect target stream does not exist or its recipient doesn't match.
+    InvalidRedirectTarget = 48,
+    /// Setting this redirect would create a circular chain (A→B→A or longer).
+    CircularRedirect = 49,
+    /// Redirect target stream must have the same recipient as the source stream.
+    RedirectRecipientMismatch = 50,
+
+    // ── Feature (d): Dual-token streams ──────────────────────────────────────
+    /// Dual stream requires both token addresses to be distinct.
+    DuplicateTokenInDualStream = 51,
+    /// Operation requires a dual-token stream but the stream only has one token.
+    NotDualStream = 52,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 53,
 }

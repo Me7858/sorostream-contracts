@@ -154,6 +154,29 @@ pub struct Stream {
     /// Release curve governing how tokens become claimable over time.
     /// Defaults to `VestingCurve::Linear` for all existing streams.
     pub curve: VestingCurve,
+
+    // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
+
+    /// Whether the `StreamExpiryWarning` event has already been emitted for this
+    /// stream in the current expiry window.  Prevents duplicate warnings when
+    /// multiple interactions occur before `end_time`.
+    pub expiry_warning_emitted: bool,
+
+    // ── Feature (c): Stream redirect ─────────────────────────────────────────
+
+    /// Optional ID of the stream that claimed tokens should be forwarded into.
+    /// When set, a `withdraw` call on this stream will top-up the target stream
+    /// instead of transferring tokens directly to the recipient.
+    /// The target stream's recipient must equal this stream's recipient.
+    pub redirect_to_stream_id: Option<u64>,
+
+    // ── Feature (d): Dual-token streams ──────────────────────────────────────
+
+    /// Whether this stream is a dual-token stream.
+    /// When `true`, a second token (`token2`) and second deposit (`deposit2`) are
+    /// stored separately in persistent storage.  The `token` and `deposit` fields
+    /// represent the primary (first) token allocation as usual.
+    pub is_dual_stream: bool,
 }
 
 /// Aggregate contract statistics.
