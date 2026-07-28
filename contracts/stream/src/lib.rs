@@ -123,6 +123,14 @@ fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamErro
 /// Maximum allowed stream duration in seconds (approximately 100 years).
 const MAX_STREAM_DURATION_SECONDS: u64 = 100 * 365 * 24 * 60 * 60; // ~3,155,760,000 seconds
 
+/// Minimum claimable amount before a withdrawal is considered meaningful.
+///
+/// Amounts at or below this threshold are treated as rounding dust and
+/// suppressed in `get_claimable` and `withdraw` to prevent failed
+/// micro-withdrawals and noisy UI displays. 1 stroop is the smallest
+/// indivisible unit of any Stellar token.
+const DUST_THRESHOLD: i128 = 1;
+
 /// Validates a metadata URI format and length.
 fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
     if let Some(ref u) = uri {
@@ -536,7 +544,6 @@ impl SoroStreamContract {
             return Err(StreamError::DurationExceedsMax);
         }
 
-        let flow_rate = amount / duration_seconds as i128;
         // The streaming portion is the total minus the holdback escrow.
         let streaming_amount = amount
             .checked_sub(holdback_amount)
@@ -630,7 +637,6 @@ impl SoroStreamContract {
             milestones: Vec::new(&env),
             holdback_amount,
             holdback_claimed: false,
-            milestones: soroban_sdk::Vec::new(&env),
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -1511,6 +1517,19 @@ impl SoroStreamContract {
             .ok_or(StreamError::Overflow)?;
         let claimable = raw_claimable.min(available);
 
+        // ── Issue #241: Dust guard ────────────────────────────────────────────
+        // If the claimable amount is at or below the dust threshold (1 stroop),
+        // treat it as rounding dust and return Ok without performing any transfer.
+        // This prevents failed micro-withdrawals when a stream is nearly fully
+        // drained or has tiny rounding remainders.
+        if claimable <= DUST_THRESHOLD {
+            // Still update last_withdraw_time to avoid spamming
+            stream.last_withdraw_time = effective_now;
+            save_stream(&env, &stream);
+            clear_reentrancy_lock(&env);
+            return Ok(());
+        }
+
         let (recipient_amount, fee_amount) = if claimable > 0 {
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
@@ -1760,9 +1779,19 @@ impl SoroStreamContract {
 
         // ── Linear-vesting cancellation (original logic) ────────────────────
 
-        let recipient_amount = vesting_math::compute_earned(
-            stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
-        ).ok_or(StreamError::Overflow)?;
+        // Issue #13: Cliff enforcement on cancellation.
+        // If the current time is before the cliff, the recipient has earned nothing
+        // yet. We short-circuit to zero rather than calling compute_earned which
+        // would compute flow_rate × elapsed and over-pay the recipient.
+        let recipient_amount = if now < stream.cliff_time {
+            0i128
+        } else {
+            let earned = vesting_math::compute_earned(
+                stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+            ).ok_or(StreamError::Overflow)?;
+            let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+            earned.min(available)
+        };
 
         let available = stream.deposit.saturating_sub(stream.total_withdrawn);
         let recipient_amount = recipient_amount.min(available);
@@ -2360,6 +2389,18 @@ impl SoroStreamContract {
     }
 
     /// Returns the amount of tokens currently claimable by the recipient.
+    ///
+    /// # Issue #13 — Cliff enforcement
+    /// Returns `0` if the current ledger timestamp is strictly before `cliff_time`.
+    /// Once `cliff_time` is reached, the full linear progression from `start_time`
+    /// to `end_time` is used to calculate the claimable amount.
+    ///
+    /// # Issue #241 — Dust & zero-return for completed streams
+    /// - Post-completion guard: if `now >= end_time` AND `total_withdrawn >= deposit`,
+    ///   returns `0` immediately so fully-drained streams never return stale dust.
+    /// - Dust suppression: if the calculated claimable balance is ≤ `DUST_THRESHOLD`
+    ///   (1 stroop) it is also returned as `0`, preventing rounding artifacts from
+    ///   causing failed micro-withdrawals or cluttering UIs.
     pub fn get_claimable(env: Env, stream_id: u64) -> Result<i128, StreamError> {
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
@@ -2372,6 +2413,14 @@ impl SoroStreamContract {
         } else {
             env.ledger().timestamp()
         };
+
+        // ── Issue #241: Post-completion guard ───────────────────────────────
+        // If the stream's end_time has passed and the full deposit has been
+        // withdrawn, return 0 immediately. This prevents stale dust from
+        // appearing after a stream is fully settled.
+        if now >= stream.end_time && stream.total_withdrawn >= stream.deposit {
+            return Ok(0);
+        }
 
         // ── Step-vesting path ────────────────────────────────────────────────
         if stream.is_step_vesting {
@@ -2391,12 +2440,15 @@ impl SoroStreamContract {
             return Ok(claimable);
         }
 
-        // ── Linear-vesting path (original logic) ────────────────────────────
+        // ── Issue #13: Cliff enforcement ─────────────────────────────────────
+        // If the current time is strictly before cliff_time, no tokens are
+        // claimable regardless of time elapsed since start_time.
         if now < stream.cliff_time {
             return Ok(0);
         }
 
-        match &stream.curve {
+        // ── Compute raw claimable amount ─────────────────────────────────────
+        let raw = match &stream.curve {
             VestingCurve::Linear => vesting_math::compute_claimable(
                 stream.flow_rate,
                 now,
@@ -2404,7 +2456,7 @@ impl SoroStreamContract {
                 stream.end_time,
                 stream.last_withdraw_time,
             )
-            .ok_or(StreamError::Overflow),
+            .ok_or(StreamError::Overflow)?,
 
             VestingCurve::TimeDecay { decay_factor } => {
                 vesting_math::compute_claimable_decay(
@@ -2416,9 +2468,22 @@ impl SoroStreamContract {
                     stream.last_withdraw_time,
                     *decay_factor,
                 )
-                .ok_or(StreamError::Overflow)
+                .ok_or(StreamError::Overflow)?
             }
+        };
+
+        // ── Issue #241: Dust suppression ─────────────────────────────────────
+        // Clamp claimable to the remaining available balance first, then apply
+        // the dust threshold. Sub-threshold amounts are treated as rounding
+        // artifacts and returned as 0 to avoid failed micro-withdrawals.
+        let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+        let claimable = raw.min(available);
+
+        if claimable <= DUST_THRESHOLD {
+            return Ok(0);
         }
+
+        Ok(claimable)
     }
 
     /// Returns true if `address` is either the sender or recipient of the given stream.

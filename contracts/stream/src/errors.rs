@@ -44,15 +44,19 @@ pub enum StreamError {
     TokenNotWhitelisted = 37,
     /// One or more tranches have invalid data (e.g. zero amount, unsorted unlock times,
     /// total tranche amount does not match deposit, or empty tranche list on step-vesting).
-    InvalidTranches = 37,
+    InvalidTranches = 38,
     /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
-    PriceDeviationTooHigh = 38,
+    PriceDeviationTooHigh = 39,
     /// Oracle contract call failed or returned an unexpected value.
-    OracleError = 39,
-    RateLimitExceeded = 37,
-    TokenNotWhitelisted = 38,
-    SlippageExceeded = 39,
-    InvalidSlippage = 40,
-    DurationExceedsMax = 41,
-    InvalidTokenAddress = 42,
+    OracleError = 40,
+    /// Sender has exceeded the allowed stream creation rate.
+    RateLimitExceeded = 41,
+    /// Withdrawal or operation would exceed slippage tolerance.
+    SlippageExceeded = 42,
+    /// The provided slippage parameter is invalid (e.g. > 10 000 bps).
+    InvalidSlippage = 43,
+    /// Stream duration exceeds the configured maximum.
+    DurationExceedsMax = 44,
+    /// Token address is not a valid deployed SAC.
+    InvalidTokenAddress = 45,
 }
