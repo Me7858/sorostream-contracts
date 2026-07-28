@@ -2647,6 +2647,12 @@ impl SoroStreamContract {
 
         let n = recipients.len().min(amounts.len());
         let mut batch_ids: Vec<u64> = Vec::new(&env);
+
+        // ── Phase 1: Validate all inputs before any state mutation ──────────
+        //
+        // All per-stream validation runs to completion before any token transfer
+        // or storage write occurs. If any stream fails validation the entire
+        // call is rejected and no state is modified.
         for i in 0..n {
             let recipient = recipients.get_unchecked(i);
             let amount = amounts.get_unchecked(i);
@@ -2675,6 +2681,11 @@ impl SoroStreamContract {
             batch_ids.push_back(stream_id);
         }
 
+        // ── Phase 2: Transfer tokens and persist stream records ──────────────
+        //
+        // All token transfers happen before any index mutation. If any transfer
+        // fails here the entire transaction is rolled back by the Soroban host
+        // and no orphaned index entries can be left behind.
         for i in 0..n {
             let recipient = recipients.get_unchecked(i);
             let amount = amounts.get_unchecked(i);
@@ -2723,11 +2734,26 @@ impl SoroStreamContract {
             };
 
             save_stream(&env, &stream);
+            stream_ids.push_back(stream_id);
+        }
+
+        // ── Phase 3: Index all streams only after all transfers succeed ───────
+        //
+        // Sender/recipient/global indexes are updated in a dedicated pass that
+        // only runs once every stream record has been persisted and every token
+        // has been transferred. This prevents orphaned index entries: either
+        // all streams are fully indexed or none are.
+        for i in 0..n {
+            let recipient = recipients.get_unchecked(i);
+            let amount = amounts.get_unchecked(i);
+            let flow_rate = amount / duration_seconds as i128;
+            let stream_id = batch_ids.get_unchecked(i);
+
             index_by_sender(&env, &sender, stream_id);
             index_by_recipient(&env, &recipient, stream_id);
             index_global_stream(&env, stream_id);
+            increment_active_stream_count(&env);
 
-            stream_ids.push_back(stream_id);
             events::stream_created(
                 &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
             );
