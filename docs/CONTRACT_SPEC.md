@@ -104,7 +104,7 @@ Terminal states: `Cancelled` and `Completed`. No instruction transitions out of 
 | 5 | `ZeroAmount` | `amount` must be greater than zero. |
 | 6 | `InvalidDuration` | Duration or fee value is out of range. |
 | 7 | `InsufficientBalance` | Contract has insufficient token balance to fulfil the transfer. |
-| 8 | `InvalidCliff` | `cliff_seconds > duration_seconds`. |
+| 8 | `InvalidCliff` | `cliff_seconds > duration_seconds`. See [docs/cliff-validation.md](./cliff-validation.md) for a full explanation of cliff semantics and worked edge-case examples. |
 | 9 | `AlreadyInitialized` | `initialize` was called after the contract was already set up. |
 | 10 | `NotInitialized` | An instruction requiring admin access was called before `initialize`. |
 | 11 | `DuplicateStream` | A stream with this `(sender, nonce)` pair already exists. |
