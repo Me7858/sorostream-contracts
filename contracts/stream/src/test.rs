@@ -4485,3 +4485,133 @@ fn test_stream_config_event_emitted_with_steps() {
         "claimable must be 0 when start_time == current ledger"
     );
 }
+
+// ── Issue #304: stats counters after natural expiry ────────────────────────────
+
+/// get_stats.active_streams decrements when a stream is marked expired.
+#[test]
+fn test_get_stats_after_expiry() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>);
+    c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>);
+
+    assert_eq!(c.get_stats().total_streams, 2);
+    assert_eq!(c.get_stats().active_streams, 2);
+
+    // Advance past first stream's end_time and mark it expired
+    t.env.ledger().set_timestamp(1001);
+    let id1 = c.get_all_stream_ids(&0, &1).get_unchecked(0);
+    c.mark_expired(&id1);
+
+    let stats = c.get_stats();
+    assert_eq!(stats.total_streams, 2);  // lifetime count unchanged
+    assert_eq!(stats.active_streams, 1); // one still active
+}
+
+// ── Issue #310: fee tier fallback tests ────────────────────────────────────────
+
+/// When no token fee tier is configured, the global default protocol fee is used.
+#[test]
+fn test_fee_tier_fallback_to_global_default() {
+    let t = setup();
+    let c = client(&t);
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+    c.set_treasury_address(&admin);
+
+    // Set global fee to 200 bps (2%)
+    c.set_protocol_fee(&200);
+
+    // Create stream with token that has NO fee tier configured
+    t.env.ledger().set_timestamp(0);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>);
+
+    // Withdraw half way through
+    t.env.ledger().set_timestamp(500);
+    let recipient_before = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient);
+    let recipient_after = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    let recipient_got = recipient_after - recipient_before;
+
+    // claimable at t=500 with flow_rate=100 → 50_000
+    // fee at 200 bps → ceil(50_000 * 200 / 10000) = ceil(1000) = 1000
+    // recipient should get 50_000 - 1000 = 49_000
+    assert_eq!(recipient_got, 49_000, "fee should match global default of 200 bps");
+
+    // Verify fee was accumulated
+    let fees = c.get_fees_collected(&t.token_id);
+    assert_eq!(fees, 1000, "fee collected should be 1000 stroops");
+}
+
+/// When a token has an explicit fee tier, it overrides the global default.
+#[test]
+fn test_fee_tier_token_override() {
+    let t = setup();
+    let c = client(&t);
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+    c.set_treasury_address(&admin);
+
+    // Set global fee to 200 bps
+    c.set_protocol_fee(&200);
+
+    // Set token-specific fee to 100 bps (1%)
+    c.set_token_fee_tier(&admin, &t.token_id, &100);
+
+    t.env.ledger().set_timestamp(0);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>);
+
+    t.env.ledger().set_timestamp(500);
+    let recipient_before = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient);
+    let recipient_got = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient) - recipient_before;
+
+    // claimable=50_000, fee at 100 bps → ceil(50_000 * 100 / 10000) = ceil(500) = 500
+    // recipient should get 50_000 - 500 = 49_500
+    assert_eq!(recipient_got, 49_500, "token-specific fee tier should override global default");
+
+    // Verify fee collected matches token tier
+    let fees = c.get_fees_collected(&t.token_id);
+    assert_eq!(fees, 500, "fee should be 500 (token tier of 100 bps)");
+}
+
+/// Zero-fee tier explicitly set vs unset: explicit zero should result in no fee,
+/// while unset should use global default.
+#[test]
+fn test_zero_fee_tier_explicit_vs_unset() {
+    let t = setup();
+    let c = client(&t);
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+    c.set_treasury_address(&admin);
+
+    // Set global fee to 200 bps (nonzero)
+    c.set_protocol_fee(&200);
+
+    // Create a second token that will have explicit zero fee
+    let token_admin = Address::generate(&t.env);
+    let token2_id = t.env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    StellarAssetClient::new(&t.env, &token2_id).mint(&t.sender, &1_000_000);
+
+    // Set zero fee tier on token2
+    c.set_token_fee_tier(&admin, &token2_id, &0);
+
+    // Create stream with the zero-fee token
+    t.env.ledger().set_timestamp(0);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &token2_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>);
+
+    t.env.ledger().set_timestamp(500);
+    let recipient_before = TokenClient::new(&t.env, &token2_id).balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient);
+    let recipient_got = TokenClient::new(&t.env, &token2_id).balance(&t.recipient) - recipient_before;
+
+    // claimable=50_000, fee at 0 bps → 0, recipient gets full 50_000
+    assert_eq!(recipient_got, 50_000, "explicit zero fee tier should mean no fee");
+
+    // No fee should have been collected
+    let fees = c.get_fees_collected(&token2_id);
+    assert_eq!(fees, 0, "zero-fee tier should result in zero fees collected");
+}
