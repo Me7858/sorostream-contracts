@@ -1375,7 +1375,7 @@ impl SoroStreamContract {
             if tranches_newly_claimed > 0 {
                 events::tranches_withdrawn(&env, stream_id, &recipient, tranches_newly_claimed, claimable);
             }
-            events::stream_withdrawn(&env, stream_id, &recipient, claimable, now);
+            events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
             if all_claimed {
                 events::stream_completed(&env, stream_id);
             }
@@ -1663,7 +1663,7 @@ impl SoroStreamContract {
             }
         }
 
-        events::stream_withdrawn(&env, stream_id, &recipient, claimable, now);
+        events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
 
         // Clear stream-specific reentrancy lock
         stream.locked = false;
@@ -1983,7 +1983,7 @@ impl SoroStreamContract {
                             &recipient_amount,
                         );
                     }
-                    events::stream_withdrawn(&env, stream_id, &current_recipient, claimable, now);
+                    events::stream_withdrawn(&env, stream_id, &current_recipient, claimable, now, stream.total_withdrawn);
                 }
             }
         }
@@ -2873,7 +2873,7 @@ impl SoroStreamContract {
             }
 
             amounts.push_back(claimable);
-            events::stream_withdrawn(&env, stream_id, &recipient, claimable, now);
+            events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
         }
 
         Ok(amounts)
