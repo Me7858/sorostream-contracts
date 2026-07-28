@@ -21,6 +21,9 @@ Closes #<!-- issue number -->
 - [ ] Uses `saturating_sub` / `checked_add` — no raw underflow risk
 - [ ] Division-before-multiplication avoided or documented
 
+### Authorization & Permissions
+- [ ] `PERMISSIONS.md` updated if any new instruction or role was added or modified
+
 ### Storage Cleanup
 - [ ] Completed/removed streams cleaned from persistent storage
 - [ ] New storage keys documented in `docs/STORAGE.md`
