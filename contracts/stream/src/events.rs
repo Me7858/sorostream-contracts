@@ -480,6 +480,110 @@ pub fn withdrawal_step_completed(
     stream_id: u64,
     step_index: u32,
     total_steps: u32,
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (a): StreamExpiryWarning
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a stream is within the expiry warning window.
+///
+/// Allows indexers and wallets to build proactive notification systems without polling.
+/// Emitted once per stream per expiry window during the first contract interaction
+/// that occurs within the configurable ledger window before `end_time`.
+///
+/// # Event Data
+/// - `stream_id`: The stream that is approaching expiry
+/// - `sender`: The stream sender
+/// - `recipient`: The stream recipient
+/// - `remaining_balance`: The amount not yet withdrawn (deposit - total_withdrawn)
+/// - `ledgers_until_expiry`: Number of ledgers remaining until end_time
+pub fn stream_expiry_warning(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    remaining_balance: i128,
+    ledgers_until_expiry: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamExpiryWarning"), stream_id),
+        (sender.clone(), recipient.clone(), remaining_balance, ledgers_until_expiry),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (b): Sender reputation cap
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a sender crosses the promotion threshold.
+///
+/// After crossing the threshold, the sender is no longer subject to the
+/// `new_sender_stream_cap` and can create streams without the lower cap.
+///
+/// # Event Data
+/// - `sender`: The sender that has been promoted
+/// - `lifetime_count`: Total number of streams this sender has ever created
+/// - `threshold`: The promotion threshold that was crossed
+pub fn sender_promoted(
+    env: &Env,
+    sender: &Address,
+    lifetime_count: u32,
+    threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "SenderPromoted"),),
+        (sender.clone(), lifetime_count, threshold),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (c): Stream redirect
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a redirect target is set for a stream.
+///
+/// # Event Data
+/// - `stream_id`: The source stream
+/// - `target_stream_id`: The target stream that withdrawals will be redirected to
+/// - `recipient`: The recipient (must be the same for both streams)
+pub fn stream_redirect_set(
+    env: &Env,
+    stream_id: u64,
+    target_stream_id: u64,
+    recipient: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRedirectSet"), stream_id),
+        (target_stream_id, recipient.clone()),
+    );
+}
+
+/// Emitted when a redirect target is cleared for a stream.
+///
+/// # Event Data
+/// - `stream_id`: The source stream
+/// - `recipient`: The recipient who cleared the redirect
+pub fn stream_redirect_cleared(
+    env: &Env,
+    stream_id: u64,
+    recipient: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRedirectCleared"), stream_id),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when a withdrawal is redirected to another stream.
+///
+/// # Event Data
+/// - `source_stream_id`: The stream that initiated the withdrawal
+/// - `target_stream_id`: The stream that received the top-up
+/// - `amount`: The amount that was redirected (topped up into target)
+/// - `recipient`: The recipient (same for both streams)
+pub fn stream_redirected(
+    env: &Env,
+    source_stream_id: u64,
+    target_stream_id: u64,
     amount: i128,
     recipient: &Address,
 ) {
@@ -511,4 +615,99 @@ pub fn compute_step_interval(start_time: u64, end_time: u64, steps: u32) -> Opti
     }
     let duration = end_time.saturating_sub(start_time);
     Some(duration / steps as u64)
+        (Symbol::new(env, "StreamRedirected"), source_stream_id),
+        (target_stream_id, amount, recipient.clone()),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (d): Dual-token streams
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a dual-token stream is created.
+///
+/// # Event Data
+/// - `stream_id`: The newly created stream
+/// - `sender`: The stream sender
+/// - `recipient`: The stream recipient
+/// - `token1`: The first token address
+/// - `amount1`: The first token amount
+/// - `token2`: The second token address
+/// - `amount2`: The second token amount
+/// - `end_time`: When the stream ends
+pub fn dual_stream_created(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    token1: &Address,
+    amount1: i128,
+    token2: &Address,
+    amount2: i128,
+    end_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "DualStreamCreated"), stream_id),
+        (
+            sender.clone(),
+            recipient.clone(),
+            token1.clone(),
+            amount1,
+            token2.clone(),
+            amount2,
+            end_time,
+        ),
+    );
+}
+
+/// Emitted when a dual-token stream withdrawal occurs.
+///
+/// # Event Data
+/// - `stream_id`: The stream being withdrawn from
+/// - `recipient`: The recipient who withdrew
+/// - `amount1`: Amount withdrawn from token1
+/// - `amount2`: Amount withdrawn from token2
+/// - `timestamp`: Ledger timestamp of the withdrawal
+pub fn dual_stream_withdrawn(
+    env: &Env,
+    stream_id: u64,
+    recipient: &Address,
+    amount1: i128,
+    amount2: i128,
+    timestamp: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "DualStreamWithdrawn"), stream_id),
+        (recipient.clone(), amount1, amount2, timestamp),
+    );
+}
+
+/// Emitted when a dual-token stream is cancelled.
+///
+/// # Event Data
+/// - `stream_id`: The cancelled stream
+/// - `sender`: The sender who cancelled
+/// - `refund_amount1`: Amount refunded to sender from token1
+/// - `recipient_amount1`: Amount sent to recipient from token1
+/// - `refund_amount2`: Amount refunded to sender from token2
+/// - `recipient_amount2`: Amount sent to recipient from token2
+pub fn dual_stream_cancelled(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    refund_amount1: i128,
+    recipient_amount1: i128,
+    refund_amount2: i128,
+    recipient_amount2: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "DualStreamCancelled"), stream_id),
+        (
+            sender.clone(),
+            refund_amount1,
+            recipient_amount1,
+            refund_amount2,
+            recipient_amount2,
+        ),
+    );
 }

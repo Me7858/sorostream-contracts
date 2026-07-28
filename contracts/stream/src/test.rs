@@ -3341,6 +3341,16 @@ fn test_sweep_fees_unauthorized_rejected() {
 /// confirming no stream entry was silently overwritten.
 #[test]
 fn test_stream_id_uniqueness_100_sequential() {
+// ─── Issue #321: max-duration stream edge-case tests ────────────────────────
+
+/// A stream with duration = u64::MAX seconds must be created without panicking,
+/// stored correctly, and report get_claimable == 0 at start_time.
+///
+/// Deposit is set to i128::MAX so that `flow_rate = deposit / duration` rounds
+/// down to 1 stroop/sec rather than 0 (which would be rejected as ZeroFlowRate).
+/// The key property under test is that no arithmetic overflows during creation.
+#[test]
+fn test_create_stream_max_duration_no_panic() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -3557,6 +3567,59 @@ fn test_get_stream_health_fresh_stream_is_healthy() {
 /// expiry to push ttl_remaining below 1_000 and confirm AtRisk classification.
 #[test]
 fn test_get_stream_health_at_risk_threshold() {
+
+    let sender    = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    // Mint enough tokens to cover a deposit that yields a non-zero flow_rate
+    // with u64::MAX duration:  flow_rate = deposit / u64::MAX >= 1
+    // Use deposit = u64::MAX (fits comfortably in i128).
+    let deposit: i128 = u64::MAX as i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_id)
+        .mint(&sender, &deposit);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+
+    // start_time == current ledger timestamp (boundary condition from the issue)
+    let start_time: u64 = 1_000;
+    env.ledger().set_timestamp(start_time);
+
+    // duration = u64::MAX — the principal edge-case under test.
+    // This must NOT panic; the contract must return a valid stream_id.
+    let stream_id = c.create_stream(
+        &sender, &recipient, &token_id,
+        &deposit,
+        &u64::MAX,  // duration = u64::MAX seconds
+        &0u64,      // cliff_offset
+        &0u64,      // nonce
+        &false,     // auto_renew
+        &0u64,      // lock_until
+        &false,     // allow_recipient_termination
+        &0i128,     // holdback_amount
+    );
+
+    // Stream must be stored and readable.
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, deposit, "deposit must be stored verbatim");
+    assert_eq!(stream.start_time, start_time, "start_time must equal current ledger");
+    assert_eq!(stream.status, StreamStatus::Active, "stream must be Active");
+
+    // flow_rate = floor(deposit / u64::MAX) = floor((2^64 - 1) / (2^64 - 1)) = 1
+    assert_eq!(stream.flow_rate, 1, "flow_rate must be 1 stroop/sec");
+
+    // At start_time, elapsed = 0, so nothing is claimable.
+    let claimable_at_start = c.get_claimable(&stream_id);
+    assert_eq!(claimable_at_start, 0, "get_claimable must return 0 at start_time");
+}
+
+/// Verify get_claimable returns the correct value at mid-duration for a
+/// stream with duration = u64::MAX.
+///
+/// Mid-duration is approximated as u64::MAX / 2 seconds after start_time.
+/// Expected claimable = flow_rate × elapsed = 1 × (u64::MAX / 2).
+#[test]
+fn test_max_duration_stream_claimable_at_mid_duration() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -3569,6 +3632,13 @@ fn test_get_stream_health_at_risk_threshold() {
     let recipient = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000);
+
+    let sender    = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let deposit: i128 = u64::MAX as i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_id)
+        .mint(&sender, &deposit);
 
     let c = SoroStreamContractClient::new(&env, &contract_id);
     c.set_min_duration(&sender, &0u64);
@@ -3610,6 +3680,42 @@ fn test_get_stream_health_at_risk_threshold() {
 /// ledgers before expiry and confirm TTLWarning classification.
 #[test]
 fn test_get_stream_health_ttl_warning_threshold() {
+    let start_time: u64 = 0;
+    env.ledger().set_timestamp(start_time);
+
+    let stream_id = c.create_stream(
+        &sender, &recipient, &token_id,
+        &deposit,
+        &u64::MAX,  // duration = u64::MAX seconds
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    // flow_rate = 1 stroop/sec (deposit == u64::MAX, duration == u64::MAX)
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.flow_rate, 1);
+
+    // Advance to mid-duration: elapsed = u64::MAX / 2
+    let mid_elapsed: u64 = u64::MAX / 2;
+    env.ledger().set_timestamp(start_time + mid_elapsed);
+
+    // Expected claimable = flow_rate × elapsed = 1 × mid_elapsed
+    let expected_claimable: i128 = mid_elapsed as i128;
+    let claimable = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable, expected_claimable,
+        "get_claimable at mid-duration must equal flow_rate × elapsed"
+    );
+}
+
+/// Verify that start_time == current_ledger is accepted (boundary from the issue).
+/// The contract must store start_time correctly and report 0 claimable immediately.
+#[test]
+fn test_max_duration_start_time_equals_current_ledger() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -3622,6 +3728,14 @@ fn test_get_stream_health_ttl_warning_threshold() {
     let recipient = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000);
+
+    let sender    = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    // Generous deposit so flow_rate != 0 even with a huge duration
+    let deposit: i128 = u64::MAX as i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_id)
+        .mint(&sender, &deposit);
 
     let c = SoroStreamContractClient::new(&env, &contract_id);
     c.set_min_duration(&sender, &0u64);
@@ -3912,6 +4026,16 @@ fn test_min_withdrawal_no_floor_allows_small_amounts() {
         &1000u64,
         &0u64,
         &300u64,
+    // Set ledger timestamp to a specific boundary value
+    let boundary_timestamp: u64 = 9_999_999;
+    env.ledger().set_timestamp(boundary_timestamp);
+
+    let stream_id = c.create_stream(
+        &sender, &recipient, &token_id,
+        &deposit,
+        &u64::MAX,
+        &0u64,
+        &42u64,   // distinct nonce
         &false,
         &0u64,
         &false,
@@ -4197,4 +4321,19 @@ fn test_stream_config_event_emitted_with_steps() {
     let (steps, floor): (Option<u32>, Option<i128>) = data.clone().into_val(&t.env);
     assert_eq!(steps, Some(4u32));
     assert_eq!(floor, None::<i128>);
+}
+    );
+
+    let stream = c.get_stream(&stream_id);
+    // start_time must be exactly the ledger timestamp at creation
+    assert_eq!(
+        stream.start_time, boundary_timestamp,
+        "start_time must equal the current ledger timestamp"
+    );
+
+    // No time has elapsed — claimable must be zero
+    assert_eq!(
+        c.get_claimable(&stream_id), 0,
+        "claimable must be 0 when start_time == current ledger"
+    );
 }
