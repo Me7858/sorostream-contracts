@@ -77,14 +77,7 @@ Every PR that adds or modifies a contract instruction **must** pass through this
 
 ### Property-Based Testing Guidance
 
-When adding a new instruction, consider writing property-based tests that verify invariants hold across random inputs:
-
-- **Conservation of funds:** total tokens in contract + total withdrawn = total deposited.
-- **Monotonic time:** `last_withdraw_time` never decreases; `end_time` only increases on `top_up`.
-- **Index consistency:** `get_streams_by_sender` returns every stream created by that sender.
-- **Idempotency guards:** calling with the same nonce always returns `DuplicateStream`.
-
-Use the Soroban test environment with varied timestamps, amounts, and address combinations.
+When adding a new instruction, write property-based tests that verify invariants hold across random inputs. See the [Property-Based Testing](#property-based-testing) section below for a full guide.
 
 ## Code Style
 
@@ -102,3 +95,283 @@ Soroban contracts have **instance**, **persistent**, and **temporary** storage. 
 2. Never put long-lived indexes, balances, or user-visible state in `env.storage().temporary()` without maintainer approval and an explicit TTL-extension plan.
 3. Keep canonical records and their lookup indexes on the **same** durability level (today: persistent for streams + sender/recipient slots + nonces; instance for admin/pause/counter/fees).
 4. Update `docs/STORAGE.md` when you introduce new storage keys so the next contributor does not repeat past mistakes.
+
+## Property-Based Testing
+
+Property-based testing (PBT) runs your assertions against hundreds or thousands of randomly generated inputs rather than a single hand-crafted example. This makes it far more effective at finding edge cases in arithmetic-heavy contract logic like flow-rate calculations, dust handling, and balance conservation.
+
+SoroStream uses [`proptest`](https://proptest-rs.github.io/proptest/) with the Soroban test environment. All property tests live in `contracts/stream/src/proptest_tests.rs`.
+
+---
+
+### Setup
+
+`proptest` is already a dev-dependency:
+
+```toml
+# contracts/stream/Cargo.toml
+[dev-dependencies]
+proptest = "1"
+```
+
+No additional installation is needed. Ensure the `testutils` feature is available — it is enabled automatically when running `cargo test`.
+
+---
+
+### Running Property Tests
+
+```bash
+# Run all property tests (default: 256 cases per property)
+cargo test proptest_tests -- --nocapture
+
+# Run with a higher case count (matches CI)
+PROPTEST_CASES=1000 cargo test proptest_tests -- --nocapture
+
+# Run a single named property
+cargo test proptest_tests::prop_cancel_refund_invariant -- --nocapture
+```
+
+The CI `property-tests` job runs with `PROPTEST_CASES=1000`. Locally you can use fewer cases for faster iteration.
+
+---
+
+### Defining Generators
+
+Generators describe the shape of random inputs. Use `proptest`'s built-in range strategies for scalar values, and compose them with `prop_map` or `prop_flat_map` for derived values.
+
+```rust
+// Simple scalar ranges
+proptest! {
+    #[test]
+    fn prop_example(
+        amount   in 1_000_i128..=10_000_000_i128,
+        duration in 10_u64..=100_000_u64,
+        t_offset in 0_u64..=100_000_u64,
+    ) {
+        // proptest generates random (amount, duration, t_offset) tuples
+        // and runs the body repeatedly
+    }
+}
+```
+
+For parameters that are **derived** from others (e.g. a valid cliff that must be ≤ duration), clamp or skip inside the test body rather than using complex strategies — this keeps the generator simple and the shrinking fast:
+
+```rust
+proptest! {
+    #[test]
+    fn prop_cliff_within_duration(
+        amount   in 1_000_i128..=1_000_000_i128,
+        duration in 100_u64..=10_000_u64,
+        cliff    in 0_u64..=10_000_u64,
+    ) {
+        // Clamp cliff to be valid — avoids InvalidCliff errors
+        let cliff = cliff.min(duration);
+        // ... rest of test
+    }
+}
+```
+
+To **skip** a generated input that would be trivially invalid (e.g. flow_rate would be zero), use an early `return Ok(())`:
+
+```rust
+let flow_rate = amount / duration as i128;
+if flow_rate == 0 {
+    return Ok(()); // skip — ZeroFlowRate would be a contract-level error, not a bug
+}
+```
+
+---
+
+### Assertion Patterns
+
+Structure each property test around a single invariant. Keep setup minimal and the assertion at the bottom clear.
+
+**Pattern 1 — Balance conservation:**
+
+```rust
+prop_assert_eq!(
+    sender_before - sender_after,
+    amount,
+    "sender must lose exactly `amount` tokens on create"
+);
+prop_assert_eq!(
+    contract_after - contract_before,
+    amount,
+    "contract must gain exactly `amount` tokens on create"
+);
+```
+
+**Pattern 2 — Monotonic bounds:**
+
+```rust
+prop_assert!(
+    bal_after >= bal_before,
+    "recipient balance must be non-decreasing across withdrawals"
+);
+```
+
+**Pattern 3 — Field consistency:**
+
+```rust
+let stream = client.get_stream(&stream_id);
+prop_assert_eq!(stream.deposit, amount);
+prop_assert_eq!(stream.flow_rate, amount / duration as i128);
+prop_assert_eq!(stream.end_time, start_time + duration);
+```
+
+**Pattern 4 — Total conservation after cancel:**
+
+```rust
+let refund    = sender_after   - sender_before_cancel;
+let earned    = recipient_after - recipient_before_cancel;
+prop_assert_eq!(
+    refund + earned,
+    deposit,
+    "cancel must return exactly the full deposit split between sender and recipient"
+);
+```
+
+---
+
+### Worked Example — Cancel Refund Invariant
+
+This example verifies the core cancel invariant: `sender_refund + recipient_earned == deposit` for any valid `(amount, duration, cancel_time)` triple.
+
+```rust
+// contracts/stream/src/proptest_tests.rs
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    /// Cancel refund invariant: the sum of refund and earned always equals the deposit.
+    #[test]
+    fn prop_cancel_refund_invariant(
+        amount      in 10_000_i128..=1_000_000_i128,
+        duration    in 100_u64..=10_000_u64,
+        cancel_time in 0_u64..=10_000_u64,
+    ) {
+        // ── setup ────────────────────────────────────────────────────────────
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let client = SoroStreamContractClient::new(&env, &contract_id);
+        let token  = TokenClient::new(&env, &token_id);
+
+        // Skip degenerate inputs where no tokens would ever flow
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 {
+            return Ok(());
+        }
+
+        env.ledger().set_timestamp(0);
+
+        // ── create stream ────────────────────────────────────────────────────
+        let stream_id = client.create_stream(
+            &sender,
+            &recipient,
+            &token_id,
+            &amount,
+            &duration,
+            &0u64,   // cliff
+            &0u64,   // lock_until
+            &false,  // auto_renew
+            &0u64,   // start_time (0 = use ledger timestamp)
+            &false,  // allow_recipient_termination
+            &0i128,  // holdback_amount
+        );
+
+        // Record contract balance right after creation
+        let contract_bal_after_create = token.balance(&contract_id);
+        prop_assert_eq!(contract_bal_after_create, amount,
+            "contract must hold exactly `amount` after create");
+
+        // ── advance time and cancel ──────────────────────────────────────────
+        let cancel_time = cancel_time.min(duration); // keep within stream lifetime
+        env.ledger().set_timestamp(cancel_time);
+
+        let sender_before_cancel    = token.balance(&sender);
+        let recipient_before_cancel = token.balance(&recipient);
+
+        client.cancel_stream(&stream_id, &sender);
+
+        let sender_refund = token.balance(&sender)    - sender_before_cancel;
+        let earned        = token.balance(&recipient) - recipient_before_cancel;
+
+        // ── assert invariant ─────────────────────────────────────────────────
+        prop_assert_eq!(
+            sender_refund + earned,
+            amount,
+            "sender_refund ({sender_refund}) + earned ({earned}) must equal deposit ({amount})"
+        );
+
+        // Neither party receives more than the deposit
+        prop_assert!(sender_refund >= 0,  "refund must be non-negative");
+        prop_assert!(earned        >= 0,  "earned must be non-negative");
+        prop_assert!(sender_refund <= amount, "refund must not exceed deposit");
+        prop_assert!(earned        <= amount, "earned must not exceed deposit");
+    }
+}
+```
+
+Run it:
+
+```bash
+PROPTEST_CASES=10000 cargo test prop_cancel_refund_invariant -- --nocapture
+```
+
+---
+
+### Debugging Shrunk Counter-Examples
+
+When `proptest` finds a failing input it automatically **shrinks** it — repeatedly simplifying the values until it finds the smallest input that still fails. The shrunk counter-example is printed at the end of the test output:
+
+```
+thread 'proptest_tests::prop_cancel_refund_invariant' panicked at
+  'prop_cancel_refund_invariant: ...
+   Minimal failing input:
+     amount = 10000
+     duration = 100
+     cancel_time = 0
+   Explanation: sender_refund (0) + earned (0) must equal deposit (10000)'
+```
+
+**Steps to debug a shrunk counter-example:**
+
+1. **Reproduce it in a unit test.** Copy the printed values into a `#[test]` with exact inputs — this is faster to iterate on than re-running proptest.
+
+   ```rust
+   #[test]
+   fn regression_cancel_zero_time() {
+       // Reproduces: amount=10000, duration=100, cancel_time=0
+       let (env, contract_id, token_id, sender, recipient) = setup_env();
+       // ...
+   }
+   ```
+
+2. **Check the contract logic path** for the shrunk values. Zero `cancel_time` means `elapsed = 0`, so `earned = flow_rate × 0 = 0`. If the contract still transfers tokens, something is wrong in the claimable calculation.
+
+3. **Add `dbg!()` or `println!()` calls** in the test body, then re-run with `--nocapture` to inspect intermediate state.
+
+4. **Use the proptest seed** to re-run the exact random sequence. The seed is printed in the failure message. Set it via:
+
+   ```bash
+   PROPTEST_SEED="<hex-seed>" cargo test prop_cancel_refund_invariant
+   ```
+
+5. **Persist the failure case** by saving it to `proptest-regressions/`. Proptest saves shrunk cases automatically in `contracts/stream/proptest-regressions/` if the directory exists — commit this file to prevent regressions.
+
+---
+
+### Invariants to Cover for New Instructions
+
+When you add a new contract instruction, consider writing property tests for these classes of invariant:
+
+| Invariant class | What to assert |
+|----------------|----------------|
+| **Balance conservation** | Tokens in = tokens out; no tokens created or destroyed |
+| **Monotonic time** | `last_withdraw_time` never decreases; `end_time` only increases on `top_up` |
+| **Bounded withdrawal** | Total withdrawn never exceeds deposit |
+| **Field consistency** | `flow_rate == deposit / duration`; `end_time == start_time + duration` |
+| **Index consistency** | `get_streams_by_sender` returns every stream created by that sender |
+| **Idempotency guards** | Same nonce always returns `DuplicateStream`; double-cancel fails |
+| **Status transitions** | Cancelled / completed streams cannot be re-cancelled or withdrawn from |
+
+> Closes [#318](https://github.com/SoroStream/sorostream-contracts/issues/318).
