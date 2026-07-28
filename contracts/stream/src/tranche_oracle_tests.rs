@@ -664,3 +664,230 @@ fn test_oracle_cancel_with_price_deviation_still_succeeds() {
     let result = c.try_cancel_stream(&stream_id, &t.sender);
     assert!(result.is_ok(), "cancel_stream should succeed regardless of oracle price");
 }
+
+// ─── Issue #324: dynamic oracle price updates during a stream ────────────────
+
+/// Integration test: oracle price updates three times (up, down, back to original)
+/// during a four-tranche stream's lifetime. A partial withdraw is performed at
+/// each price interval boundary. The test verifies:
+///
+/// 1. Each individual withdraw succeeds while the price is within the 20 % threshold.
+/// 2. `get_claimable` returns the correct per-period amount at each boundary.
+/// 3. The running `total_withdrawn` after every period equals the sum of tranche
+///    amounts for all tranches vested so far — i.e. the accumulator is never
+///    reset by a price change.
+/// 4. The final `total_withdrawn` equals the full deposit (all four tranches).
+///
+/// Price schedule (creation price = 1_000_000, threshold = 2000 bps / 20 %):
+///   Period 0 → 1: price stays at 1_000_000 (0 % deviation)
+///   Period 1 → 2: price rises to 1_150_000 (+15 %, within threshold)
+///   Period 2 → 3: price falls to  870_000 (-13 %, within threshold)
+///   Period 3 → 4: price returns to 1_000_000 (0 % deviation)
+#[test]
+fn test_oracle_three_price_updates_accumulator_correct() {
+    let t = setup_oracle();
+    let c = oracle_client(&t);
+
+    // ── Stream setup ────────────────────────────────────────────────────────
+    // Four equal tranches of 50_000 each, unlocking every 1000 seconds.
+    // Total deposit = 200_000.
+    let tranche_amount = 50_000i128;
+    let deposit        = tranche_amount * 4;
+    let t0: u64        = 1_000; // creation timestamp
+
+    t.env.ledger().set_timestamp(t0);
+
+    let tranches = {
+        let mut v = soroban_sdk::Vec::new(&t.env);
+        v.push_back(VestingTranche { unlock_time: t0 + 1_000, amount: tranche_amount });
+        v.push_back(VestingTranche { unlock_time: t0 + 2_000, amount: tranche_amount });
+        v.push_back(VestingTranche { unlock_time: t0 + 3_000, amount: tranche_amount });
+        v.push_back(VestingTranche { unlock_time: t0 + 4_000, amount: tranche_amount });
+        v
+    };
+
+    // creation_price = 1_000_000 (set in setup_oracle).
+    // Allow 20 % (2000 bps) deviation so all three price moves stay inside the band.
+    let stream_id = c.create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &deposit, &tranches,
+        &0u64,                         // nonce
+        &0u64,                         // lock_until
+        &false,                        // allow_recipient_termination
+        &Some(t.oracle_id.clone()),    // oracle
+        &2000u32,                      // max_price_deviation_bps = 20 %
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.creation_price, 1_000_000, "creation price must be stored");
+    assert_eq!(stream.deposit, deposit);
+
+    let oracle = MockOracleClient::new(&t.env, &t.oracle_id);
+    let token  = soroban_sdk::token::Client::new(&t.env, &t.token_id);
+
+    // ── Period 1: price unchanged (0 % deviation) — tranche 0 unlocks ──────
+    // Price: 1_000_000 (same as creation)
+    oracle.set_price(&1_000_000i128);
+
+    t.env.ledger().set_timestamp(t0 + 1_001); // just past first unlock
+
+    let claimable_p1 = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_p1, tranche_amount,
+        "period 1: exactly one tranche must be claimable"
+    );
+
+    let bal_before_p1 = token.balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient); // must NOT revert
+    let bal_after_p1 = token.balance(&t.recipient);
+    assert_eq!(
+        bal_after_p1 - bal_before_p1, tranche_amount,
+        "period 1: recipient receives first tranche"
+    );
+
+    let s = c.get_stream(&stream_id);
+    assert_eq!(s.total_withdrawn, tranche_amount, "accumulator after period 1");
+    assert_eq!(s.tranches_claimed, 1, "cursor after period 1");
+
+    // ── Period 2: price UP to 1_150_000 (+15 %, within 20 % band) ──────────
+    // Price: +15 % from creation (deviation = 1500 bps ≤ 2000 bps threshold)
+    oracle.set_price(&1_150_000i128);
+
+    t.env.ledger().set_timestamp(t0 + 2_001); // just past second unlock
+
+    let claimable_p2 = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_p2, tranche_amount,
+        "period 2: only the newly unlocked tranche must be claimable"
+    );
+
+    let bal_before_p2 = token.balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient); // price within threshold — must succeed
+    let bal_after_p2 = token.balance(&t.recipient);
+    assert_eq!(
+        bal_after_p2 - bal_before_p2, tranche_amount,
+        "period 2: recipient receives second tranche despite price move up"
+    );
+
+    let s = c.get_stream(&stream_id);
+    assert_eq!(s.total_withdrawn, tranche_amount * 2, "accumulator after period 2");
+    assert_eq!(s.tranches_claimed, 2, "cursor after period 2");
+
+    // ── Period 3: price DOWN to 870_000 (−13 %, within 20 % band) ──────────
+    // Price: -13 % from creation (deviation = 1300 bps ≤ 2000 bps threshold)
+    oracle.set_price(&870_000i128);
+
+    t.env.ledger().set_timestamp(t0 + 3_001); // just past third unlock
+
+    let claimable_p3 = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_p3, tranche_amount,
+        "period 3: only the newly unlocked tranche must be claimable"
+    );
+
+    let bal_before_p3 = token.balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient); // price within threshold — must succeed
+    let bal_after_p3 = token.balance(&t.recipient);
+    assert_eq!(
+        bal_after_p3 - bal_before_p3, tranche_amount,
+        "period 3: recipient receives third tranche despite price drop"
+    );
+
+    let s = c.get_stream(&stream_id);
+    assert_eq!(s.total_withdrawn, tranche_amount * 3, "accumulator after period 3");
+    assert_eq!(s.tranches_claimed, 3, "cursor after period 3");
+
+    // ── Period 4: price back to 1_000_000 (0 % deviation) — final tranche ──
+    oracle.set_price(&1_000_000i128);
+
+    t.env.ledger().set_timestamp(t0 + 4_001); // past final unlock
+
+    let claimable_p4 = c.get_claimable(&stream_id);
+    assert_eq!(
+        claimable_p4, tranche_amount,
+        "period 4: final tranche must be claimable"
+    );
+
+    let bal_before_p4 = token.balance(&t.recipient);
+    c.withdraw(&stream_id, &t.recipient);
+    let bal_after_p4 = token.balance(&t.recipient);
+    assert_eq!(
+        bal_after_p4 - bal_before_p4, tranche_amount,
+        "period 4: recipient receives final tranche"
+    );
+
+    // ── Final invariant: total payout == deposit ────────────────────────────
+    // After all four tranches the stream should have been removed from storage.
+    let total_received =
+        (bal_after_p1 - bal_before_p1) +
+        (bal_after_p2 - bal_before_p2) +
+        (bal_after_p3 - bal_before_p3) +
+        (bal_after_p4 - bal_before_p4);
+
+    assert_eq!(
+        total_received, deposit,
+        "sum of all period payouts must equal the original deposit"
+    );
+
+    // Stream must have been cleaned up after the last tranche.
+    assert!(
+        c.try_get_stream(&stream_id).is_err(),
+        "stream must be removed after all tranches are claimed"
+    );
+}
+
+/// Complementary test: a withdrawal is blocked when the oracle price moves OUTSIDE
+/// the threshold between two tranche unlock events. The accumulator must not advance.
+#[test]
+fn test_oracle_price_out_of_band_blocks_mid_stream_withdraw() {
+    let t = setup_oracle();
+    let c = oracle_client(&t);
+
+    let t0: u64 = 1_000;
+    t.env.ledger().set_timestamp(t0);
+
+    // Two tranches of 100_000 each.
+    let tranche_amount = 100_000i128;
+    let deposit        = tranche_amount * 2;
+
+    let tranches = {
+        let mut v = soroban_sdk::Vec::new(&t.env);
+        v.push_back(VestingTranche { unlock_time: t0 + 1_000, amount: tranche_amount });
+        v.push_back(VestingTranche { unlock_time: t0 + 2_000, amount: tranche_amount });
+        v
+    };
+
+    // 10 % threshold (1000 bps).
+    let stream_id = c.create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &deposit, &tranches,
+        &1u64, &0u64, &false,
+        &Some(t.oracle_id.clone()),
+        &1000u32,
+    );
+
+    // Price crashes 50 % before the first withdrawal — exceeds 10 % threshold.
+    MockOracleClient::new(&t.env, &t.oracle_id).set_price(&500_000i128);
+
+    t.env.ledger().set_timestamp(t0 + 1_001);
+
+    // Withdraw must be blocked.
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(
+        result.is_err(),
+        "withdraw must fail when price deviation exceeds threshold"
+    );
+
+    // Accumulator and cursor must be unchanged.
+    let s = c.get_stream(&stream_id);
+    assert_eq!(s.total_withdrawn, 0, "total_withdrawn must not advance on failed withdraw");
+    assert_eq!(s.tranches_claimed, 0, "tranche cursor must not advance on failed withdraw");
+
+    // Oracle recovers; withdrawal now succeeds.
+    MockOracleClient::new(&t.env, &t.oracle_id).set_price(&1_050_000i128); // +5 %, within 10 %
+    c.withdraw(&stream_id, &t.recipient);
+
+    let s = c.get_stream(&stream_id);
+    assert_eq!(s.total_withdrawn, tranche_amount, "accumulator must advance after recovery");
+    assert_eq!(s.tranches_claimed, 1);
+}
