@@ -110,4 +110,18 @@ pub enum StreamError {
     DurationExceedsMax = 44,
     /// Token address is not a valid deployed SAC.
     InvalidTokenAddress = 45,
+
+    // ── Issue #286: Per-token stream cap ─────────────────────────────────────
+    /// Creating this stream would exceed the per-token active stream cap.
+    TokenStreamCapExceeded = 54,
+
+    // ── Issue #284: Address blocklist ─────────────────────────────────────────
+    /// Sender or recipient is on the address blocklist.
+    AddressBlocked = 55,
+
+    // ── Issue #282: Post-expiry grace period ──────────────────────────────────
+    /// The stream's end_time has passed but the grace period is still active.
+    GracePeriodActive = 56,
+    /// The sender attempted to recover funds before the grace period elapsed.
+    RecoveryNotAllowed = 57,
 }
