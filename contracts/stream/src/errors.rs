@@ -78,4 +78,14 @@ pub enum StreamError {
     NotDualStream = 52,
     /// Operation requires a single-token stream but the stream is dual-token.
     IsDualStream = 53,
+    /// Sender has exceeded the allowed stream creation rate.
+    RateLimitExceeded = 41,
+    /// Withdrawal or operation would exceed slippage tolerance.
+    SlippageExceeded = 42,
+    /// The provided slippage parameter is invalid (e.g. > 10 000 bps).
+    InvalidSlippage = 43,
+    /// Stream duration exceeds the configured maximum.
+    DurationExceedsMax = 44,
+    /// Token address is not a valid deployed SAC.
+    InvalidTokenAddress = 45,
 }
