@@ -54,6 +54,18 @@ pub enum StreamError {
     InvalidSlippage = 43,
     DurationExceedsMax = 44,
     InvalidTokenAddress = 45,
+    /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
+    /// existing entry even after the defensive retry increment.  This should never occur
+    /// in normal operation; it indicates a SHA-256 prefix collision or a storage bug.
+    IDCollision = 46,
+    /// A withdrawal was attempted before the next evenly-spaced step threshold has
+    /// been reached.  Callers should wait until
+    /// `start_time + (current_step + 1) * step_interval` passes.
+    NextStepNotReached = 47,
+    /// The claimable amount is below the stream's configured `min_withdrawal_amount`
+    /// floor.  This check is bypassed on the final claim so the recipient can always
+    /// drain the remaining balance.
+    AmountBelowMinimum = 48,
 
     // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
     /// Expiry warning window must be a positive ledger count.

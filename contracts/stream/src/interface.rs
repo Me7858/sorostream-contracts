@@ -6,6 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Vec};
 
 use crate::errors::StreamError;
+use crate::types::{AuditEntry, Stats, Stream, StreamHealth};
 use crate::types::{AuditEntry, Stats, Stream, VestingCurve, VestingTranche};
 
 #[contractclient(name = "SoroStreamClient")]
@@ -264,6 +265,34 @@ pub trait SoroStreamInterface {
     fn create_dual_stream(
         env: Env,
         sender: Address,
+        stream_id: u64,
+        reference_price: i128,
+        max_slippage_bps: u32,
+    ) -> Result<(), StreamError>;
+
+    /// Returns a health snapshot for the given stream's on-chain storage entry.
+    ///
+    /// This is a read-only instruction — no auth required, callable by anyone.
+    /// It reports the current ledger, the stream's `end_time`, the number of
+    /// ledgers remaining before the persistent storage entry is evicted, and a
+    /// derived health classification.
+    ///
+    /// ## Health thresholds
+    /// | Remaining ledgers | Status       |
+    /// |-------------------|--------------|
+    /// | >= 10,000         | `Healthy`    |
+    /// | 1,000 – 9,999     | `TTLWarning` |
+    /// | < 1,000           | `AtRisk`     |
+    ///
+    /// # Parameters
+    /// * `stream_id` - The ID of the stream to inspect.
+    ///
+    /// # Returns
+    /// A [`StreamHealth`] struct containing the health snapshot.
+    ///
+    /// # Errors
+    /// Returns `StreamError::StreamNotFound` if no stream with this ID exists.
+    fn get_stream_health(env: Env, stream_id: u64) -> Result<StreamHealth, StreamError>;
         recipient: Address,
         token1: Address,
         amount1: i128,

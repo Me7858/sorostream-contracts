@@ -15,7 +15,7 @@ pub mod vesting_math;
 
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
-pub use types::{AuditEntry, Stream, Stats, StreamStatus, VestingCurve};
+pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve};
 pub use oracle::IPriceOracle;
 
 #[cfg(test)] mod test;
@@ -373,6 +373,8 @@ impl SoroStreamContract {
         lock_until: u64,
         allow_recipient_termination: bool,
         holdback_amount: i128,
+        withdrawal_steps: Option<u32>,
+        min_withdrawal_amount: Option<i128>,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -419,6 +421,23 @@ impl SoroStreamContract {
             return Err(StreamError::ZeroFlowRate);
         }
 
+        // ── Validate withdrawal_steps ────────────────────────────────────────
+        // Steps must be >= 1.  A value of 0 is nonsensical; callers should pass
+        // None instead of Some(0).
+        if let Some(steps) = withdrawal_steps {
+            if steps == 0 {
+                return Err(StreamError::InvalidDuration);
+            }
+        }
+
+        // ── Validate min_withdrawal_amount ───────────────────────────────────
+        // The floor must be positive; 0 is indistinguishable from "no floor".
+        if let Some(floor) = min_withdrawal_amount {
+            if floor <= 0 {
+                return Err(StreamError::ZeroAmount);
+            }
+        }
+
         let sender_count = get_sender_stream_count(&env, &sender);
         let limit = effective_sender_limit(&env, &sender);
         if sender_count >= limit {
@@ -455,10 +474,30 @@ impl SoroStreamContract {
             .checked_add(cliff_seconds)
             .ok_or(StreamError::Overflow)?;
 
-        let stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
-
+        // ── Defensive stream ID collision check ─────────────────────────────
+        // derive_stream_id produces the first 8 bytes of a SHA-256 hash.
+        // Collisions are astronomically unlikely, but we add an explicit retry
+        // loop as a defence-in-depth measure: if a collision is detected, retry
+        // up to MAX_ID_RETRIES times by XOR-ing a retry counter into the nonce
+        // input.  All retries colliding returns IDCollision — a clear signal
+        // that something is structurally wrong.
+        const MAX_ID_RETRIES: u64 = 3;
+        let mut stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
         if stream_exists(&env, stream_id) {
-            return Err(StreamError::StreamIdConflict);
+            let mut found = false;
+            for retry in 1u64..=MAX_ID_RETRIES {
+                let candidate = derive_stream_id(
+                    &env, &sender, &recipient, now, nonce ^ (retry << 32),
+                );
+                if !stream_exists(&env, candidate) {
+                    stream_id = candidate;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(StreamError::IDCollision);
+            }
         }
 
         let creation_fee = get_creation_fee_xlm(&env);
@@ -509,6 +548,9 @@ impl SoroStreamContract {
             max_price_deviation_bps: 0,
             creation_price: 0,
             curve: VestingCurve::Linear,
+            withdrawal_steps,
+            current_step: 0,
+            min_withdrawal_amount,
         };
 
         save_stream(&env, &stream);
@@ -523,6 +565,13 @@ impl SoroStreamContract {
         events::stream_created(
             &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
         );
+
+        // Emit supplemental config event when non-default options are set so
+        // indexers can surface step/floor configuration without parsing the
+        // full stream struct.
+        if withdrawal_steps.is_some() || min_withdrawal_amount.is_some() {
+            events::stream_config(&env, stream_id, withdrawal_steps, min_withdrawal_amount);
+        }
 
         Ok(stream_id)
     }
@@ -556,6 +605,9 @@ impl SoroStreamContract {
             auto_renew,
             lock_until,
             allow_recipient_termination,
+            0i128, // holdback_amount
+            None,  // withdrawal_steps
+            None,  // min_withdrawal_amount
         )
     }
 
@@ -659,13 +711,27 @@ impl SoroStreamContract {
             return Err(StreamError::InvalidEndTime);
         }
 
-        let stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
+        // ── Defensive stream ID collision check (schedule path) ─────────────
+        const MAX_ID_RETRIES_SCHED: u64 = 3;
+        let mut stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
         if stream_exists(&env, stream_id) {
-            return Err(StreamError::StreamIdConflict);
+            let mut found = false;
+            for retry in 1u64..=MAX_ID_RETRIES_SCHED {
+                let candidate = derive_stream_id(
+                    &env, &sender, &recipient, now, nonce ^ (retry << 32),
+                );
+                if !stream_exists(&env, candidate) {
+                    stream_id = candidate;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(StreamError::IDCollision);
+            }
         }
 
         // Oracle baseline — fetch at creation to record reference price.
-        let creation_price = if let Some(ref oracle_addr) = oracle {
             oracle::fetch_price(&env, oracle_addr, &token)?
         } else {
             0
@@ -720,6 +786,9 @@ impl SoroStreamContract {
             max_price_deviation_bps,
             creation_price,
             curve: VestingCurve::Linear,
+            withdrawal_steps: None,
+            current_step: 0,
+            min_withdrawal_amount: None,
         };
 
         save_stream(&env, &stream);
@@ -812,9 +881,24 @@ impl SoroStreamContract {
             .checked_add(cliff_seconds)
             .ok_or(StreamError::Overflow)?;
 
-        let stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
+        // ── Defensive stream ID collision check (curve path) ─────────────────
+        const MAX_ID_RETRIES_CURVE: u64 = 3;
+        let mut stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
         if stream_exists(&env, stream_id) {
-            return Err(StreamError::StreamIdConflict);
+            let mut found = false;
+            for retry in 1u64..=MAX_ID_RETRIES_CURVE {
+                let candidate = derive_stream_id(
+                    &env, &sender, &recipient, now, nonce ^ (retry << 32),
+                );
+                if !stream_exists(&env, candidate) {
+                    stream_id = candidate;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(StreamError::IDCollision);
+            }
         }
 
         let creation_fee = get_creation_fee_xlm(&env);
@@ -861,6 +945,9 @@ impl SoroStreamContract {
             max_price_deviation_bps: 0,
             creation_price: 0,
             curve,
+            withdrawal_steps: None,
+            current_step: 0,
+            min_withdrawal_amount: None,
         };
 
         save_stream(&env, &stream);
@@ -1354,6 +1441,42 @@ impl SoroStreamContract {
             .ok_or(StreamError::Overflow)?;
         let claimable = raw_claimable.min(available);
 
+        // ── Withdrawal-steps enforcement ─────────────────────────────────────
+        // When `withdrawal_steps` is configured the stream duration is divided
+        // into `n` equal intervals.  A withdrawal is only allowed at or after
+        // the boundary of the *next* unclaimed step.
+        //
+        //   step_interval  = (end_time - start_time) / steps
+        //   next_threshold = start_time + (current_step + 1) * step_interval
+        //
+        // On the *final* step we always allow the withdrawal so the recipient
+        // can drain the full remaining balance regardless of rounding.
+        if let Some(steps) = stream.withdrawal_steps {
+            if steps > 0 {
+                let is_final_step = stream.current_step + 1 >= steps;
+                if !is_final_step {
+                    let duration = stream.end_time.saturating_sub(stream.start_time);
+                    let step_interval = duration / steps as u64;
+                    let next_threshold = stream.start_time
+                        .saturating_add((stream.current_step as u64 + 1) * step_interval);
+                    if now < next_threshold {
+                        return Err(StreamError::NextStepNotReached);
+                    }
+                }
+            }
+        }
+
+        // ── Minimum withdrawal amount enforcement ────────────────────────────
+        // When `min_withdrawal_amount` is configured, reject withdrawals whose
+        // claimable is below the floor — UNLESS this is the final claim
+        // (claimable == available), which drains the remaining balance entirely.
+        // The bypass ensures recipients can always recover their last tokens
+        // even when they fall short of the floor due to rounding or dust.
+        if let Some(floor) = stream.min_withdrawal_amount {
+            let is_final_claim = claimable >= available;
+            if !is_final_claim && claimable < floor {
+                return Err(StreamError::AmountBelowMinimum);
+            }
         // ── Issue #241: Dust guard ────────────────────────────────────────────
         // If the claimable amount is at or below the dust threshold (1 stroop),
         // treat it as rounding dust and return Ok without performing any transfer.
@@ -1390,6 +1513,38 @@ impl SoroStreamContract {
                 .ok_or(StreamError::Overflow)?;
         }
         stream.last_withdraw_time = effective_now;
+
+        // Advance the step cursor when the recipient successfully withdraws at
+        // or past a step boundary.  The cursor only moves on an actual transfer
+        // (claimable > 0) so a zero-claimable no-op never advances state.
+        if claimable > 0 {
+            if let Some(steps) = stream.withdrawal_steps {
+                if steps > 0 && stream.current_step < steps {
+                    let duration = stream.end_time.saturating_sub(stream.start_time);
+                    let step_interval = duration / steps as u64;
+                    // Determine how many step boundaries now has crossed.
+                    let elapsed_from_start = now.saturating_sub(stream.start_time);
+                    let steps_elapsed = if step_interval > 0 {
+                        (elapsed_from_start / step_interval).min(steps as u64) as u32
+                    } else {
+                        steps
+                    };
+                    if steps_elapsed > stream.current_step {
+                        let new_step = steps_elapsed.min(steps);
+                        let completed_step = new_step; // 1-based for the event
+                        stream.current_step = new_step;
+                        events::withdrawal_step_completed(
+                            &env,
+                            stream_id,
+                            completed_step,
+                            steps,
+                            claimable,
+                            &recipient,
+                        );
+                    }
+                }
+            }
+        }
 
         // Accumulate fees in contract storage (swept via sweep_fees by admin)
         if fee_amount > 0 {
@@ -1941,6 +2096,9 @@ impl SoroStreamContract {
             max_price_deviation_bps: 0,
             creation_price: 0,
             curve: VestingCurve::Linear,
+            withdrawal_steps: None,
+            current_step: 0,
+            min_withdrawal_amount: None,
         };
 
         save_stream(&env, &new_stream);
@@ -2559,6 +2717,9 @@ impl SoroStreamContract {
                 max_price_deviation_bps: 0,
                 creation_price: 0,
                 curve: VestingCurve::Linear,
+                withdrawal_steps: None,
+                current_step: 0,
+                min_withdrawal_amount: None,
             };
 
             save_stream(&env, &stream);
@@ -3136,6 +3297,56 @@ impl SoroStreamContract {
         set_active_stream_count(&env, correct_count);
         Ok(())
     }
+
+    /// Returns a health snapshot for the given stream's on-chain storage entry.
+    ///
+    /// Read-only, no auth required.  Reports the current ledger sequence, the
+    /// stream's `end_time`, ledgers remaining before the persistent storage entry
+    /// is evicted, and a derived health classification.
+    ///
+    /// ## Health thresholds
+    /// | Remaining ledgers | Status       |
+    /// |-------------------|--------------|
+    /// | >= 10,000         | `Healthy`    |
+    /// | 1,000 – 9,999     | `TTLWarning` |
+    /// | < 1,000           | `AtRisk`     |
+    ///
+    /// # Errors
+    /// Returns `StreamError::StreamNotFound` if no stream with this ID exists.
+    pub fn get_stream_health(env: Env, stream_id: u64) -> Result<StreamHealth, StreamError> {
+        use types::{HealthStatus, StreamHealth};
+
+        // Confirm the stream exists — returns StreamNotFound for unknown IDs.
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        let current_ledger = env.ledger().sequence();
+
+        // Query the live TTL of the persistent storage entry.
+        // `get_ttl` returns the number of ledgers from *now* until the entry expires.
+        let ttl_remaining: u32 = env
+            .storage()
+            .persistent()
+            .get_ttl(&stream_id)
+            .unwrap_or(0u32);
+
+        const TTL_WARNING_THRESHOLD: u32 = 10_000;
+        const TTL_AT_RISK_THRESHOLD: u32 = 1_000;
+
+        let status = if ttl_remaining >= TTL_WARNING_THRESHOLD {
+            HealthStatus::Healthy
+        } else if ttl_remaining >= TTL_AT_RISK_THRESHOLD {
+            HealthStatus::TTLWarning
+        } else {
+            HealthStatus::AtRisk
+        };
+
+        Ok(StreamHealth {
+            current_ledger,
+            end_time: stream.end_time,
+            ttl_remaining_ledgers: ttl_remaining,
+            status,
+        })
+    }
 }
 
 impl SoroStreamInterface for SoroStreamContract {
@@ -3204,6 +3415,9 @@ impl SoroStreamInterface for SoroStreamContract {
             auto_renew,
             lock_until,
             allow_recipient_termination,
+            0i128, // holdback_amount defaults to 0 in trait delegation
+            None,  // withdrawal_steps
+            None,  // min_withdrawal_amount
         )
     }
 
@@ -3433,6 +3647,10 @@ impl SoroStreamInterface for SoroStreamContract {
 
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError> {
         Self::recalibrate_stats(env, admin)
+    }
+
+    fn get_stream_health(env: Env, stream_id: u64) -> Result<types::StreamHealth, StreamError> {
+        Self::get_stream_health(env, stream_id)
     }
 
     fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError> {
