@@ -48,6 +48,16 @@ pub enum StreamError {
     /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
     PriceDeviationTooHigh = 39,
     /// Oracle contract call failed or returned an unexpected value.
+    OracleError = 39,
+    RateLimitExceeded = 37,
+    TokenNotWhitelisted = 38,
+    SlippageExceeded = 39,
+    InvalidSlippage = 40,
+    DurationExceedsMax = 41,
+    InvalidTokenAddress = 42,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 43,
     OracleError = 40,
     RateLimitExceeded = 41,
     SlippageExceeded = 42,
