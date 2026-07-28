@@ -19,6 +19,9 @@ const PAUSE_EXPIRES_KEY: &str = "p_exp";
 /// Maximum pause duration in seconds (72 hours). After this the contract auto-unpauses.
 pub const MAX_PAUSE_DURATION: u64 = 72 * 60 * 60;
 const CREATION_FEE_XLM_KEY: &str = "cf_xlm";
+/// Default maximum start-time offset: 365 days in seconds.
+pub const DEFAULT_MAX_FUTURE_START_OFFSET: u64 = 365 * 24 * 60 * 60;
+const MAX_FUTURE_OFFSET_KEY: &str = "mf_start";
 
 /// Stores the contract admin address.
 pub fn write_admin(env: &Env, admin: &Address) {
@@ -391,6 +394,26 @@ pub fn write_max_duration(env: &Env, duration: u64) {
     env.storage()
         .instance()
         .set(&Symbol::new(env, MAX_DURATION_KEY), &duration);
+}
+
+/// Gets the maximum allowed future start-time offset in seconds.
+///
+/// When a caller creates a scheduled stream with an explicit `start_time`,
+/// `start_time` must satisfy `start_time <= now + max_future_start_offset`.
+/// Defaults to [`DEFAULT_MAX_FUTURE_START_OFFSET`] (365 days) when not set.
+pub fn read_max_future_start_offset(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, MAX_FUTURE_OFFSET_KEY))
+        .unwrap_or(DEFAULT_MAX_FUTURE_START_OFFSET)
+}
+
+/// Sets the maximum allowed future start-time offset in seconds.
+/// Only the admin may call this via the contract's `set_max_future_start_offset` instruction.
+pub fn write_max_future_start_offset(env: &Env, offset_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, MAX_FUTURE_OFFSET_KEY), &offset_seconds);
 }
 
 // --- Delegate helpers ---
@@ -1045,4 +1068,190 @@ pub fn unregister_federation_address(env: &Env, federation_name: &String) {
     env.storage()
         .persistent()
         .remove(&federation_registry_key(env, federation_name));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (a): StreamExpiryWarning
+// ═══════════════════════════════════════════════════════════════════════════
+
+const EXPIRY_WARNING_WINDOW_KEY: &str = "exp_win";
+
+/// Gets the expiry warning window in ledgers (default: 17280 = ~24 hours).
+pub fn get_expiry_warning_window(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, EXPIRY_WARNING_WINDOW_KEY))
+        .unwrap_or(17_280u32)
+}
+
+/// Sets the expiry warning window in ledgers.
+pub fn set_expiry_warning_window(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, EXPIRY_WARNING_WINDOW_KEY), &ledgers);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (b): Sender reputation cap
+// ═══════════════════════════════════════════════════════════════════════════
+
+const NEW_SENDER_STREAM_CAP_KEY: &str = "ns_cap";
+const SENDER_PROMOTION_THRESHOLD_KEY: &str = "sp_thr";
+
+fn sender_lifetime_count_key(env: &Env, sender: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "sl_cnt"), sender.clone())
+}
+
+/// Gets the stream cap for new senders (default: 10).
+pub fn get_new_sender_stream_cap(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, NEW_SENDER_STREAM_CAP_KEY))
+        .unwrap_or(10u32)
+}
+
+/// Sets the stream cap for new senders.
+pub fn set_new_sender_stream_cap(env: &Env, cap: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, NEW_SENDER_STREAM_CAP_KEY), &cap);
+}
+
+/// Gets the sender promotion threshold (number of streams after which cap no longer applies).
+/// Default: 50 streams.
+pub fn get_sender_promotion_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, SENDER_PROMOTION_THRESHOLD_KEY))
+        .unwrap_or(50u32)
+}
+
+/// Sets the sender promotion threshold.
+pub fn set_sender_promotion_threshold(env: &Env, threshold: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, SENDER_PROMOTION_THRESHOLD_KEY), &threshold);
+}
+
+/// Gets the lifetime stream count for a sender (total streams ever created).
+pub fn get_sender_lifetime_count(env: &Env, sender: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&sender_lifetime_count_key(env, sender))
+        .unwrap_or(0u32)
+}
+
+/// Increments the lifetime stream count for a sender.
+pub fn increment_sender_lifetime_count(env: &Env, sender: &Address) {
+    let key = sender_lifetime_count_key(env, sender);
+    let current = get_sender_lifetime_count(env, sender);
+    let next = current.checked_add(1).expect("sender lifetime count overflow");
+    env.storage().persistent().set(&key, &next);
+}
+
+/// Returns whether a sender is promoted (has crossed the threshold).
+pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
+    get_sender_lifetime_count(env, sender) >= get_sender_promotion_threshold(env)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (c): Stream redirect
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (d): Dual-token streams
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn dual_stream_token2_key(env: &Env, stream_id: u64) -> (Symbol, u64, Symbol) {
+    (Symbol::new(env, "ds"), stream_id, Symbol::new(env, "tok2"))
+}
+
+fn dual_stream_deposit2_key(env: &Env, stream_id: u64) -> (Symbol, u64, Symbol) {
+    (Symbol::new(env, "ds"), stream_id, Symbol::new(env, "dep2"))
+}
+
+fn dual_stream_withdrawn2_key(env: &Env, stream_id: u64) -> (Symbol, u64, Symbol) {
+    (Symbol::new(env, "ds"), stream_id, Symbol::new(env, "wd2"))
+}
+
+/// Gets the second token address for a dual stream.
+pub fn get_dual_stream_token2(env: &Env, stream_id: u64) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&dual_stream_token2_key(env, stream_id))
+}
+
+/// Sets the second token address for a dual stream.
+pub fn set_dual_stream_token2(env: &Env, stream_id: u64, token2: &Address) {
+    env.storage()
+        .persistent()
+        .set(&dual_stream_token2_key(env, stream_id), token2);
+}
+
+/// Removes the second token address (called on stream completion/cancellation).
+pub fn remove_dual_stream_token2(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&dual_stream_token2_key(env, stream_id));
+}
+
+/// Gets the second token deposit for a dual stream (in stroops).
+pub fn get_dual_stream_deposit2(env: &Env, stream_id: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&dual_stream_deposit2_key(env, stream_id))
+        .unwrap_or(0i128)
+}
+
+/// Sets the second token deposit for a dual stream.
+pub fn set_dual_stream_deposit2(env: &Env, stream_id: u64, deposit2: i128) {
+    env.storage()
+        .persistent()
+        .set(&dual_stream_deposit2_key(env, stream_id), &deposit2);
+}
+
+/// Removes the second token deposit (called on stream completion/cancellation).
+pub fn remove_dual_stream_deposit2(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&dual_stream_deposit2_key(env, stream_id));
+}
+
+/// Gets the total amount withdrawn from the second token.
+pub fn get_dual_stream_withdrawn2(env: &Env, stream_id: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&dual_stream_withdrawn2_key(env, stream_id))
+        .unwrap_or(0i128)
+}
+
+/// Sets the total amount withdrawn from the second token.
+pub fn set_dual_stream_withdrawn2(env: &Env, stream_id: u64, withdrawn2: i128) {
+    env.storage()
+        .persistent()
+        .set(&dual_stream_withdrawn2_key(env, stream_id), &withdrawn2);
+}
+
+/// Increments the total amount withdrawn from the second token.
+pub fn increment_dual_stream_withdrawn2(env: &Env, stream_id: u64, amount: i128) -> Result<(), crate::errors::StreamError> {
+    let current = get_dual_stream_withdrawn2(env, stream_id);
+    let new = current.checked_add(amount).ok_or(crate::errors::StreamError::Overflow)?;
+    set_dual_stream_withdrawn2(env, stream_id, new);
+    Ok(())
+}
+
+/// Removes the second token withdrawn counter (called on stream completion/cancellation).
+pub fn remove_dual_stream_withdrawn2(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&dual_stream_withdrawn2_key(env, stream_id));
+}
+
+/// Cleans up all dual-stream storage entries for a stream.
+pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
+    remove_dual_stream_token2(env, stream_id);
+    remove_dual_stream_deposit2(env, stream_id);
+    remove_dual_stream_withdrawn2(env, stream_id);
 }
