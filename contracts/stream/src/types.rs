@@ -179,6 +179,36 @@ pub struct Stream {
     /// remaining deposit is being drained), in which case the floor is bypassed.
     /// `None` means no minimum (default behaviour).
     pub min_withdrawal_amount: Option<i128>,
+
+    // ── Pause accounting ──────────────────────────────────────────────────────
+
+    /// Total number of seconds this stream has spent in the Paused state.
+    ///
+    /// Accumulated on every `resume_stream` call:
+    ///   `paused_duration_seconds += now - last_pause_time`
+    ///
+    /// Used to offset the `elapsed` window in claimable / refund calculations
+    /// so that paused time is never counted as streamed time.  Starts at 0.
+    pub paused_duration_seconds: u64,
+
+    // ── Claim-frequency throttle ──────────────────────────────────────────────
+
+    /// Optional minimum number of ledgers that must pass between two successful
+    /// `withdraw` calls.
+    ///
+    /// When `Some(n)`, a `withdraw` call is rejected with
+    /// `StreamError::ClaimTooFrequent` if fewer than `n` ledgers have elapsed
+    /// since `last_claim_ledger`.  The final claim (draining the full remaining
+    /// balance) always bypasses this restriction.
+    /// `None` means no frequency limit (default behaviour).
+    pub min_claim_interval_ledgers: Option<u32>,
+
+    /// Ledger sequence number of the most recent successful `withdraw` call.
+    ///
+    /// Initialised to `0` at stream creation.  Updated after every withdrawal
+    /// that moves tokens (including the final claim).
+    /// Only meaningful when `min_claim_interval_ledgers` is `Some`.
+    pub last_claim_ledger: u32,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.

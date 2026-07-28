@@ -48,58 +48,7 @@ pub enum StreamError {
     /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
     PriceDeviationTooHigh = 39,
     /// Oracle contract call failed or returned an unexpected value.
-    OracleError = 39,
-    RateLimitExceeded = 37,
-    TokenNotWhitelisted = 38,
-    SlippageExceeded = 39,
-    InvalidSlippage = 40,
-    DurationExceedsMax = 41,
-    InvalidTokenAddress = 42,
-    /// `start_time` is further in the future than the admin-configured
-    /// `max_future_start_offset_seconds` (default: 365 days).
-    StartTimeTooFar = 43,
     OracleError = 40,
-    RateLimitExceeded = 41,
-    SlippageExceeded = 42,
-    InvalidSlippage = 43,
-    DurationExceedsMax = 44,
-    InvalidTokenAddress = 45,
-    /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
-    /// existing entry even after the defensive retry increment.  This should never occur
-    /// in normal operation; it indicates a SHA-256 prefix collision or a storage bug.
-    IDCollision = 46,
-    /// A withdrawal was attempted before the next evenly-spaced step threshold has
-    /// been reached.  Callers should wait until
-    /// `start_time + (current_step + 1) * step_interval` passes.
-    NextStepNotReached = 47,
-    /// The claimable amount is below the stream's configured `min_withdrawal_amount`
-    /// floor.  This check is bypassed on the final claim so the recipient can always
-    /// drain the remaining balance.
-    AmountBelowMinimum = 48,
-
-    // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
-    /// Expiry warning window must be a positive ledger count.
-    InvalidExpiryWindow = 46,
-
-    // ── Feature (b): Sender reputation cap ───────────────────────────────────
-    /// Sender is below the promotion threshold and has hit the new-sender stream cap.
-    NewSenderStreamCapExceeded = 47,
-
-    // ── Feature (c): Stream redirect ─────────────────────────────────────────
-    /// The redirect target stream does not exist or its recipient doesn't match.
-    InvalidRedirectTarget = 48,
-    /// Setting this redirect would create a circular chain (A→B→A or longer).
-    CircularRedirect = 49,
-    /// Redirect target stream must have the same recipient as the source stream.
-    RedirectRecipientMismatch = 50,
-
-    // ── Feature (d): Dual-token streams ──────────────────────────────────────
-    /// Dual stream requires both token addresses to be distinct.
-    DuplicateTokenInDualStream = 51,
-    /// Operation requires a dual-token stream but the stream only has one token.
-    NotDualStream = 52,
-    /// Operation requires a single-token stream but the stream is dual-token.
-    IsDualStream = 53,
     /// Sender has exceeded the allowed stream creation rate.
     RateLimitExceeded = 41,
     /// Withdrawal or operation would exceed slippage tolerance.
@@ -110,4 +59,36 @@ pub enum StreamError {
     DurationExceedsMax = 44,
     /// Token address is not a valid deployed SAC.
     InvalidTokenAddress = 45,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 46,
+    /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
+    /// existing entry even after the defensive retry increment.
+    IDCollision = 47,
+    /// A withdrawal was attempted before the next evenly-spaced step threshold has
+    /// been reached.
+    NextStepNotReached = 48,
+    /// The claimable amount is below the stream's configured `min_withdrawal_amount`
+    /// floor.  Bypassed on the final claim.
+    AmountBelowMinimum = 49,
+    /// Expiry warning window must be a positive ledger count.
+    InvalidExpiryWindow = 50,
+    /// Sender is below the promotion threshold and has hit the new-sender stream cap.
+    NewSenderStreamCapExceeded = 51,
+    /// The redirect target stream does not exist or its recipient doesn't match.
+    InvalidRedirectTarget = 52,
+    /// Setting this redirect would create a circular chain (A→B→A or longer).
+    CircularRedirect = 53,
+    /// Redirect target stream must have the same recipient as the source stream.
+    RedirectRecipientMismatch = 54,
+    /// Dual stream requires both token addresses to be distinct.
+    DuplicateTokenInDualStream = 55,
+    /// Operation requires a dual-token stream but the stream only has one token.
+    NotDualStream = 56,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 57,
+    /// `withdraw` was called before `min_claim_interval_ledgers` ledgers have
+    /// elapsed since the previous successful withdrawal.
+    /// The final claim (emptying the stream) always bypasses this restriction.
+    ClaimTooFrequent = 58,
 }

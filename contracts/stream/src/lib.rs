@@ -414,6 +414,7 @@ impl SoroStreamContract {
         holdback_amount: i128,
         withdrawal_steps: Option<u32>,
         min_withdrawal_amount: Option<i128>,
+        min_claim_interval_ledgers: Option<u32>,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -590,6 +591,9 @@ impl SoroStreamContract {
             withdrawal_steps,
             current_step: 0,
             min_withdrawal_amount,
+            paused_duration_seconds: 0,
+            min_claim_interval_ledgers,
+            last_claim_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -608,7 +612,7 @@ impl SoroStreamContract {
         // Emit supplemental config event when non-default options are set so
         // indexers can surface step/floor configuration without parsing the
         // full stream struct.
-        if withdrawal_steps.is_some() || min_withdrawal_amount.is_some() {
+        if withdrawal_steps.is_some() || min_withdrawal_amount.is_some() || min_claim_interval_ledgers.is_some() {
             events::stream_config(&env, stream_id, withdrawal_steps, min_withdrawal_amount);
         }
 
@@ -647,6 +651,7 @@ impl SoroStreamContract {
             0i128, // holdback_amount
             None,  // withdrawal_steps
             None,  // min_withdrawal_amount
+            None,  // min_claim_interval_ledgers
         )
     }
 
@@ -847,6 +852,9 @@ impl SoroStreamContract {
             withdrawal_steps: None,
             current_step: 0,
             min_withdrawal_amount: None,
+            paused_duration_seconds: 0,
+            min_claim_interval_ledgers: None,
+            last_claim_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -1006,6 +1014,9 @@ impl SoroStreamContract {
             withdrawal_steps: None,
             current_step: 0,
             min_withdrawal_amount: None,
+            paused_duration_seconds: 0,
+            min_claim_interval_ledgers: None,
+            last_claim_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -1172,6 +1183,9 @@ impl SoroStreamContract {
     /// On withdraw, claimable tokens will be topped up into the target stream
     /// instead of sent directly to the recipient.
     pub fn set_redirect(env: Env, stream_id: u64, target_stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
         recipient.require_auth();
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         if stream.recipient != recipient { return Err(StreamError::NotRecipient); }
@@ -1186,6 +1200,9 @@ impl SoroStreamContract {
 
     /// Clears the redirect target on a stream. Only the recipient may call this.
     pub fn clear_redirect(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
         recipient.require_auth();
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         if stream.recipient != recipient { return Err(StreamError::NotRecipient); }
@@ -1452,6 +1469,12 @@ impl SoroStreamContract {
             max_price_deviation_bps: 0,
             creation_price: 0,
             curve: VestingCurve::Linear,
+            withdrawal_steps: None,
+            current_step: 0,
+            min_withdrawal_amount: None,
+            paused_duration_seconds: 0,
+            min_claim_interval_ledgers: None,
+            last_claim_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -1499,6 +1522,30 @@ impl SoroStreamContract {
         let cooldown = get_withdrawal_cooldown(&env);
         if cooldown > 0 && now < stream.last_withdraw_time.saturating_add(cooldown) {
             return Err(StreamError::WithdrawalCooldownActive);
+        }
+
+        // ── Claim-frequency enforcement ───────────────────────────────────────
+        // When `min_claim_interval_ledgers` is set, reject withdrawals that come
+        // too soon after the previous one, UNLESS this is the final claim.
+        // We check the final-claim condition before the interval so the recipient
+        // can always drain the full remaining balance even mid-interval.
+        if let Some(min_interval) = stream.min_claim_interval_ledgers {
+            if min_interval > 0 {
+                let current_ledger = env.ledger().sequence();
+                let next_eligible = stream.last_claim_ledger.saturating_add(min_interval);
+                // Compute whether this would be the final claim so we can bypass
+                // the interval restriction in that case.  We compute a quick
+                // approximation: if all remaining tokens are about to be claimed
+                // we treat it as final.  The exact final-claim bypass is also
+                // enforced later in the withdraw path; this early check avoids
+                // rejecting the final claim with ClaimTooFrequent.
+                let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+                let is_potential_final_claim = available <= 0 ||
+                    stream.end_time <= now;
+                if !is_potential_final_claim && current_ledger < next_eligible {
+                    return Err(StreamError::ClaimTooFrequent);
+                }
+            }
         }
 
         // ── Step-vesting withdrawal path ─────────────────────────────────────
@@ -1558,6 +1605,8 @@ impl SoroStreamContract {
                     .total_withdrawn
                     .checked_add(claimable)
                     .ok_or(StreamError::Overflow)?;
+                // Update claim-ledger tracker on every successful transfer.
+                stream.last_claim_ledger = env.ledger().sequence();
             }
 
             let all_claimed = new_cursor >= tranches.len();
@@ -1733,6 +1782,8 @@ impl SoroStreamContract {
                 .total_withdrawn
                 .checked_add(claimable)
                 .ok_or(StreamError::Overflow)?;
+            // Update claim-ledger tracker on every successful transfer.
+            stream.last_claim_ledger = env.ledger().sequence();
         }
         stream.last_withdraw_time = effective_now;
 
@@ -2321,6 +2372,9 @@ impl SoroStreamContract {
             withdrawal_steps: None,
             current_step: 0,
             min_withdrawal_amount: None,
+            paused_duration_seconds: 0,
+            min_claim_interval_ledgers: None,
+            last_claim_ledger: 0,
         };
 
         save_stream(&env, &new_stream);
@@ -2664,6 +2718,14 @@ impl SoroStreamContract {
             return Ok(0);
         }
 
+        // ── Paused-duration adjustment ────────────────────────────────────────
+        // For a currently-Paused stream, `now` is already frozen at
+        // `last_pause_time`.  For an Active stream that has been through one or
+        // more pause/resume cycles, all timestamps were already shifted forward
+        // on each resume, so no further adjustment is needed.  The
+        // `paused_duration_seconds` field is an auditable counter that records
+        // the cumulative pause time but does not change the claimable math here.
+
         // ── Compute raw claimable amount ─────────────────────────────────────
         let raw = match &stream.curve {
             VestingCurve::Linear => vesting_math::compute_claimable(
@@ -2804,6 +2866,7 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
         let paused_duration = now.saturating_sub(stream.last_pause_time);
 
+        stream.paused_duration_seconds = stream.paused_duration_seconds.saturating_add(paused_duration);
         stream.end_time = stream.end_time.saturating_add(paused_duration);
         stream.cliff_time = stream.cliff_time.saturating_add(paused_duration);
         stream.start_time = stream.start_time.saturating_add(paused_duration);
@@ -2953,6 +3016,9 @@ impl SoroStreamContract {
                 withdrawal_steps: None,
                 current_step: 0,
                 min_withdrawal_amount: None,
+                paused_duration_seconds: 0,
+                min_claim_interval_ledgers: None,
+                last_claim_ledger: 0,
             };
 
             save_stream(&env, &stream);
@@ -3650,6 +3716,10 @@ impl SoroStreamInterface for SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
+        holdback_amount: i128,
+        withdrawal_steps: Option<u32>,
+        min_withdrawal_amount: Option<i128>,
+        min_claim_interval_ledgers: Option<u32>,
     ) -> Result<u64, StreamError> {
         Self::create_stream(
             env,
@@ -3663,9 +3733,10 @@ impl SoroStreamInterface for SoroStreamContract {
             auto_renew,
             lock_until,
             allow_recipient_termination,
-            0i128, // holdback_amount defaults to 0 in trait delegation
-            None,  // withdrawal_steps
-            None,  // min_withdrawal_amount
+            holdback_amount,
+            withdrawal_steps,
+            min_withdrawal_amount,
+            min_claim_interval_ledgers,
         )
     }
 
