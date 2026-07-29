@@ -1605,6 +1605,67 @@ let mut tokens = soroban_sdk::Vec::new(&t.env);
     assert!(result.is_err());
 }
 
+// ── Issue #327: batch_create_stream rollback on a mid-batch validation
+// failure. `batch_create_stream` runs a validation-only pass over every
+// entry (see "Phase 1" in lib.rs) before any token transfer or storage
+// write happens, so a bad entry anywhere in the batch must reject the
+// whole call with zero side effects — no partial streams, no charge to the
+// sender, and (since the batch nonce is incremented as part of the same
+// invocation) no consumed nonce either: a Soroban contract invocation that
+// returns `Err` has all of its storage writes rolled back by the host.
+fn run_batch_create_rollback_case(bad_index: usize) {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let mut recipients = soroban_sdk::Vec::new(&t.env);
+    let mut amounts: soroban_sdk::Vec<i128> = soroban_sdk::Vec::new(&t.env);
+    let mut tokens = soroban_sdk::Vec::new(&t.env);
+    let mut lock_untils: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&t.env);
+
+    for i in 0..5usize {
+        recipients.push_back(Address::generate(&t.env));
+        // Every entry is valid (10_000) except the one at `bad_index`, which
+        // has a zero amount and must fail create_stream's amount validation.
+        amounts.push_back(if i == bad_index { 0i128 } else { 10_000i128 });
+        tokens.push_back(t.token_id.clone());
+        lock_untils.push_back(0u64);
+    }
+
+    let sender_bal_before = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    let nonce_before = c.get_nonce(&t.sender);
+
+    let result = c.try_batch_create_stream(
+        &t.sender, &recipients, &amounts, &tokens, &1000u64, &false, &lock_untils, &0u64,
+    );
+    assert_eq!(result, Err(Ok(StreamError::ZeroAmount)));
+
+    // Full rollback: not one of the 5 streams was created.
+    assert_eq!(c.get_all_stream_ids(&0u32, &10u32).len(), 0);
+
+    // Sender was never charged for any of the would-be valid streams.
+    let sender_bal_after = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    assert_eq!(sender_bal_after, sender_bal_before);
+
+    // The nonce consumed at the top of the function is rolled back too.
+    assert_eq!(c.get_nonce(&t.sender), nonce_before);
+}
+
+#[test]
+fn test_batch_create_rollback_invalid_entry_at_start() {
+    run_batch_create_rollback_case(0);
+}
+
+#[test]
+fn test_batch_create_rollback_invalid_entry_in_middle() {
+    run_batch_create_rollback_case(2);
+}
+
+#[test]
+fn test_batch_create_rollback_invalid_entry_at_end() {
+    run_batch_create_rollback_case(4);
+}
+
 #[test]
 fn test_delegate_can_top_up_and_cancel() {
     let t = setup();
