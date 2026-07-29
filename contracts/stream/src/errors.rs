@@ -59,6 +59,9 @@ pub enum StreamError {
     DurationExceedsMax = 44,
     /// Token address is not a valid deployed SAC.
     InvalidTokenAddress = 45,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 46,
     /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
     /// existing entry even after the defensive retry increment.
     IDCollision = 46,
