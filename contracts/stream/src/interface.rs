@@ -34,6 +34,8 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
         holdback_amount: i128,
+        withdrawal_steps: Option<u32>,
+        min_withdrawal_amount: Option<i128>,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -208,6 +210,23 @@ pub trait SoroStreamInterface {
     fn archive_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
     fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError>;
     fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError>;
+
+    // ── Issue #300: Instance TTL ────────────────────────────────────────────
+
+    fn set_max_streams_per_token(env: Env, max: u32) -> Result<(), StreamError>;
+    fn get_max_streams_per_token(env: Env) -> u32;
+
+    // ── Issue #284: Address blocklist ───────────────────────────────────────
+
+    fn add_to_blocklist(env: Env, addr: Address) -> Result<(), StreamError>;
+    fn remove_from_blocklist(env: Env, addr: Address) -> Result<(), StreamError>;
+    fn is_blocked(env: Env, addr: Address) -> bool;
+
+    // ── Issue #282: Grace period & recovery ─────────────────────────────────
+
+    fn set_grace_period_ledgers(env: Env, ledgers: u32) -> Result<(), StreamError>;
+    fn get_grace_period_ledgers(env: Env) -> u32;
+    fn recover_expired(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
     fn sweep_expired(env: Env, stream_ids: Vec<u64>) -> Result<(), StreamError>;
 
     fn add_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError>;
