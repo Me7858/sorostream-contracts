@@ -4540,3 +4540,441 @@ fn test_stream_config_event_emitted_with_steps() {
         "claimable must be 0 when start_time == current ledger"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-token stream count tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_token_stream_count_zero_for_unknown_token() {
+    let t = setup();
+    let c = client(&t);
+    // A token address that has never had a stream — must return 0, not error.
+    let unknown_token = Address::generate(&t.env);
+    assert_eq!(c.get_stream_count_by_token(&unknown_token), 0u64);
+}
+
+#[test]
+fn test_token_stream_count_increments_on_create() {
+    let t = setup();
+    let c = client(&t);
+
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 0u64);
+
+    c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 1u64);
+
+    c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &1u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 2u64);
+}
+
+#[test]
+fn test_token_stream_count_decrements_on_cancel() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 1u64);
+
+    c.cancel_stream(&stream_id, &t.sender);
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 0u64);
+}
+
+#[test]
+fn test_token_stream_count_multiple_creates_then_cancel_each() {
+    let t = setup();
+    let c = client(&t);
+
+    let id1 = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    let id2 = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &1u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    let id3 = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &2u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 3u64);
+
+    c.cancel_stream(&id1, &t.sender);
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 2u64);
+
+    c.cancel_stream(&id2, &t.sender);
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 1u64);
+
+    c.cancel_stream(&id3, &t.sender);
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 0u64);
+}
+
+#[test]
+fn test_token_stream_count_different_tokens_are_independent() {
+    let t = setup();
+    let c = client(&t);
+
+    // Register a second SAC token.
+    let token_admin2 = Address::generate(&t.env);
+    let token_id2 = t.env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    StellarAssetClient::new(&t.env, &token_id2).mint(&t.sender, &1_000_000i128);
+
+    // Create one stream on token1.
+    c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    // Create two streams on token2.
+    c.create_stream(
+        &t.sender, &t.recipient, &token_id2,
+        &100_000i128, &1000u64, &0u64, &1u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+    c.create_stream(
+        &t.sender, &t.recipient, &token_id2,
+        &100_000i128, &1000u64, &0u64, &2u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+
+    assert_eq!(c.get_stream_count_by_token(&t.token_id), 1u64);
+    assert_eq!(c.get_stream_count_by_token(&token_id2), 2u64);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Non-transferable stream tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_non_transferable_stream_flag_is_stored() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &true, // non_transferable = true
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert!(stream.non_transferable, "non_transferable flag must be persisted as true");
+}
+
+#[test]
+fn test_transferable_stream_flag_is_false_by_default() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert!(!stream.non_transferable, "non_transferable must be false when not set");
+}
+
+#[test]
+fn test_transfer_recipient_rejected_for_non_transferable_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &true,
+    );
+
+    let new_recipient = Address::generate(&t.env);
+    let result = c.try_transfer_recipient(&stream_id, &t.recipient, &new_recipient);
+
+    assert!(result.is_err(), "transfer_recipient must fail for a non-transferable stream");
+}
+
+#[test]
+fn test_transfer_recipient_succeeds_when_flag_is_false() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false,
+    );
+
+    let new_recipient = Address::generate(&t.env);
+    // Should succeed without error.
+    c.transfer_recipient(&stream_id, &t.recipient, &new_recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.recipient, new_recipient);
+}
+
+#[test]
+fn test_non_transferable_stream_can_be_cancelled_by_sender() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &true,
+    );
+
+    // cancel_stream must succeed even when non_transferable is true.
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Stream is gone — get_stream must return an error.
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err(), "cancelled stream must no longer be retrievable");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Recipient approval tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_pending_approval_stream_created_in_pending_state() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &true, // requires_recipient_approval
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::PendingApproval);
+    assert_eq!(stream.approval_timestamp, 0u64);
+    assert!(stream.requires_recipient_approval);
+}
+
+#[test]
+fn test_withdraw_returns_awaiting_approval_before_approve() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &true,
+    );
+
+    t.env.ledger().set_timestamp(500);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_approve_stream_transitions_to_active() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(100);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &true,
+    );
+
+    t.env.ledger().set_timestamp(200);
+    c.approve_stream(&stream_id, &t.recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.approval_timestamp, 200u64);
+}
+
+#[test]
+fn test_claimable_starts_from_approval_not_creation() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create at t=0, approve at t=500, check claimable at t=600
+    // With flow_rate=100 stroops/sec and 100s elapsed since approval → expect 10_000
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &true,
+    );
+
+    t.env.ledger().set_timestamp(500);
+    c.approve_stream(&stream_id, &t.recipient);
+
+    t.env.ledger().set_timestamp(600);
+    let claimable = c.get_claimable(&stream_id);
+    // 100 seconds elapsed since approval × 100 flow_rate = 10_000 stroops
+    assert_eq!(claimable, 10_000i128);
+}
+
+#[test]
+fn test_sender_can_cancel_pending_approval_stream_at_zero_cost() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &true,
+    );
+
+    // Sender balance before cancel
+    let bal_before = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Stream gone
+    assert!(c.try_get_stream(&stream_id).is_err());
+    // Sender receives full refund
+    let bal_after = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    assert_eq!(bal_after - bal_before, 100_000i128);
+}
+
+#[test]
+fn test_approve_stream_only_callable_by_recipient() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &true,
+    );
+
+    let other = Address::generate(&t.env);
+    let result = c.try_approve_stream(&stream_id, &other);
+    assert!(result.is_err());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sender stream lock tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_lock_stream_sets_sender_locked_flag() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    assert!(!c.get_stream(&stream_id).sender_locked);
+    c.lock_stream(&stream_id, &t.sender);
+    assert!(c.get_stream(&stream_id).sender_locked);
+}
+
+#[test]
+fn test_cancel_stream_returns_stream_is_locked_after_lock() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    c.lock_stream(&stream_id, &t.sender);
+    let result = c.try_cancel_stream(&stream_id, &t.sender);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_recipient_can_withdraw_from_locked_stream() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    c.lock_stream(&stream_id, &t.sender);
+
+    t.env.ledger().set_timestamp(500);
+    // Should succeed — lock only prevents sender cancellation.
+    c.withdraw(&stream_id, &t.recipient);
+    let stream = c.get_stream(&stream_id);
+    assert!(stream.total_withdrawn > 0);
+}
+
+#[test]
+fn test_lock_stream_is_idempotent_error_on_double_lock() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    c.lock_stream(&stream_id, &t.sender);
+    let result = c.try_lock_stream(&stream_id, &t.sender);
+    assert!(result.is_err(), "second lock call must error with StreamIsLocked");
+}
+
+#[test]
+fn test_lock_stream_only_callable_by_sender() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    let result = c.try_lock_stream(&stream_id, &t.recipient);
+    assert!(result.is_err());
+}

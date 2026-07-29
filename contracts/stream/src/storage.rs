@@ -1161,6 +1161,110 @@ pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
 // Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Feature (f): Instance TTL extension
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extends the contract instance storage TTL to the maximum allowed by Soroban.
+/// Should be called on every `create_stream` and `top_up` to prevent contract eviction.
+pub fn extend_instance_ttl(env: &Env) {
+    let ttl = 535_679u32;
+    env.storage().instance().extend_ttl(ttl, ttl);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (g): Per-token stream count cap
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAX_STREAMS_PER_TOKEN_KEY: &str = "max_tok";
+
+fn token_stream_count_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "tsc"), token.clone())
+}
+
+/// Gets the per-token stream cap (0 = unlimited).
+pub fn get_max_streams_per_token(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, MAX_STREAMS_PER_TOKEN_KEY))
+        .unwrap_or(0u32)
+}
+
+/// Sets the per-token stream cap. Setting to 0 disables the cap.
+pub fn set_max_streams_per_token(env: &Env, max: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, MAX_STREAMS_PER_TOKEN_KEY), &max);
+}
+
+/// Returns the current active stream count for the given token.
+pub fn get_token_stream_count(env: &Env, token: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&token_stream_count_key(env, token))
+        .unwrap_or(0u32)
+}
+
+/// Increments the active stream count for the given token.
+pub fn increment_token_stream_count(env: &Env, token: &Address) {
+    let key = token_stream_count_key(env, token);
+    let current = get_token_stream_count(env, token);
+    env.storage().persistent().set(&key, &(current + 1));
+}
+
+/// Decrements the active stream count for the given token (saturates at 0).
+pub fn decrement_token_stream_count(env: &Env, token: &Address) {
+    let key = token_stream_count_key(env, token);
+    let current = get_token_stream_count(env, token);
+    if current > 0 {
+        env.storage().persistent().set(&key, &(current - 1));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (h): Address blocklist
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn blocklist_key(env: &Env, addr: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "bl"), addr.clone())
+}
+
+/// Adds an address to the blocklist.
+pub fn add_to_blocklist(env: &Env, addr: &Address) {
+    env.storage().persistent().set(&blocklist_key(env, addr), &true);
+}
+
+/// Removes an address from the blocklist.
+pub fn remove_from_blocklist(env: &Env, addr: &Address) {
+    env.storage().persistent().remove(&blocklist_key(env, addr));
+}
+
+/// Returns true if the address is on the blocklist.
+pub fn is_blocked(env: &Env, addr: &Address) -> bool {
+    env.storage().persistent().get(&blocklist_key(env, addr)).unwrap_or(false)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (i): Post-expiry grace period
+// ═══════════════════════════════════════════════════════════════════════════
+
+const GRACE_PERIOD_LEDGERS_KEY: &str = "grace";
+
+/// Gets the grace period in ledgers (0 = no grace period).
+pub fn get_grace_period_ledgers(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, GRACE_PERIOD_LEDGERS_KEY))
+        .unwrap_or(0u32)
+}
+
+/// Sets the grace period in ledgers. Zero means no grace period.
+pub fn set_grace_period_ledgers(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, GRACE_PERIOD_LEDGERS_KEY), &ledgers);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Feature (d): Dual-token streams
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1254,4 +1358,43 @@ pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
     remove_dual_stream_token2(env, stream_id);
     remove_dual_stream_deposit2(env, stream_id);
     remove_dual_stream_withdrawn2(env, stream_id);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-token active stream count
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Storage key for the active stream count of a specific token: ("tsc", token).
+fn token_stream_count_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "tsc"), token.clone())
+}
+
+/// Returns the number of currently active streams for the given token address.
+/// Returns 0 for unknown tokens rather than erroring.
+pub fn get_token_stream_count(env: &Env, token: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&token_stream_count_key(env, token))
+        .unwrap_or(0u64)
+}
+
+/// Increments the active stream count for a token by 1.
+///
+/// Called on every successful stream creation.
+pub fn increment_token_stream_count(env: &Env, token: &Address) {
+    let key = token_stream_count_key(env, token);
+    let current = get_token_stream_count(env, token);
+    let next = current.checked_add(1).expect("token stream count overflow");
+    env.storage().persistent().set(&key, &next);
+}
+
+/// Decrements the active stream count for a token by 1, saturating at 0.
+///
+/// Called on stream cancellation, expiry, or natural completion.
+pub fn decrement_token_stream_count(env: &Env, token: &Address) {
+    let key = token_stream_count_key(env, token);
+    let current = get_token_stream_count(env, token);
+    if current > 0 {
+        env.storage().persistent().set(&key, &(current - 1));
+    }
 }

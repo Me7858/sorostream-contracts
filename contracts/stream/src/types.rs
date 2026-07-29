@@ -52,6 +52,10 @@ pub enum StreamStatus {
     Paused,
     /// Stream has passed its end_time and been explicitly marked as expired.
     Expired,
+    /// Stream was created with `requires_recipient_approval = true` and the
+    /// recipient has not yet called `approve_stream`.  No tokens accrue while
+    /// in this state; the sender may cancel at zero cost.
+    PendingApproval,
 }
 
 /// Status of a milestone.
@@ -180,35 +184,45 @@ pub struct Stream {
     /// `None` means no minimum (default behaviour).
     pub min_withdrawal_amount: Option<i128>,
 
-    // ── Pause accounting ──────────────────────────────────────────────────────
+    // ── Non-transferable flag ─────────────────────────────────────────────────
 
-    /// Total number of seconds this stream has spent in the Paused state.
+    /// Whether the stream's recipient rights are locked to the original recipient.
     ///
-    /// Accumulated on every `resume_stream` call:
-    ///   `paused_duration_seconds += now - last_pause_time`
-    ///
-    /// Used to offset the `elapsed` window in claimable / refund calculations
-    /// so that paused time is never counted as streamed time.  Starts at 0.
-    pub paused_duration_seconds: u64,
+    /// When `true`, any call to `transfer_recipient` on this stream will return
+    /// `StreamError::StreamNonTransferable`.  Useful for identity-linked grants
+    /// and personal vesting schedules where the sender needs on-chain enforcement
+    /// of non-transferability.  Set at creation time and immutable thereafter.
+    pub non_transferable: bool,
 
-    // ── Claim-frequency throttle ──────────────────────────────────────────────
+    // ── Recipient approval ────────────────────────────────────────────────────
 
-    /// Optional minimum number of ledgers that must pass between two successful
-    /// `withdraw` calls.
+    /// Whether this stream requires explicit recipient approval before tokens
+    /// begin to accrue.
     ///
-    /// When `Some(n)`, a `withdraw` call is rejected with
-    /// `StreamError::ClaimTooFrequent` if fewer than `n` ledgers have elapsed
-    /// since `last_claim_ledger`.  The final claim (draining the full remaining
-    /// balance) always bypasses this restriction.
-    /// `None` means no frequency limit (default behaviour).
-    pub min_claim_interval_ledgers: Option<u32>,
+    /// When `true`, the stream is created in `StreamStatus::PendingApproval`.
+    /// The recipient must call `approve_stream` to transition it to `Active`.
+    /// While pending, `withdraw` returns `StreamError::AwaitingApproval` and the
+    /// sender may cancel at zero cost (full deposit refunded).
+    /// Set at creation time and immutable thereafter.
+    pub requires_recipient_approval: bool,
 
-    /// Ledger sequence number of the most recent successful `withdraw` call.
+    /// Ledger timestamp at which the recipient approved the stream.
     ///
-    /// Initialised to `0` at stream creation.  Updated after every withdrawal
-    /// that moves tokens (including the final claim).
-    /// Only meaningful when `min_claim_interval_ledgers` is `Some`.
-    pub last_claim_ledger: u32,
+    /// `0` while the stream is in `PendingApproval` state.
+    /// Set by `approve_stream` and used as the effective `start_time` for all
+    /// claimable-balance calculations so that no tokens accrue during the
+    /// pending window.
+    pub approval_timestamp: u64,
+
+    // ── Sender-initiated irrevocable lock ─────────────────────────────────────
+
+    /// Whether the sender has voluntarily renounced their right to cancel.
+    ///
+    /// Starts `false`.  Once `lock_stream` is called, transitions to `true`
+    /// and cannot be reversed.  While `true`, any `cancel_stream` call from
+    /// the sender (or their delegate) returns `StreamError::StreamIsLocked`.
+    /// Recipients can still `withdraw` normally; admin pause is unaffected.
+    pub sender_locked: bool,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.

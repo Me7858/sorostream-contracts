@@ -64,13 +64,15 @@ pub enum StreamError {
     StartTimeTooFar = 46,
     /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
     /// existing entry even after the defensive retry increment.
-    IDCollision = 47,
+    IDCollision = 46,
     /// A withdrawal was attempted before the next evenly-spaced step threshold has
     /// been reached.
-    NextStepNotReached = 48,
-    /// The claimable amount is below the stream's configured `min_withdrawal_amount`
-    /// floor.  Bypassed on the final claim.
-    AmountBelowMinimum = 49,
+    NextStepNotReached = 47,
+    /// The claimable amount is below the stream's configured `min_withdrawal_amount` floor.
+    AmountBelowMinimum = 48,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 49,
     /// Expiry warning window must be a positive ledger count.
     InvalidExpiryWindow = 50,
     /// Sender is below the promotion threshold and has hit the new-sender stream cap.
@@ -87,8 +89,12 @@ pub enum StreamError {
     NotDualStream = 56,
     /// Operation requires a single-token stream but the stream is dual-token.
     IsDualStream = 57,
-    /// `withdraw` was called before `min_claim_interval_ledgers` ledgers have
-    /// elapsed since the previous successful withdrawal.
-    /// The final claim (emptying the stream) always bypasses this restriction.
-    ClaimTooFrequent = 58,
+    /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
+    StreamNonTransferable = 58,
+    /// `withdraw` was called on a stream still in `PendingApproval` state.
+    /// The recipient must call `approve_stream` first.
+    AwaitingApproval = 59,
+    /// `cancel_stream` was called by the sender on a stream they have irrevocably
+    /// locked via `lock_stream`.
+    StreamIsLocked = 60,
 }
