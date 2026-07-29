@@ -1963,6 +1963,12 @@ impl SoroStreamContract {
                     decrement_token_stream_count(&env, &stream.token);
 
                     // INTERACTIONS
+                    // At stream end, ensure total payout (recipient + dust + fees) doesn't exceed deposit.
+                    let final_dust = stream.deposit
+                        .saturating_sub(stream.total_withdrawn)
+                        .saturating_sub(recipient_amount)
+                        .saturating_sub(fee_amount);
+
                     if recipient_amount > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
@@ -1970,11 +1976,11 @@ impl SoroStreamContract {
                             &recipient_amount,
                         );
                     }
-                    if dust > 0 {
+                    if final_dust > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
                             &stream.sender,
-                            &dust,
+                            &final_dust,
                         );
                     }
                     events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
@@ -2017,6 +2023,12 @@ impl SoroStreamContract {
                 let token_client = token::Client::new(&env, &stream.token);
 
                 // INTERACTIONS
+                // At stream end, ensure total payout (recipient + dust + fees) doesn't exceed deposit.
+                let final_dust = stream.deposit
+                    .saturating_sub(stream.total_withdrawn)
+                    .saturating_sub(recipient_amount)
+                    .saturating_sub(fee_amount);
+
                 if recipient_amount > 0 {
                     token_client.transfer(
                         &env.current_contract_address(),
@@ -2024,11 +2036,11 @@ impl SoroStreamContract {
                         &recipient_amount,
                     );
                 }
-                if dust > 0 {
+                if final_dust > 0 {
                     token_client.transfer(
                         &env.current_contract_address(),
                         &stream.sender,
-                        &dust,
+                        &final_dust,
                     );
                 }
                 events::stream_completed(&env, stream_id);
@@ -2436,10 +2448,14 @@ impl SoroStreamContract {
 
         let old_recipient = stream.recipient.clone();
         stream.recipient = new_recipient.clone();
-        save_stream(&env, &stream);
 
+        // Update recipient indices atomically before saving stream metadata.
+        // This ensures that the old_recipient's index and the stream data remain consistent,
+        // preventing them from seeing a stream they can no longer claim.
         unindex_by_recipient(&env, &old_recipient, stream_id);
         index_by_recipient(&env, &new_recipient, stream_id);
+
+        save_stream(&env, &stream);
 
         events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
 
@@ -2679,6 +2695,10 @@ impl SoroStreamContract {
         }
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
+        }
+        // Prevent sender from extending a locked stream, preserving recipient's agreed contract terms
+        if stream.sender_locked {
+            return Err(StreamError::StreamIsLocked);
         }
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
@@ -3418,6 +3438,14 @@ impl SoroStreamContract {
                     unindex_by_recipient(&env, &stream.recipient, stream_id);
 
                     // INTERACTIONS
+                    // At stream end, ensure total payout (recipient + dust + fees) doesn't exceed deposit.
+                    // Recalculate dust to account for all fees already accumulated.
+                    let total_fees_for_stream = fee_amount; // fees in this final withdrawal
+                    let final_dust = stream.deposit
+                        .saturating_sub(stream.total_withdrawn)
+                        .saturating_sub(recipient_amount)
+                        .saturating_sub(total_fees_for_stream);
+
                     let token_client = token::Client::new(&env, &stream.token);
                     if recipient_amount > 0 {
                         token_client.transfer(
@@ -3426,11 +3454,11 @@ impl SoroStreamContract {
                             &recipient_amount,
                         );
                     }
-                    if dust > 0 {
+                    if final_dust > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
                             &stream.sender,
-                            &dust,
+                            &final_dust,
                         );
                     }
                     events::stream_completed(&env, stream_id);
