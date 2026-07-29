@@ -363,6 +363,35 @@ fn test_cliff_withdraw_pre_cliff_transfers_nothing() {
     assert_eq!(balance, 0);
 }
 
+/// Zero duration (duration_seconds == 0) must fail with ZeroDuration.
+/// This prevents division by zero in flow rate calculation and undefined stream behavior.
+#[test]
+fn test_zero_duration_fails() {
+    let t = setup();
+    let c = client(&t);
+
+    // Attempt to create a stream with zero duration
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,  // amount
+        &0,        // duration_seconds = 0
+        &0,        // cliff_seconds
+        &0u64,     // nonce
+        &false,    // auto_renew
+        &0u64,     // lock_until
+        &false,    // allow_recipient_termination
+        &0i128,    // holdback_amount
+        &None::<u32>,   // withdrawal_steps
+        &None::<i128>,  // min_withdrawal_amount
+        &None::<u32>,   // max_price_deviation_bps (unused in this context)
+    );
+
+    // Should fail with ZeroDuration error
+    assert_eq!(result, Err(Ok(StreamError::ZeroDuration)));
+}
+
 /// cliff_seconds >= duration_seconds must fail with InvalidCliff.
 #[test]
 fn test_cliff_exceeds_duration_fails() {
@@ -1092,6 +1121,60 @@ fn error_stream_not_active_on_top_up() {
 
     let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000);
     assert_eq!(result, Err(Ok(StreamError::StreamNotFound)));
+}
+
+#[test]
+fn error_stream_not_active_on_top_up_expired() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Advance time past the stream's end time (1000 seconds)
+    t.env.ledger().set_timestamp(2000);
+
+    // Mark the stream as expired (this transitions it from Active to Expired)
+    let _ = c.mark_expired(&stream_id);
+
+    // Attempt to top up the expired stream should fail with StreamNotActive
+    let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000);
+    assert_eq!(result, Err(Ok(StreamError::StreamNotActive)));
+}
+
+#[test]
+fn success_top_up_paused_stream() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Pause the stream
+    c.pause_stream(&stream_id, &t.sender);
+
+    // Topping up a paused stream should succeed
+    let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000);
+    assert!(result.is_ok());
+
+    // Verify the stream's deposit was increased
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 100_000 + 10_000);
+    assert_eq!(stream.status, StreamStatus::Paused);
 }
 
 #[test]
