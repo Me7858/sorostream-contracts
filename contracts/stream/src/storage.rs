@@ -1398,3 +1398,86 @@ pub fn decrement_token_stream_count(env: &Env, token: &Address) {
         env.storage().persistent().set(&key, &(current - 1));
     }
 }
+
+// ── Issue #357: Stream inheritance ───────────────────────────────────────────
+
+fn inherit_recipient_key(stream_id: u64) -> (u64, u32) {
+    (stream_id, 0xFFFF_FFFEu32)
+}
+
+/// Stores the optional inheritance recipient for a stream.
+pub fn set_inherit_recipient(env: &Env, stream_id: u64, recipient: &Address) {
+    env.storage().persistent().set(&inherit_recipient_key(stream_id), recipient);
+}
+
+/// Retrieves the inheritance recipient for a stream, if any.
+pub fn get_inherit_recipient(env: &Env, stream_id: u64) -> Option<Address> {
+    env.storage().persistent().get(&inherit_recipient_key(stream_id))
+}
+
+/// Removes the inheritance recipient for a stream.
+pub fn remove_inherit_recipient(env: &Env, stream_id: u64) {
+    env.storage().persistent().remove(&inherit_recipient_key(stream_id));
+}
+
+// ── Issue #358: Pending streams index ────────────────────────────────────────
+
+fn pending_count_key(env: &Env, sender: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "pc"), sender.clone())
+}
+
+fn pending_slot_key(env: &Env, sender: &Address, idx: u32) -> (Symbol, Address, u32) {
+    (Symbol::new(env, "ps"), sender.clone(), idx)
+}
+
+/// Appends a stream ID to the sender's pending index.
+pub fn add_to_pending_index(env: &Env, sender: &Address, stream_id: u64) {
+    let cnt_key = pending_count_key(env, sender);
+    let idx: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0u32);
+    env.storage().persistent().set(&pending_slot_key(env, sender, idx), &stream_id);
+    let next = idx.checked_add(1).expect("pending index overflow");
+    env.storage().persistent().set(&cnt_key, &next);
+}
+
+/// Removes a stream ID from the sender's pending index (swap-and-pop).
+pub fn remove_from_pending_index(env: &Env, sender: &Address, stream_id: u64) {
+    let cnt_key = pending_count_key(env, sender);
+    let cnt: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0u32);
+    for i in 0..cnt {
+        let slot_key = pending_slot_key(env, sender, i);
+        if let Some(id) = env.storage().persistent().get::<_, u64>(&slot_key) {
+            if id == stream_id {
+                let last = cnt - 1;
+                if i != last {
+                    let last_id: u64 = env
+                        .storage()
+                        .persistent()
+                        .get(&pending_slot_key(env, sender, last))
+                        .unwrap_or(0);
+                    env.storage().persistent().set(&slot_key, &last_id);
+                }
+                env.storage().persistent().remove(&pending_slot_key(env, sender, last));
+                env.storage().persistent().set(&cnt_key, &last);
+                return;
+            }
+        }
+    }
+}
+
+/// Returns all stream IDs in the sender's pending index.
+pub fn get_pending_ids(env: &Env, sender: &Address) -> Vec<u64> {
+    let cnt: u32 = env
+        .storage()
+        .persistent()
+        .get(&pending_count_key(env, sender))
+        .unwrap_or(0u32);
+    let mut ids = Vec::new(env);
+    for i in 0..cnt {
+        if let Some(id) =
+            env.storage().persistent().get::<_, u64>(&pending_slot_key(env, sender, i))
+        {
+            ids.push_back(id);
+        }
+    }
+    ids
+}

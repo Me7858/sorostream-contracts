@@ -787,6 +787,46 @@ pub fn stream_approved(env: &Env, stream_id: u64, recipient: &Address, approval_
     );
 }
 
+// ── Issue #357: Stream inheritance ───────────────────────────────────────────
+
+/// Emitted when stream inheritance triggers a new stream for the inherit recipient.
+///
+/// # Event Data
+/// - `original_stream_id`: The completed or ended stream that triggered inheritance
+/// - `new_stream_id`: The newly created stream for the inherit recipient
+/// - `inherit_recipient`: The address that received the new stream
+/// - `amount`: The amount forwarded to the inherit recipient
+pub fn inheritance_triggered(
+    env: &Env,
+    original_stream_id: u64,
+    new_stream_id: u64,
+    inherit_recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "InheritanceTriggered"), original_stream_id),
+        (new_stream_id, inherit_recipient.clone(), amount),
+    );
+}
+
+// ── Issue #359: Fee exemption events ─────────────────────────────────────────
+
+/// Emitted when an address is added to the fee exemption list.
+pub fn fee_exemption_added(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeExemptionAdded"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+/// Emitted when an address is removed from the fee exemption list.
+pub fn fee_exemption_removed(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeExemptionRemoved"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
 /// Emitted when a sender irrevocably locks a stream, renouncing their right to cancel.
 ///
 /// # Event Data

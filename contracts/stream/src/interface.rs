@@ -384,4 +384,9 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError>;
+
+    // ── Issue #358: Pending streams view ────────────────────────────────────
+
+    /// Returns all stream IDs for `sender` whose `start_time` is still in the future.
+    fn get_pending_streams(env: Env, sender: Address) -> Vec<u64>;
 }
