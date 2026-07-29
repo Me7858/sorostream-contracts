@@ -6,8 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth};
-use crate::types::{AuditEntry, Stats, Stream, VestingCurve, VestingTranche};
+use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -35,6 +34,8 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
         holdback_amount: i128,
+        withdrawal_steps: Option<u32>,
+        min_withdrawal_amount: Option<i128>,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -101,6 +102,32 @@ pub trait SoroStreamInterface {
     fn top_up(env: Env, stream_id: u64, sender: Address, token: Address, amount: i128) -> Result<(), StreamError>;
     fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
 
+    /// Approves a stream that was created with `requires_recipient_approval = true`.
+    ///
+    /// Only the stream's recipient may call this.  Transitions the stream from
+    /// `PendingApproval` to `Active` and records the approval timestamp.
+    /// All claimable-balance calculations use this timestamp as the effective
+    /// start so no tokens accrue during the pending window.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotRecipient` — caller is not the stream recipient.
+    /// - `StreamNotActive` — stream is not in `PendingApproval` state.
+    fn approve_stream(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
+
+    /// Irrevocably locks a stream, preventing the sender from calling `cancel_stream`.
+    ///
+    /// Only the stream's sender may call this while the stream is `Active`.
+    /// Once locked, any `cancel_stream` call from the sender returns
+    /// `StreamError::StreamIsLocked`.  Recipients can still withdraw normally.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not the stream sender.
+    /// - `StreamNotActive` — stream is not currently `Active`.
+    /// - `StreamIsLocked` — stream is already locked.
+    fn lock_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
+
     fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError>;
     fn get_all_stream_ids(env: Env, start: u32, limit: u32) -> Vec<u64>;
     fn get_claimable(env: Env, stream_id: u64) -> Result<i128, StreamError>;
@@ -136,6 +163,12 @@ pub trait SoroStreamInterface {
     fn get_protocol_fee_info(env: Env) -> (u32, Option<Address>);
     fn get_stats(env: Env) -> Stats;
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
+
+    /// Returns the number of currently active streams for the given SAC token address.
+    ///
+    /// Returns `0` for unknown/never-used token addresses rather than erroring.
+    /// Read-only, no auth required.
+    fn get_stream_count_by_token(env: Env, token: Address) -> u64;
 
     fn min_duration(env: Env) -> u64;
     fn set_min_duration(env: Env, admin: Address, seconds: u64);
@@ -177,6 +210,23 @@ pub trait SoroStreamInterface {
     fn archive_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
     fn mark_expired(env: Env, stream_id: u64) -> Result<(), StreamError>;
     fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError>;
+
+    // ── Issue #300: Instance TTL ────────────────────────────────────────────
+
+    fn set_max_streams_per_token(env: Env, max: u32) -> Result<(), StreamError>;
+    fn get_max_streams_per_token(env: Env) -> u32;
+
+    // ── Issue #284: Address blocklist ───────────────────────────────────────
+
+    fn add_to_blocklist(env: Env, addr: Address) -> Result<(), StreamError>;
+    fn remove_from_blocklist(env: Env, addr: Address) -> Result<(), StreamError>;
+    fn is_blocked(env: Env, addr: Address) -> bool;
+
+    // ── Issue #282: Grace period & recovery ─────────────────────────────────
+
+    fn set_grace_period_ledgers(env: Env, ledgers: u32) -> Result<(), StreamError>;
+    fn get_grace_period_ledgers(env: Env) -> u32;
+    fn recover_expired(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
     fn sweep_expired(env: Env, stream_ids: Vec<u64>) -> Result<(), StreamError>;
 
     fn add_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError>;

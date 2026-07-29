@@ -9,6 +9,7 @@ pub fn stream_created(
     amount: i128,
     flow_rate: i128,
     end_time: u64,
+    non_transferable: bool,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
@@ -18,6 +19,7 @@ pub fn stream_created(
             amount,
             flow_rate,
             end_time,
+            non_transferable,
         ),
     );
 }
@@ -294,6 +296,9 @@ pub fn holdback_clawed_back(env: &Env, stream_id: u64, amount: i128, sender: &Ad
     env.events().publish(
         (Symbol::new(env, "HoldbackClawedBack"), stream_id),
         (amount, sender.clone()),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Step-vesting tranche events
 // ---------------------------------------------------------------------------
@@ -349,16 +354,25 @@ pub fn price_check_passed(
     env.events().publish(
         (Symbol::new(env, "PriceCheckPassed"), stream_id),
         (token.clone(), price, deviation_bps),
+    );
+}
+
 /// Emitted when a stream transitions to the Expired state via mark_expired.
 pub fn stream_expired(env: &Env, stream_id: u64) {
     env.events().publish(
         (Symbol::new(env, "StreamExpired"), stream_id),
         (),
+    );
+}
+
 /// Emitted when a stream's TTL is bumped to extend its ledger lifetime.
 pub fn ttl_bumped(env: &Env, stream_id: u64, new_expiry_ledger: u32) {
     env.events().publish(
         (Symbol::new(env, "TtlBumped"), stream_id),
         new_expiry_ledger,
+    );
+}
+
 /// Emitted when a delegate is set for a stream.
 pub fn delegate_set(env: &Env, stream_id: u64, sender: &Address, delegate: &Address) {
     env.events().publish(
@@ -485,6 +499,15 @@ pub fn withdrawal_step_completed(
     stream_id: u64,
     step_index: u32,
     total_steps: u32,
+    amount: i128,
+    recipient: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "WithdrawalStepCompleted"), stream_id),
+        (step_index, total_steps, amount, recipient.clone()),
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (a): StreamExpiryWarning
 // ═══════════════════════════════════════════════════════════════════════════
@@ -593,8 +616,8 @@ pub fn stream_redirected(
     recipient: &Address,
 ) {
     env.events().publish(
-        (Symbol::new(env, "WithdrawalStepCompleted"), stream_id),
-        (step_index, total_steps, amount, recipient.clone()),
+        (Symbol::new(env, "StreamRedirected"), source_stream_id),
+        (target_stream_id, amount, recipient.clone()),
     );
 }
 
@@ -620,9 +643,6 @@ pub fn compute_step_interval(start_time: u64, end_time: u64, steps: u32) -> Opti
     }
     let duration = end_time.saturating_sub(start_time);
     Some(duration / steps as u64)
-        (Symbol::new(env, "StreamRedirected"), source_stream_id),
-        (target_stream_id, amount, recipient.clone()),
-    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -687,6 +707,38 @@ pub fn dual_stream_withdrawn(
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (h): Address blocklist events
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when an address is added to the blocklist.
+pub fn address_blocked(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "AddressBlocked"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+/// Emitted when an address is removed from the blocklist.
+pub fn address_unblocked(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "AddressUnblocked"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Feature (i): Post-expiry grace period events
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a sender recovers expired stream funds after the grace period.
+pub fn stream_recovered(env: &Env, stream_id: u64, sender: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRecovered"), stream_id),
+        (sender.clone(), amount),
+    );
+}
+
 /// Emitted when a dual-token stream is cancelled.
 ///
 /// # Event Data
@@ -714,5 +766,35 @@ pub fn dual_stream_cancelled(
             refund_amount2,
             recipient_amount2,
         ),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recipient approval & sender lock events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a recipient approves a stream that required explicit approval.
+///
+/// # Event Data
+/// - `stream_id`: The approved stream
+/// - `recipient`: The recipient who approved
+/// - `approval_timestamp`: Ledger timestamp at which approval was recorded;
+///   tokens begin accruing from this point
+pub fn stream_approved(env: &Env, stream_id: u64, recipient: &Address, approval_timestamp: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamApproved"), stream_id),
+        (recipient.clone(), approval_timestamp),
+    );
+}
+
+/// Emitted when a sender irrevocably locks a stream, renouncing their right to cancel.
+///
+/// # Event Data
+/// - `stream_id`: The locked stream
+/// - `sender`: The sender who initiated the lock
+pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamSenderLocked"), stream_id),
+        sender.clone(),
     );
 }

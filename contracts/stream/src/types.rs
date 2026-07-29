@@ -52,6 +52,10 @@ pub enum StreamStatus {
     Paused,
     /// Stream has passed its end_time and been explicitly marked as expired.
     Expired,
+    /// Stream was created with `requires_recipient_approval = true` and the
+    /// recipient has not yet called `approve_stream`.  No tokens accrue while
+    /// in this state; the sender may cancel at zero cost.
+    PendingApproval,
 }
 
 /// Status of a milestone.
@@ -179,6 +183,46 @@ pub struct Stream {
     /// remaining deposit is being drained), in which case the floor is bypassed.
     /// `None` means no minimum (default behaviour).
     pub min_withdrawal_amount: Option<i128>,
+
+    // ── Non-transferable flag ─────────────────────────────────────────────────
+
+    /// Whether the stream's recipient rights are locked to the original recipient.
+    ///
+    /// When `true`, any call to `transfer_recipient` on this stream will return
+    /// `StreamError::StreamNonTransferable`.  Useful for identity-linked grants
+    /// and personal vesting schedules where the sender needs on-chain enforcement
+    /// of non-transferability.  Set at creation time and immutable thereafter.
+    pub non_transferable: bool,
+
+    // ── Recipient approval ────────────────────────────────────────────────────
+
+    /// Whether this stream requires explicit recipient approval before tokens
+    /// begin to accrue.
+    ///
+    /// When `true`, the stream is created in `StreamStatus::PendingApproval`.
+    /// The recipient must call `approve_stream` to transition it to `Active`.
+    /// While pending, `withdraw` returns `StreamError::AwaitingApproval` and the
+    /// sender may cancel at zero cost (full deposit refunded).
+    /// Set at creation time and immutable thereafter.
+    pub requires_recipient_approval: bool,
+
+    /// Ledger timestamp at which the recipient approved the stream.
+    ///
+    /// `0` while the stream is in `PendingApproval` state.
+    /// Set by `approve_stream` and used as the effective `start_time` for all
+    /// claimable-balance calculations so that no tokens accrue during the
+    /// pending window.
+    pub approval_timestamp: u64,
+
+    // ── Sender-initiated irrevocable lock ─────────────────────────────────────
+
+    /// Whether the sender has voluntarily renounced their right to cancel.
+    ///
+    /// Starts `false`.  Once `lock_stream` is called, transitions to `true`
+    /// and cannot be reversed.  While `true`, any `cancel_stream` call from
+    /// the sender (or their delegate) returns `StreamError::StreamIsLocked`.
+    /// Recipients can still `withdraw` normally; admin pause is unaffected.
+    pub sender_locked: bool,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.

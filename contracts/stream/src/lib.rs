@@ -34,39 +34,48 @@ use soroban_sdk::{
 };
 use types::{VestingCurve, VestingTranche};
 use storage::{
-    accumulate_fees, add_fee_exempt, add_rate_limit_exempt, add_to_whitelist,
-    add_token_to_whitelist, append_audit_entry, check_admin, clear_pending_fee_proposal,
-    clear_reentrancy_lock, cleanup_dual_stream_storage, decrement_active_stream_count,
-    derive_stream_id, drain_fees_collected, effective_sender_limit, get_active_stream_count,
-    get_batch_nonce, get_creation_fee_xlm, get_delegate, get_dual_stream_deposit2,
-    get_dual_stream_token2, get_dual_stream_withdrawn2, get_expiry_warning_window,
-    get_federation_address, get_fees_collected, get_global_stream_at, get_global_stream_count,
-    get_holdback, get_ids_by_recipient, get_ids_by_sender, get_new_sender_stream_cap,
-    get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations, get_rate_limit_state,
-    get_rate_limit_window, get_sender_last_creation_time, get_sender_lifetime_count,
+    accumulate_fees, add_fee_exempt, add_rate_limit_exempt, add_to_blocklist,
+    add_to_whitelist, add_token_to_whitelist, append_audit_entry, check_admin,
+    clear_pending_fee_proposal, clear_reentrancy_lock, cleanup_dual_stream_storage,
+    decrement_active_stream_count, decrement_token_stream_count,
+    derive_stream_id, drain_fees_collected, effective_sender_limit, extend_instance_ttl,
+    get_active_stream_count, get_batch_nonce, get_creation_fee_xlm, get_delegate,
+    get_dual_stream_deposit2, get_dual_stream_token2, get_dual_stream_withdrawn2,
+    get_expiry_warning_window, get_federation_address, get_fees_collected,
+    get_global_stream_at, get_global_stream_count, get_grace_period_ledgers,
+    get_holdback, get_ids_by_recipient, get_ids_by_sender, get_max_streams_per_token,
+    get_new_sender_stream_cap, get_pause_expiry, get_protocol_fee,
+    get_rate_limit_max_creations, get_rate_limit_state, get_rate_limit_window,
+    get_sender_last_creation_time, get_sender_lifetime_count,
     get_sender_promotion_threshold, get_sender_stream_count, get_slippage_params,
-    get_stream_creation_cooldown, get_treasury, get_withdrawal_cooldown, get_xlm_token,
-    increment_active_stream_count, increment_batch_nonce, increment_dual_stream_withdrawn2,
-    increment_sender_lifetime_count, index_by_recipient, index_by_sender, index_global_stream,
-    is_fee_exempt, is_paused_or_auto_unpause, is_rate_limit_exempt, is_reentrancy_locked,
-    is_sender_promoted, is_token_whitelist_enabled, is_token_whitelisted, is_whitelist_enabled,
-    is_whitelisted, load_stream, load_tranches, mark_nonce_used, nonce_used, read_admin,
-    read_applied_migrations, read_audit_log, read_governance, read_guardian, read_max_duration,
-    read_min_duration, read_pending_fee_proposal, read_version, record_migration,
-    register_federation_address, remove_delegate, remove_fee_exempt, remove_from_whitelist,
-    remove_holdback, remove_rate_limit_exempt, remove_stream, remove_token_from_whitelist,
-    remove_tranches, save_stream, save_tranches, sender_count_key, sender_slot_key,
-    set_active_stream_count, set_creation_fee_xlm, set_delegate, set_dual_stream_deposit2,
-    set_dual_stream_token2, set_dual_stream_withdrawn2, set_expiry_warning_window,
-    set_holdback, set_max_streams_per_sender, set_new_sender_stream_cap, set_pause_expiry,
-    set_paused, set_protocol_fee, set_rate_limit_max_creations, set_rate_limit_state,
-    set_rate_limit_window, set_reentrancy_lock, set_sender_last_creation_time, set_sender_limit,
+    get_stream_creation_cooldown, get_token_stream_count, get_treasury,
+    get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count,
+    increment_batch_nonce, increment_dual_stream_withdrawn2,
+    increment_sender_lifetime_count, increment_token_stream_count,
+    index_by_recipient, index_by_sender, index_global_stream,
+    is_blocked, is_fee_exempt, is_paused_or_auto_unpause, is_rate_limit_exempt,
+    is_reentrancy_locked, is_sender_promoted, is_token_whitelist_enabled,
+    is_token_whitelisted, is_whitelist_enabled, is_whitelisted, load_stream,
+    load_tranches, mark_nonce_used, nonce_used, read_admin,
+    read_applied_migrations, read_audit_log, read_governance, read_guardian,
+    read_max_duration, read_min_duration, read_pending_fee_proposal, read_version,
+    record_migration, register_federation_address, remove_delegate, remove_fee_exempt,
+    remove_from_blocklist, remove_from_whitelist, remove_holdback, remove_rate_limit_exempt,
+    remove_stream, remove_token_from_whitelist, remove_tranches, save_stream, save_tranches,
+    sender_count_key, sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
+    set_delegate, set_dual_stream_deposit2, set_dual_stream_token2,
+    set_dual_stream_withdrawn2, set_expiry_warning_window, set_grace_period_ledgers,
+    set_holdback, set_max_streams_per_sender, set_max_streams_per_token,
+    set_new_sender_stream_cap, set_pause_expiry, set_paused, set_protocol_fee,
+    set_rate_limit_max_creations, set_rate_limit_state, set_rate_limit_window,
+    set_reentrancy_lock, set_sender_last_creation_time, set_sender_limit,
     set_sender_promotion_threshold, set_slippage_params, set_stream_creation_cooldown,
     set_token_whitelist_enabled, set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
     set_xlm_token, stream_exists, unindex_by_recipient, unindex_by_sender,
     unregister_federation_address, write_admin, write_governance, write_guardian,
     write_max_duration, write_min_duration, write_pending_fee_proposal, write_version,
     MAX_PAUSE_DURATION,
+    get_token_stream_count, increment_token_stream_count, decrement_token_stream_count,
     get_global_stream_at, get_global_stream_count, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_pause_expiry, get_protocol_fee, get_sender_stream_count, get_treasury,
     get_withdrawal_cooldown, get_xlm_token, increment_active_stream_count, increment_batch_nonce,
@@ -414,6 +423,8 @@ impl SoroStreamContract {
         holdback_amount: i128,
         withdrawal_steps: Option<u32>,
         min_withdrawal_amount: Option<i128>,
+        non_transferable: bool,
+        requires_recipient_approval: bool,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -483,23 +494,16 @@ impl SoroStreamContract {
             return Err(StreamError::SenderStreamLimitExceeded);
         }
 
-        // Check rate limiting (Issue #217)
-        check_rate_limit(&env, &sender, now)?;
-
-        // Check stream creation cooldown (Issue #239)
-        let creation_cooldown = get_stream_creation_cooldown(&env);
-        if creation_cooldown > 0 {
-            let last_creation_time = get_sender_last_creation_time(&env, &sender);
-            if last_creation_time > 0 && now < last_creation_time.saturating_add(creation_cooldown) {
-                return Err(StreamError::DuplicateStream);
-            }
+        // Check blocklist (Issue #284)
+        if is_blocked(&env, &sender) || is_blocked(&env, &recipient) {
+            return Err(StreamError::AddressBlocked);
         }
 
-        // Check token whitelist (Issue #221)
-        check_token_whitelist(&env, &token)?;
-
-        // Validate token is a deployed SAC (Issue #243)
-        validate_token_address(&env, &token)?;
+        // Check per-token stream cap (Issue #286)
+        let max_per_token = get_max_streams_per_token(&env);
+        if max_per_token > 0 && get_token_stream_count(&env, &token) >= max_per_token {
+            return Err(StreamError::TokenStreamCapExceeded);
+        }
 
         mark_nonce_used(&env, &sender, nonce);
 
@@ -562,7 +566,7 @@ impl SoroStreamContract {
             id: stream_id,
             sender: sender.clone(),
             recipient: recipient.clone(),
-            token,
+            token: token.clone(),
             deposit: streaming_amount,
             flow_rate,
             start_time: now,
@@ -570,7 +574,11 @@ impl SoroStreamContract {
             lock_until,
             end_time,
             last_withdraw_time: now,
-            status: StreamStatus::Active,
+            status: if requires_recipient_approval {
+                StreamStatus::PendingApproval
+            } else {
+                StreamStatus::Active
+            },
             auto_renew,
             allow_recipient_termination,
             last_pause_time: 0,
@@ -581,6 +589,7 @@ impl SoroStreamContract {
             milestones: Vec::new(&env),
             holdback_amount,
             holdback_claimed: false,
+            is_dual_stream: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -590,19 +599,28 @@ impl SoroStreamContract {
             withdrawal_steps,
             current_step: 0,
             min_withdrawal_amount,
+            non_transferable,
+            requires_recipient_approval,
+            approval_timestamp: 0,
+            sender_locked: false,
         };
 
         save_stream(&env, &stream);
+        extend_instance_ttl(&env);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
         index_global_stream(&env, stream_id);
-        increment_active_stream_count(&env);
+        // Only count as active immediately if no approval is required.
+        if !requires_recipient_approval {
+            increment_active_stream_count(&env);
+            increment_token_stream_count(&env, &stream.token);
+        }
 
         // Update sender's last stream creation time (Issue #239)
         set_sender_last_creation_time(&env, &sender, now);
 
         events::stream_created(
-            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
+            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, non_transferable,
         );
 
         // Emit supplemental config event when non-default options are set so
@@ -647,6 +665,8 @@ impl SoroStreamContract {
             0i128, // holdback_amount
             None,  // withdrawal_steps
             None,  // min_withdrawal_amount
+            false, // non_transferable
+            false, // requires_recipient_approval
         )
     }
 
@@ -789,7 +809,7 @@ impl SoroStreamContract {
             }
         }
 
-        // Oracle baseline — fetch at creation to record reference price.
+        let creation_price = if let Some(ref oracle_addr) = oracle {
             oracle::fetch_price(&env, oracle_addr, &token)?
         } else {
             0
@@ -836,8 +856,11 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: Bytes::new(&env),
+            locked: false,
             metadata_uri: None,
             milestones: soroban_sdk::Vec::new(&env),
+            holdback_amount: 0,
+            holdback_claimed: false,
             is_step_vesting: true,
             tranches_claimed: 0,
             oracle: oracle.clone(),
@@ -847,17 +870,23 @@ impl SoroStreamContract {
             withdrawal_steps: None,
             current_step: 0,
             min_withdrawal_amount: None,
+            non_transferable: false,
+            requires_recipient_approval: false,
+            approval_timestamp: 0,
+            sender_locked: false,
         };
 
         save_stream(&env, &stream);
+        extend_instance_ttl(&env);
         save_tranches(&env, stream_id, &tranches);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &stream.token);
 
         events::tranche_stream_created(&env, stream_id, &sender, tranche_count, deposit);
-        events::stream_created(&env, stream_id, &sender, &recipient, deposit, 0, end_time);
+        events::stream_created(&env, stream_id, &sender, &recipient, deposit, 0, end_time, false);
 
         Ok(stream_id)
     }
@@ -981,7 +1010,7 @@ impl SoroStreamContract {
             id: stream_id,
             sender: sender.clone(),
             recipient: recipient.clone(),
-            token,
+            token: token.clone(),
             deposit: amount,
             flow_rate,
             start_time: now,
@@ -995,8 +1024,11 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: Bytes::new(&env),
+            locked: false,
             metadata_uri: None,
             milestones: soroban_sdk::Vec::new(&env),
+            holdback_amount: 0,
+            holdback_claimed: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -1006,20 +1038,21 @@ impl SoroStreamContract {
             withdrawal_steps: None,
             current_step: 0,
             min_withdrawal_amount: None,
+            non_transferable: false,
+            requires_recipient_approval: false,
+            approval_timestamp: 0,
+            sender_locked: false,
         };
 
         save_stream(&env, &stream);
-        // Store holdback separately so it is tracked independently from the stream deposit.
-        if holdback_amount > 0 {
-            set_holdback(&env, stream_id, holdback_amount);
-        }
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
         index_global_stream(&env, stream_id);
         increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &stream.token);
 
         events::stream_created(
-            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
+            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
         );
 
         Ok(stream_id)
@@ -1208,6 +1241,103 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    // ── Issue #286: Per-token stream count cap ──────────────────────────────
+
+    /// Sets the per-token stream cap. Setting to 0 disables the cap. Admin only.
+    pub fn set_max_streams_per_token(env: Env, max: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        set_max_streams_per_token(&env, max);
+        Ok(())
+    }
+
+    /// Returns the current per-token stream cap (0 = unlimited).
+    pub fn get_max_streams_per_token(env: Env) -> u32 {
+        get_max_streams_per_token(&env)
+    }
+
+    // ── Issue #284: Address blocklist ───────────────────────────────────────
+
+    /// Adds an address to the blocklist. Admin only.
+    pub fn add_to_blocklist(env: Env, addr: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        add_to_blocklist(&env, &addr);
+        events::address_blocked(&env, &read_admin(&env).unwrap(), &addr);
+        Ok(())
+    }
+
+    /// Removes an address from the blocklist. Admin only.
+    pub fn remove_from_blocklist(env: Env, addr: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        remove_from_blocklist(&env, &addr);
+        events::address_unblocked(&env, &read_admin(&env).unwrap(), &addr);
+        Ok(())
+    }
+
+    /// Returns true if the address is on the blocklist.
+    pub fn is_blocked(env: Env, addr: Address) -> bool {
+        is_blocked(&env, &addr)
+    }
+
+    // ── Issue #282: Grace period & recovery ─────────────────────────────────
+
+    /// Sets the grace period in ledgers. Zero means no grace period. Admin only.
+    pub fn set_grace_period_ledgers(env: Env, ledgers: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        set_grace_period_ledgers(&env, ledgers);
+        Ok(())
+    }
+
+    /// Returns the current grace period in ledgers (0 = no grace period).
+    pub fn get_grace_period_ledgers(env: Env) -> u32 {
+        get_grace_period_ledgers(&env)
+    }
+
+    /// Allows the sender to recover unclaimed funds from an expired stream after
+    /// the grace period has elapsed.
+    ///
+    /// The stream must be past its `end_time` and the grace period (in ledgers)
+    /// must have passed since `end_time`. After recovery the stream is removed.
+    pub fn recover_expired(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+        sender.require_auth();
+
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < stream.end_time {
+            return Err(StreamError::StreamNotComplete);
+        }
+
+        let grace = get_grace_period_ledgers(&env);
+        if grace > 0 {
+            let grace_seconds = (grace as u64).saturating_mul(5);
+            let grace_end = stream.end_time.saturating_add(grace_seconds);
+            if now < grace_end {
+                return Err(StreamError::GracePeriodActive);
+            }
+        }
+
+        let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+        if available > 0 {
+            token::Client::new(&env, &stream.token).transfer(
+                &env.current_contract_address(),
+                &sender,
+                &available,
+            );
+        }
+
+        remove_stream(&env, stream_id);
+        unindex_by_sender(&env, &stream.sender, stream_id);
+        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        decrement_token_stream_count(&env, &stream.token);
+
+        events::stream_recovered(&env, stream_id, &sender, available);
+
+        Ok(())
+    }
+
     /// Sweeps accumulated fees from the contract to a destination address (Issue #222).
     pub fn sweep_fees(env: Env, admin: Address, token: Address, destination: Address) -> Result<(), StreamError> {
         check_admin(&env);
@@ -1268,153 +1398,145 @@ impl SoroStreamContract {
             return Err(StreamError::NotSender);
         }
 
+        stream.metadata_uri = new_uri.clone();
         save_stream(&env, &stream);
-        events::metadata_uri_updated(&env, stream_id, &metadata_uri);
+        events::metadata_uri_updated(&env, stream_id, &new_uri);
+
         Ok(())
     }
 
-    /// Updates the metadata blob attached to a stream.
-    pub fn update_metadata(env: Env, sender: Address, stream_id: u64, metadata: Bytes) -> Result<(), StreamError> {
-        sender.require_auth();
-        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
-        if stream.sender != sender {
-            return Err(StreamError::NotSender);
+    /// Sweeps expired, fully-withdrawn streams from storage and refunds rent incentive.
+    pub fn sweep_expired(env: Env, stream_ids: Vec<u64>) -> Result<(), StreamError> {
+        let now = env.ledger().timestamp();
+
+        for stream_id in stream_ids.iter() {
+            let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+            // Check if stream is expired and fully withdrawn (or cancelled)
+            let is_expired = now >= stream.end_time;
+            let is_fully_withdrawn = stream.total_withdrawn >= stream.deposit || stream.status == StreamStatus::Cancelled;
+
+            if !is_expired || !is_fully_withdrawn {
+                return Err(StreamError::StreamNotComplete);
+            }
+
+            // Delete storage entries
+            remove_stream(&env, stream_id);
+            unindex_by_sender(&env, &stream.sender, stream_id);
+            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            decrement_token_stream_count(&env, &stream.token);
+
+            events::stream_swept(&env, stream_id, &stream.sender);
         }
-        if metadata.len() > 64 {
-            return Err(StreamError::MetadataTooLong);
-        }
-        stream.metadata = metadata.clone();
-        save_stream(&env, &stream);
-        events::metadata_updated(&env, stream_id, &metadata);
+
         Ok(())
     }
 
-    /// Cancels auto-renewal for an existing stream.
-    pub fn cancel_auto_renew(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
-        sender.require_auth();
-        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
-        if stream.sender != sender {
-            return Err(StreamError::NotSender);
-        }
-        stream.auto_renew = false;
-        save_stream(&env, &stream);
-        events::auto_renew_cancelled(&env, stream_id);
-        Ok(())
-    }
-
-    /// Creates a payment stream with a future `start_time`.
-    ///
-    /// Identical to [`create_stream`] except the caller supplies an explicit
-    /// `start_time` (Unix timestamp). This is useful for scheduling a stream
-    /// that should begin at a known future date.
-    ///
-    /// # Validation
-    /// - `start_time` must be `>= now` (cannot schedule in the past).
-    /// - `start_time` must be `<= now + max_future_start_offset_seconds`.
-    ///   The default offset is 365 days; the admin can change it via
-    ///   [`set_max_future_start_offset`].
-    ///
-    /// Returns [`StreamError::InvalidStartTime`] when `start_time < now`.
-    /// Returns [`StreamError::StartTimeTooFar`] when the offset limit is exceeded.
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_stream_scheduled(
+    /// Releases a milestone, making its funds claimable by the recipient.
+    pub fn release_milestone(
         env: Env,
+        stream_id: u64,
+        milestone_index: u32,
         sender: Address,
-        recipient: Address,
-        token: Address,
-        amount: i128,
-        duration_seconds: u64,
-        start_time: u64,
-        cliff_seconds: u64,
-        nonce: u64,
-        auto_renew: bool,
-        lock_until: u64,
-        allow_recipient_termination: bool,
-        holdback_amount: i128,
-    ) -> Result<u64, StreamError> {
+    ) -> Result<(), StreamError> {
         sender.require_auth();
 
-        if is_paused_or_auto_unpause(&env) {
-            return Err(StreamError::ContractPaused);
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        if milestone_index >= stream.milestones.len() {
+            return Err(StreamError::InvalidDuration);
+        }
+
+        // Get mutable reference to the milestone and change its status
+        let mut milestone = stream.milestones.get(milestone_index).unwrap();
+        milestone.status = crate::types::MilestoneStatus::Released;
+        stream.milestones.set(milestone_index, milestone);
+
+        save_stream(&env, &stream);
+        events::milestone_released(&env, stream_id, milestone_index);
+
+        Ok(())
+    }
+
+    /// Extends the Soroban persistent storage TTL for a stream and its indices.
+    ///
+    /// Callable by anyone — no auth required. Bumps the TTL to cover the remaining
+    /// stream duration plus a 24-hour safety buffer (~17280 ledgers). No-op when
+    /// the current TTL is already sufficient (extend_ttl is a no-op if new TTL <=
+    /// current TTL internally).
+    ///
+    /// Emits `TtlBumped { stream_id, new_expiry_ledger }`.
+    pub fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+            return Err(StreamError::StreamNotActive);
         }
 
         let now = env.ledger().timestamp();
+        let remaining = stream.end_time.saturating_sub(now);
 
-        // ── start_time validation ────────────────────────────────────────────
-        if start_time < now {
-            return Err(StreamError::InvalidStartTime);
-        }
-        let max_offset = read_max_future_start_offset(&env);
-        let max_allowed_start = now.checked_add(max_offset).ok_or(StreamError::Overflow)?;
-        if start_time > max_allowed_start {
-            return Err(StreamError::StartTimeTooFar);
+        const SAFETY_BUFFER_LEDGERS: u32 = 17_280;
+        let ledgers_for_remaining = (remaining / 5) as u32;
+        let ledgers_needed = ledgers_for_remaining.saturating_add(SAFETY_BUFFER_LEDGERS);
+
+        env.storage()
+            .persistent()
+            .extend_ttl(&stream_id, ledgers_needed, ledgers_needed);
+
+        let scnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&storage::sender_count_key(&env, &stream.sender))
+            .unwrap_or(0u32);
+        for i in 0..scnt {
+            let slot = storage::sender_slot_key(&env, &stream.sender, i);
+            if let Some(id) = env.storage().persistent().get::<_, u64>(&slot) {
+                if id == stream_id {
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot, ledgers_needed, ledgers_needed);
+                    break;
+                }
+            }
         }
 
-        if nonce_used(&env, &sender, nonce) {
-            return Err(StreamError::DuplicateStream);
+        let rcnt: u32 = env
+            .storage()
+            .persistent()
+            .get(&storage::recipient_count_key(&env, &stream.recipient))
+            .unwrap_or(0u32);
+        for i in 0..rcnt {
+            let slot = storage::recipient_slot_key(&env, &stream.recipient, i);
+            if let Some(id) = env.storage().persistent().get::<_, u64>(&slot) {
+                if id == stream_id {
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot, ledgers_needed, ledgers_needed);
+                    break;
+                }
+            }
         }
-        if amount <= 0 {
+
+        let new_expiry_ledger = env.ledger().sequence().saturating_add(ledgers_needed);
+        events::ttl_bumped(&env, stream_id, new_expiry_ledger);
+
+        Ok(())
+    }
+
+    /// Sets the flat XLM creation fee (in stroops) and the XLM SAC token address.
+    pub fn set_creation_fee(env: Env, fee: i128, xlm_token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        if fee < 0 {
             return Err(StreamError::ZeroAmount);
         }
-        if holdback_amount < 0 || holdback_amount >= amount {
-            return Err(StreamError::ZeroAmount);
-        }
-        if cliff_seconds > duration_seconds {
-            return Err(StreamError::InvalidCliff);
-        }
-        if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
-            return Err(StreamError::RecipientNotWhitelisted);
-        }
-
-        let min_dur = read_min_duration(&env);
-        if duration_seconds < min_dur {
-            return Err(StreamError::StreamDurationTooShort);
-        }
-
-        let max_dur = read_max_duration(&env);
-        if max_dur > 0 && duration_seconds > max_dur {
-            return Err(StreamError::DurationExceedsMax);
-        }
-
-        let streaming_amount = amount
-            .checked_sub(holdback_amount)
-            .ok_or(StreamError::Overflow)?;
-        let flow_rate = streaming_amount / duration_seconds as i128;
-        if flow_rate == 0 {
-            return Err(StreamError::ZeroFlowRate);
-        }
-
-        let sender_count = get_sender_stream_count(&env, &sender);
-        let limit = effective_sender_limit(&env, &sender);
-        if sender_count >= limit {
-            return Err(StreamError::SenderStreamLimitExceeded);
-        }
-
-        check_rate_limit(&env, &sender, now)?;
-        check_token_whitelist(&env, &token)?;
-        validate_token_address(&env, &token)?;
-
-        mark_nonce_used(&env, &sender, nonce);
-
-        let end_time = start_time
-            .checked_add(duration_seconds)
-            .ok_or(StreamError::Overflow)?;
-        let cliff_time = start_time
-            .checked_add(cliff_seconds)
-            .ok_or(StreamError::Overflow)?;
-
-        let stream_id = derive_stream_id(&env, &sender, &recipient, start_time, nonce);
-        if stream_exists(&env, stream_id) {
-            return Err(StreamError::StreamIdConflict);
-        }
-
-        let creation_fee = get_creation_fee_xlm(&env);
-        if creation_fee > 0 {
-            let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
-            let xlm_token = get_xlm_token(&env).ok_or(StreamError::NotInitialized)?;
-            token::Client::new(&env, &xlm_token).transfer(&sender, &treasury, &creation_fee);
-            events::creation_fee_collected(&env, creation_fee, &treasury);
-        }
+        set_creation_fee_xlm(&env, fee);
+        set_xlm_token(&env, &xlm_token);
+        Ok(())
+    }
 
         token::Client::new(&env, &token).transfer(
             &sender,
@@ -1461,7 +1583,7 @@ impl SoroStreamContract {
         increment_active_stream_count(&env);
         set_sender_last_creation_time(&env, &sender, now);
 
-        events::stream_created(&env, stream_id, &sender, &recipient, amount, flow_rate, end_time);
+        events::stream_created(&env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false);
 
         Ok(stream_id)
     }
@@ -1481,6 +1603,9 @@ impl SoroStreamContract {
 
         if stream.recipient != recipient {
             return Err(StreamError::NotRecipient);
+        }
+        if stream.status == StreamStatus::PendingApproval {
+            return Err(StreamError::AwaitingApproval);
         }
         if stream.status != StreamStatus::Active {
             return Err(StreamError::StreamNotActive);
@@ -1568,6 +1693,7 @@ impl SoroStreamContract {
                 save_stream(&env, &stream);
                 remove_tranches(&env, stream_id);
                 decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
                 remove_stream(&env, stream_id);
                 unindex_by_sender(&env, &stream.sender, stream_id);
                 unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -1794,6 +1920,7 @@ impl SoroStreamContract {
                     stream.locked = false;
                     save_stream(&env, &stream);
                     decrement_active_stream_count(&env);
+                    decrement_token_stream_count(&env, &stream.token);
 
                     // INTERACTIONS
                     if recipient_amount > 0 {
@@ -1842,6 +1969,7 @@ impl SoroStreamContract {
                 }
             } else {
                 decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
                 remove_stream(&env, stream_id);
                 unindex_by_sender(&env, &stream.sender, stream_id);
                 unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -1916,8 +2044,23 @@ impl SoroStreamContract {
         if !is_sender && !is_delegate {
             return Err(StreamError::NotAuthorized);
         }
-        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+
+        // PendingApproval streams may be cancelled freely — the sender incurs no penalty.
+        // For all other statuses enforce the usual Active/Paused requirement.
+        if stream.status != StreamStatus::PendingApproval
+            && stream.status != StreamStatus::Active
+            && stream.status != StreamStatus::Paused
+        {
             return Err(StreamError::StreamNotActive);
+        }
+
+        // Sender (or their delegate) cannot cancel once the stream is sender-locked.
+        // Exception: PendingApproval streams are always cancellable at zero cost.
+        if stream.sender_locked
+            && stream.status != StreamStatus::PendingApproval
+            && (is_sender || is_delegate)
+        {
+            return Err(StreamError::StreamIsLocked);
         }
 
         let now = if stream.status == StreamStatus::Paused {
@@ -1925,6 +2068,38 @@ impl SoroStreamContract {
         } else {
             env.ledger().timestamp()
         };
+
+        // ── PendingApproval cancellation: full refund, zero earned ────────────
+        // The recipient never approved, so no tokens have accrued. Refund the
+        // entire deposit (plus any holdback) to the sender and remove the stream.
+        if stream.status == StreamStatus::PendingApproval {
+            let refund = stream.deposit;
+            let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
+                get_holdback(&env, stream_id)
+            } else {
+                0
+            };
+
+            remove_stream(&env, stream_id);
+            unindex_by_sender(&env, &stream.sender, stream_id);
+            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            if holdback_refund > 0 {
+                remove_holdback(&env, stream_id);
+            }
+
+            let total_refund = refund.saturating_add(holdback_refund);
+            if total_refund > 0 {
+                token::Client::new(&env, &stream.token).transfer(
+                    &env.current_contract_address(),
+                    &stream.sender,
+                    &total_refund,
+                );
+            }
+
+            events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, 0i128);
+            clear_reentrancy_lock(&env);
+            return Ok(());
+        }
 
         // ── Step-vesting cancellation ────────────────────────────────────────
         if stream.is_step_vesting {
@@ -1961,6 +2136,7 @@ impl SoroStreamContract {
 
             if stream.status == StreamStatus::Active {
                 decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
             }
 
             // EFFECTS
@@ -2016,6 +2192,7 @@ impl SoroStreamContract {
         // Decrement active count only if stream was Active (Paused was already decremented)
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
+            decrement_token_stream_count(&env, &stream.token);
         }
 
         // If the holdback has not yet been settled, include it in the sender refund.
@@ -2105,6 +2282,7 @@ impl SoroStreamContract {
         // Decrement active count only if stream was Active (Paused was already decremented)
         if stream.status == StreamStatus::Active {
             decrement_active_stream_count(&env);
+            decrement_token_stream_count(&env, &stream.token);
         }
 
         // EFFECTS: remove stream before any token transfer
@@ -2151,6 +2329,9 @@ impl SoroStreamContract {
 
         if stream.recipient != current_recipient {
             return Err(StreamError::NotRecipient);
+        }
+        if stream.non_transferable {
+            return Err(StreamError::StreamNonTransferable);
         }
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
@@ -2225,6 +2406,89 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Approves a stream created with `requires_recipient_approval = true`.
+    ///
+    /// Transitions the stream from `PendingApproval` to `Active` and records the
+    /// approval timestamp.  All claimable-balance calculations use this timestamp
+    /// as the effective start so no tokens accrue during the pending window.
+    pub fn approve_stream(
+        env: Env,
+        stream_id: u64,
+        recipient: Address,
+    ) -> Result<(), StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+        recipient.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.recipient != recipient {
+            return Err(StreamError::NotRecipient);
+        }
+        if stream.status != StreamStatus::PendingApproval {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Shift all time-based fields forward so vesting starts from approval,
+        // not from the original creation timestamp.
+        let pending_duration = now.saturating_sub(stream.start_time);
+        stream.start_time = now;
+        stream.cliff_time = stream.cliff_time.saturating_add(pending_duration);
+        stream.end_time = stream.end_time.saturating_add(pending_duration);
+        stream.lock_until = if stream.lock_until > 0 {
+            stream.lock_until.saturating_add(pending_duration)
+        } else {
+            0
+        };
+        stream.last_withdraw_time = now;
+        stream.approval_timestamp = now;
+        stream.status = StreamStatus::Active;
+
+        save_stream(&env, &stream);
+        increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &stream.token);
+
+        events::stream_approved(&env, stream_id, &recipient, now);
+        Ok(())
+    }
+
+    /// Irrevocably locks a stream, preventing the sender from cancelling it.
+    ///
+    /// Only callable by the sender while the stream is `Active`.
+    /// Once locked, `cancel_stream` returns `StreamError::StreamIsLocked` for
+    /// any call from the sender or their delegate.  Recipients withdraw normally.
+    pub fn lock_stream(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+    ) -> Result<(), StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+        sender.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        if stream.status != StreamStatus::Active {
+            return Err(StreamError::StreamNotActive);
+        }
+        if stream.sender_locked {
+            return Err(StreamError::StreamIsLocked);
+        }
+
+        stream.sender_locked = true;
+        save_stream(&env, &stream);
+
+        events::stream_sender_locked(&env, stream_id, &sender);
+        Ok(())
+    }
+
     /// Partially cancels an active stream by reclaiming `cancel_amount` from the unstreamed
     /// remainder.
     pub fn partial_cancel_stream(
@@ -2286,6 +2550,7 @@ impl SoroStreamContract {
         stream.status = StreamStatus::Cancelled;
         save_stream(&env, &stream);
         decrement_active_stream_count(&env);
+        decrement_token_stream_count(&env, &stream.token);
         events::stream_cancelled(&env, stream_id, &stream.sender, cancel_amount, earned);
 
         let new_nonce = stream_id;
@@ -2310,11 +2575,11 @@ impl SoroStreamContract {
             last_pause_time: 0,
             total_withdrawn: 0,
             metadata: stream.metadata.clone(),
+            locked: false,
             metadata_uri: stream.metadata_uri.clone(),
-            milestones: Vec::new(&env),
+            milestones: soroban_sdk::Vec::new(&env),
             holdback_amount: 0,
             holdback_claimed: false,
-            milestones: soroban_sdk::Vec::new(&env),
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -2324,6 +2589,10 @@ impl SoroStreamContract {
             withdrawal_steps: None,
             current_step: 0,
             min_withdrawal_amount: None,
+            non_transferable: false,
+            requires_recipient_approval: false,
+            approval_timestamp: 0,
+            sender_locked: false,
         };
 
         save_stream(&env, &new_stream);
@@ -2331,6 +2600,7 @@ impl SoroStreamContract {
         index_by_recipient(&env, &stream.recipient, new_stream_id);
         index_global_stream(&env, new_stream_id);
         increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &new_stream.token);
 
         events::stream_partial_cancelled(
             &env,
@@ -2555,8 +2825,7 @@ impl SoroStreamContract {
             if now >= stream.end_time {
                 stream.status = StreamStatus::Expired;
             }
-        }
-        Ok(stream)
+        }        Ok(stream)
     }
 
     /// Explicitly marks an elapsed stream as Expired, compacting its storage entry.
@@ -2943,11 +3212,11 @@ impl SoroStreamContract {
                 last_pause_time: 0,
                 total_withdrawn: 0,
                 metadata: Bytes::new(&env),
+                locked: false,
                 metadata_uri: None,
-                milestones: Vec::new(&env),
+                milestones: soroban_sdk::Vec::new(&env),
                 holdback_amount: 0,
                 holdback_claimed: false,
-                milestones: soroban_sdk::Vec::new(&env),
                 is_step_vesting: false,
                 tranches_claimed: 0,
                 oracle: None,
@@ -2957,6 +3226,10 @@ impl SoroStreamContract {
                 withdrawal_steps: None,
                 current_step: 0,
                 min_withdrawal_amount: None,
+                non_transferable: false,
+                requires_recipient_approval: false,
+                approval_timestamp: 0,
+                sender_locked: false,
             };
 
             save_stream(&env, &stream);
@@ -2979,9 +3252,10 @@ impl SoroStreamContract {
             index_by_recipient(&env, &recipient, stream_id);
             index_global_stream(&env, stream_id);
             increment_active_stream_count(&env);
+            increment_token_stream_count(&env, &token);
 
             events::stream_created(
-                &env, stream_id, &sender, &recipient, amount, flow_rate, end_time,
+                &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
             );
         }
 
@@ -3089,6 +3363,7 @@ impl SoroStreamContract {
                     );
                 } else {
                     decrement_active_stream_count(&env);
+                    decrement_token_stream_count(&env, &stream.token);
                     remove_stream(&env, stream_id);
                     unindex_by_sender(&env, &stream.sender, stream_id);
                     unindex_by_recipient(&env, &stream.recipient, stream_id);
@@ -3170,6 +3445,7 @@ impl SoroStreamContract {
                 // Decrement active count only if stream was Active (Paused was already decremented)
                 if stream.status == StreamStatus::Active {
                     decrement_active_stream_count(&env);
+                    decrement_token_stream_count(&env, &stream.token);
                 }
 
                 // EFFECTS
@@ -3528,10 +3804,17 @@ impl SoroStreamContract {
         }
     }
 
+    /// Returns the number of currently active streams for the given SAC token address.
+    ///
+    /// Returns `0` for unknown/never-used token addresses rather than erroring.
+    /// Read-only, no auth required.
+    pub fn get_stream_count_by_token(env: Env, token: Address) -> u64 {
+        get_token_stream_count(&env, &token)
+    }
+
     /// Recalibrates the active stream count by scanning all streams.
     /// Only callable by admin. Use when counter drift is suspected.
-    pub fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+    pub fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError> {        check_admin(&env);
         admin.require_auth();
 
         let mut correct_count = 0u32;
@@ -3655,6 +3938,9 @@ impl SoroStreamInterface for SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
+        holdback_amount: i128,
+        withdrawal_steps: Option<u32>,
+        min_withdrawal_amount: Option<i128>,
     ) -> Result<u64, StreamError> {
         Self::create_stream(
             env,
@@ -3671,6 +3957,8 @@ impl SoroStreamInterface for SoroStreamContract {
             0i128, // holdback_amount defaults to 0 in trait delegation
             None,  // withdrawal_steps
             None,  // min_withdrawal_amount
+            false, // non_transferable
+            false, // requires_recipient_approval
         )
     }
 
@@ -3838,6 +4126,14 @@ impl SoroStreamInterface for SoroStreamContract {
         Self::transfer_recipient(env, stream_id, current_recipient, new_recipient)
     }
 
+    fn approve_stream(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        Self::approve_stream(env, stream_id, recipient)
+    }
+
+    fn lock_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+        Self::lock_stream(env, stream_id, sender)
+    }
+
     fn propose_fee_change(env: Env, admin: Address, new_fee_bps: u32) -> Result<(), StreamError> {
         Self::propose_fee_change(env, admin, new_fee_bps)
     }
@@ -3902,6 +4198,10 @@ impl SoroStreamInterface for SoroStreamContract {
         Self::recalibrate_stats(env, admin)
     }
 
+    fn get_stream_count_by_token(env: Env, token: Address) -> u64 {
+        Self::get_stream_count_by_token(env, token)
+    }
+
     fn get_stream_health(env: Env, stream_id: u64) -> Result<types::StreamHealth, StreamError> {
         Self::get_stream_health(env, stream_id)
     }
@@ -3910,8 +4210,6 @@ impl SoroStreamInterface for SoroStreamContract {
         Self::mark_expired(env, stream_id)
     }
 
-    fn bump_stream_ttl(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
-        Self::bump_stream_ttl(env, stream_id, caller)
     fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
         Self::bump_stream_ttl(env, stream_id)
     }
@@ -3938,5 +4236,43 @@ impl SoroStreamInterface for SoroStreamContract {
 
     fn archive_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         Self::archive_stream(env, stream_id, caller)
+    }
+
+    // ── Issue #286: Per-token stream cap ────────────────────────────────────
+
+    fn set_max_streams_per_token(env: Env, max: u32) -> Result<(), StreamError> {
+        Self::set_max_streams_per_token(env, max)
+    }
+
+    fn get_max_streams_per_token(env: Env) -> u32 {
+        Self::get_max_streams_per_token(env)
+    }
+
+    // ── Issue #284: Address blocklist ───────────────────────────────────────
+
+    fn add_to_blocklist(env: Env, addr: Address) -> Result<(), StreamError> {
+        Self::add_to_blocklist(env, addr)
+    }
+
+    fn remove_from_blocklist(env: Env, addr: Address) -> Result<(), StreamError> {
+        Self::remove_from_blocklist(env, addr)
+    }
+
+    fn is_blocked(env: Env, addr: Address) -> bool {
+        Self::is_blocked(env, addr)
+    }
+
+    // ── Issue #282: Grace period & recovery ─────────────────────────────────
+
+    fn set_grace_period_ledgers(env: Env, ledgers: u32) -> Result<(), StreamError> {
+        Self::set_grace_period_ledgers(env, ledgers)
+    }
+
+    fn get_grace_period_ledgers(env: Env) -> u32 {
+        Self::get_grace_period_ledgers(env)
+    }
+
+    fn recover_expired(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+        Self::recover_expired(env, stream_id, sender)
     }
 }
