@@ -61,6 +61,8 @@ jobs:
         run: cargo build --target wasm32v1-none --release
       - name: Integration tests
         run: cargo test integration_tests -- --nocapture
+      - name: Event field integration tests
+        run: cargo test event_field_tests -- --nocapture
       - name: Testnet manifest validation
         run: cargo test testnet_manifest_loads -- --nocapture
       - name: Storage baseline regression

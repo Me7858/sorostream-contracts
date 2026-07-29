@@ -9,6 +9,7 @@ pub fn stream_created(
     amount: i128,
     flow_rate: i128,
     end_time: u64,
+    non_transferable: bool,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
@@ -18,6 +19,7 @@ pub fn stream_created(
             amount,
             flow_rate,
             end_time,
+            non_transferable,
         ),
     );
 }
@@ -764,5 +766,35 @@ pub fn dual_stream_cancelled(
             refund_amount2,
             recipient_amount2,
         ),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recipient approval & sender lock events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a recipient approves a stream that required explicit approval.
+///
+/// # Event Data
+/// - `stream_id`: The approved stream
+/// - `recipient`: The recipient who approved
+/// - `approval_timestamp`: Ledger timestamp at which approval was recorded;
+///   tokens begin accruing from this point
+pub fn stream_approved(env: &Env, stream_id: u64, recipient: &Address, approval_timestamp: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamApproved"), stream_id),
+        (recipient.clone(), approval_timestamp),
+    );
+}
+
+/// Emitted when a sender irrevocably locks a stream, renouncing their right to cancel.
+///
+/// # Event Data
+/// - `stream_id`: The locked stream
+/// - `sender`: The sender who initiated the lock
+pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamSenderLocked"), stream_id),
+        sender.clone(),
     );
 }

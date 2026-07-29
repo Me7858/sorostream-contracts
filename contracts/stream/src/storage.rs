@@ -1359,3 +1359,42 @@ pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
     remove_dual_stream_deposit2(env, stream_id);
     remove_dual_stream_withdrawn2(env, stream_id);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-token active stream count
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Storage key for the active stream count of a specific token: ("tsc", token).
+fn token_stream_count_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "tsc"), token.clone())
+}
+
+/// Returns the number of currently active streams for the given token address.
+/// Returns 0 for unknown tokens rather than erroring.
+pub fn get_token_stream_count(env: &Env, token: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&token_stream_count_key(env, token))
+        .unwrap_or(0u64)
+}
+
+/// Increments the active stream count for a token by 1.
+///
+/// Called on every successful stream creation.
+pub fn increment_token_stream_count(env: &Env, token: &Address) {
+    let key = token_stream_count_key(env, token);
+    let current = get_token_stream_count(env, token);
+    let next = current.checked_add(1).expect("token stream count overflow");
+    env.storage().persistent().set(&key, &next);
+}
+
+/// Decrements the active stream count for a token by 1, saturating at 0.
+///
+/// Called on stream cancellation, expiry, or natural completion.
+pub fn decrement_token_stream_count(env: &Env, token: &Address) {
+    let key = token_stream_count_key(env, token);
+    let current = get_token_stream_count(env, token);
+    if current > 0 {
+        env.storage().persistent().set(&key, &(current - 1));
+    }
+}
