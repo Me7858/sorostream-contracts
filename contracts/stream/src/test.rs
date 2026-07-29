@@ -182,6 +182,86 @@ fn test_withdraw_full() {
     assert!(result.is_err());
 }
 
+// ── Issue #328: withdraw at stream end reconciles the full deposit,
+// including any dust left over from `flow_rate = amount / duration_seconds`
+// rounding down. `flow_rate` is truncated on creation, so `flow_rate *
+// duration` can fall a few stroops short of `deposit`. The contract does not
+// strand that remainder: on the final withdrawal (`stream_ended == true`,
+// non-auto-renew path) it refunds the leftover dust to the sender in the same
+// call that pays the recipient, so 100% of the deposit leaves the contract
+// and none of it is stuck. These tests pin down that reconciliation.
+
+#[test]
+fn test_withdraw_at_end_time_reconciles_full_deposit_with_dust() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // 100_003 / 1000 = 100 (truncated), so flow_rate * duration = 100_000,
+    // leaving 3 stroops of rounding dust that doesn't evenly divide out.
+    let deposit: i128 = 100_003;
+    let duration: u64 = 1000;
+    let recipient_share: i128 = 100_000;
+    let dust: i128 = deposit - recipient_share;
+
+    let sender_balance_after_create = 1_000_000 - deposit;
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &deposit, &duration, &0, &0u64, &false, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>);
+
+    t.env.ledger().set_timestamp(duration + 1);
+    c.withdraw(&stream_id, &t.recipient);
+
+    let token = TokenClient::new(&t.env, &t.token_id);
+    let recipient_bal = token.balance(&t.recipient);
+    let sender_bal = token.balance(&t.sender);
+    let contract_bal = token.balance(&t.contract_id);
+
+    // Recipient gets the streamed amount; the leftover dust is refunded to
+    // the sender rather than lost, so together they recover the full deposit.
+    assert_eq!(recipient_bal, recipient_share);
+    assert_eq!(sender_bal - sender_balance_after_create, dust);
+    assert_eq!(recipient_bal + dust, deposit);
+
+    // Nothing is left behind in the contract for this stream.
+    assert_eq!(contract_bal, 0);
+
+    // The stream is fully settled and removed.
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
+#[test]
+fn test_withdraw_long_after_end_time_matches_withdraw_at_end_time() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let deposit: i128 = 100_003;
+    let duration: u64 = 1000;
+    let recipient_share: i128 = 100_000;
+    let dust: i128 = deposit - recipient_share;
+    let sender_balance_after_create = 1_000_000 - deposit;
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &deposit, &duration, &0, &0u64, &false, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>);
+
+    // Claim well past end_time, not just the first ledger after it.
+    t.env.ledger().set_timestamp(duration + 1000);
+    c.withdraw(&stream_id, &t.recipient);
+
+    let token = TokenClient::new(&t.env, &t.token_id);
+    let recipient_bal = token.balance(&t.recipient);
+    let sender_bal = token.balance(&t.sender);
+    let contract_bal = token.balance(&t.contract_id);
+
+    // Same reconciliation as claiming at end_time + 1: elapsed time is capped
+    // at end_time, so claiming later doesn't change the settled amounts.
+    assert_eq!(recipient_bal, recipient_share);
+    assert_eq!(sender_bal - sender_balance_after_create, dust);
+    assert_eq!(contract_bal, 0);
+    assert!(c.try_get_stream(&stream_id).is_err());
+}
+
 #[test]
 fn test_cancel_stream_splits_correctly() {
     let t = setup();
