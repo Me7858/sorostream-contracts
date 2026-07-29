@@ -56,6 +56,9 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
+    /// Stream was explicitly rejected by the recipient before any balance was
+    /// claimed.  The full remaining deposit has been refunded to the sender.
+    Rejected,
 }
 
 /// Status of a milestone.

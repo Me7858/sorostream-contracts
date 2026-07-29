@@ -97,4 +97,6 @@ pub enum StreamError {
     /// `cancel_stream` was called by the sender on a stream they have irrevocably
     /// locked via `lock_stream`.
     StreamIsLocked = 60,
+    /// `reject_stream` was called but the recipient has already claimed some balance.
+    AlreadyClaimed = 61,
 }

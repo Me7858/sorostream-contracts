@@ -384,4 +384,6 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError>;
+
+    fn reject_stream(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
 }

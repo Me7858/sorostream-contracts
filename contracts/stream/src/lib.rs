@@ -1344,6 +1344,63 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Allows a recipient to reject an active stream before any balance has been claimed.
+    ///
+    /// The full remaining deposit is refunded to the sender and the stream is removed
+    /// from storage.  This call fails if:
+    /// - the caller is not the stream recipient,
+    /// - any tokens have already been withdrawn (`total_withdrawn > 0`), or
+    /// - the stream is not in `Active` or `PendingApproval` status.
+    ///
+    /// # Errors
+    /// - `StreamError::StreamNotFound` — stream does not exist.
+    /// - `StreamError::NotRecipient` — caller is not the recipient.
+    /// - `StreamError::AlreadyClaimed` — balance has already been partially claimed.
+    /// - `StreamError::StreamNotActive` — stream is not rejectable in its current state.
+    pub fn reject_stream(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        recipient.require_auth();
+
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.recipient != recipient {
+            return Err(StreamError::NotRecipient);
+        }
+
+        // Reject is only valid before any balance has been claimed.
+        if stream.total_withdrawn > 0 {
+            return Err(StreamError::AlreadyClaimed);
+        }
+
+        // Only reject Active or PendingApproval streams.
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::PendingApproval {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let refund_amount = stream.deposit.saturating_sub(stream.total_withdrawn);
+
+        // EFFECTS: remove the stream and update indexes before token transfer.
+        remove_stream(&env, stream_id);
+        unindex_by_sender(&env, &stream.sender, stream_id);
+        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        if stream.status == StreamStatus::Active {
+            decrement_active_stream_count(&env);
+            decrement_token_stream_count(&env, &stream.token);
+        }
+
+        // INTERACTIONS: refund remaining deposit to sender.
+        if refund_amount > 0 {
+            token::Client::new(&env, &stream.token).transfer(
+                &env.current_contract_address(),
+                &stream.sender,
+                &refund_amount,
+            );
+        }
+
+        events::stream_rejected(&env, stream_id, &recipient, refund_amount);
+
+        Ok(())
+    }
+
     /// Sweeps accumulated fees from the contract to a destination address (Issue #222).
     pub fn sweep_fees(env: Env, admin: Address, token: Address, destination: Address) -> Result<(), StreamError> {
         check_admin(&env);
@@ -4323,5 +4380,9 @@ impl SoroStreamInterface for SoroStreamContract {
 
     fn recover_expired(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
         Self::recover_expired(env, stream_id, sender)
+    }
+
+    fn reject_stream(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        Self::reject_stream(env, stream_id, recipient)
     }
 }

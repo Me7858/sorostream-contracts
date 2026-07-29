@@ -798,3 +798,16 @@ pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
         sender.clone(),
     );
 }
+
+/// Emitted when a recipient rejects a stream before any balance has been claimed.
+///
+/// # Event Data
+/// - `stream_id`: The rejected stream
+/// - `recipient`: The recipient who rejected the stream
+/// - `refund_amount`: The remaining deposit returned to the sender
+pub fn stream_rejected(env: &Env, stream_id: u64, recipient: &Address, refund_amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRejected"), stream_id),
+        (recipient.clone(), refund_amount),
+    );
+}
