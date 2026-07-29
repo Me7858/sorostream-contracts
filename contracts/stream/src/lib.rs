@@ -1663,9 +1663,10 @@ impl SoroStreamContract {
             let (recipient_amount, fee_amount, treasury_opt) = if claimable > 0 {
                 let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
-                    claimable
+                    (claimable
                         .checked_mul(fee_bps as i128)
                         .ok_or(StreamError::Overflow)?
+                        + 9999)
                         / 10_000
                 } else {
                     0
@@ -1841,9 +1842,10 @@ impl SoroStreamContract {
         let (recipient_amount, fee_amount) = if claimable > 0 {
             let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
-                claimable
+                (claimable
                     .checked_mul(fee_bps as i128)
                     .ok_or(StreamError::Overflow)?
+                    + 9999)
                     / 10_000
             } else {
                 0
@@ -2358,9 +2360,10 @@ impl SoroStreamContract {
                 if claimable > 0 {
                     let fee_bps = get_protocol_fee(&env);
                     let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
-                        claimable
+                        (claimable
                             .checked_mul(fee_bps as i128)
                             .ok_or(StreamError::Overflow)?
+                            + 9999)
                             / 10_000
                     } else {
                         0
@@ -2843,9 +2846,10 @@ impl SoroStreamContract {
             return Err(StreamError::StreamNotComplete);
         }
 
-        // Transition to Expired and persist the compacted state.
+        // Transition to Expired, persist the compacted state, and update active count.
         stream.status = StreamStatus::Expired;
         save_stream(&env, &stream);
+        decrement_active_stream_count(&env);
 
         events::stream_expired(&env, stream_id);
         Ok(())
@@ -3298,9 +3302,10 @@ impl SoroStreamContract {
             let (recipient_amount, fee_amount) = if claimable > 0 {
                 let fee_bps = get_protocol_fee(&env);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
-                    claimable
+                    (claimable
                         .checked_mul(fee_bps as i128)
                         .ok_or(StreamError::Overflow)?
+                        + 9999)
                         / 10_000
                 } else {
                     0

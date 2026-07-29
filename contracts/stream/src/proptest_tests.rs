@@ -11,6 +11,18 @@ use soroban_sdk::{
     Address, Env,
 };
 
+fn setup_env_with_fee(fee_bps: u32) -> (Env, Address, Address, Address, Address) {
+    let (env, contract_id, token_id, sender, recipient) = setup_env();
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&env, "1.0.0"));
+    if fee_bps > 0 {
+        c.set_protocol_fee(&fee_bps);
+        c.set_treasury_address(&admin);
+    }
+    (env, contract_id, token_id, sender, recipient)
+}
+
 fn setup_env() -> (Env, Address, Address, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
@@ -600,6 +612,114 @@ proptest! {
             old_deposit + effective_topup,
             "deposit must increase by exactly effective_topup({})",
             effective_topup,
+        );
+    }
+}
+
+// ── Issue #311: property-based tests for cancel refund arithmetic invariants ──
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    /// Invariant: sender_refund + recipient_claimable_at_cancel + protocol_fee = original_deposit.
+    /// Since no fee is charged on cancel, this reduces to refund + claimable = deposit.
+    /// Edge cases: cancellation at t=0, t=end_time/2, and t=end_time are explicitly sampled.
+    #[test]
+    fn prop_cancel_refund_invariant(
+        amount in 100_i128..=1_000_000_i128,
+        duration in 10_u64..=100_000_u64,
+        cancel_time in 0_u64..=100_000_u64,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        let token = TokenClient::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let sender_before = token.balance(&sender);
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
+            &false, &0i128,
+        );
+
+        // Cancel at specified time (bounded to [0, end_time] for edge coverage)
+        let end_time = duration;
+        let cancel_time = match cancel_time {
+            0 => 0,                               // t=0 edge case
+            t if t >= duration => duration,       // t=end_time edge case
+            t if t >= duration / 2 => duration / 2, // t=end_time/2 edge case
+            t => t,
+        };
+        env.ledger().set_timestamp(cancel_time);
+        c.cancel_stream(&stream_id, &sender);
+
+        let sender_after = token.balance(&sender);
+        let recipient_after = token.balance(&recipient);
+
+        let sender_refund = sender_after - sender_before;
+        let recipient_claimable = recipient_after;
+
+        // Invariant: refund + claimable = deposit (no fee on cancel)
+        prop_assert_eq!(
+            sender_refund + recipient_claimable,
+            amount,
+            "refund({}) + claimable({}) must equal deposit({}) at cancel_time={}",
+            sender_refund, recipient_claimable, amount, cancel_time,
+        );
+    }
+
+    /// Invariant holds even when a protocol fee is configured (withdrawals before cancel).
+    /// total_withdrawn_net + total_fees + cancel_claimable + refund = deposit
+    #[test]
+    fn prop_cancel_refund_with_fee_invariant(
+        amount in 10_000_i128..=500_000_i128,
+        duration in 100_u64..=10_000_u64,
+        cancel_time in 1_u64..=10_000_u64,
+        fee_bps in 1_u32..=500_u32,
+        withdraw_before_cancel in proptest::bool::ANY,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env_with_fee(fee_bps);
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        let token = TokenClient::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let sender_before = token.balance(&sender);
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
+            &false, &0i128,
+        );
+
+        // Optionally withdraw before cancel
+        let mut fees_collected_before: i128 = 0;
+        if withdraw_before_cancel && cancel_time > 1 {
+            let withdraw_time = (cancel_time / 2).max(1);
+            env.ledger().set_timestamp(withdraw_time);
+            let _ = c.try_withdraw(&stream_id, &recipient);
+            fees_collected_before = c.get_fees_collected(&token_id);
+        }
+
+        let cancel_time = cancel_time.min(duration);
+        env.ledger().set_timestamp(cancel_time);
+        c.cancel_stream(&stream_id, &sender);
+
+        let sender_after = token.balance(&sender);
+        let recipient_after = token.balance(&recipient);
+        let sender_refund = sender_after - sender_before;
+        let total_recipient = recipient_after;
+        let total_fees = c.get_fees_collected(&token_id);
+
+        // Invariant: refund + recipient_total + fees = deposit
+        prop_assert!(
+            sender_refund + total_recipient + total_fees == amount,
+            "refund({}) + recipient({}) + fees({}) != deposit({}) at cancel_time={}, withdraw_before={}",
+            sender_refund, total_recipient, total_fees, amount, cancel_time, withdraw_before_cancel,
         );
     }
 }
