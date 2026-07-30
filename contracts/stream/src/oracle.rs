@@ -24,13 +24,13 @@ pub trait IPriceOracle {
 
 /// Fetches the current price from the oracle contract.
 ///
-/// Returns `StreamError::OracleError` if the call fails or the returned price is ≤ 0.
+/// Returns `StreamError::PriceDeviationTooHigh` if the call fails or the returned price is ≤ 0.
 pub fn fetch_price(env: &Env, oracle: &Address, token: &Address) -> Result<i128, StreamError> {
     let client = PriceOracleClient::new(env, oracle);
-    let price = client.try_get_price(token).map_err(|_| StreamError::OracleError)?;
-    let price = price.map_err(|_| StreamError::OracleError)?;
+    let price = client.try_get_price(token).map_err(|_| StreamError::PriceDeviationTooHigh)?;
+    let price = price.map_err(|_| StreamError::PriceDeviationTooHigh)?;
     if price <= 0 {
-        return Err(StreamError::OracleError);
+        return Err(StreamError::PriceDeviationTooHigh);
     }
     Ok(price)
 }
@@ -41,14 +41,14 @@ pub fn fetch_price(env: &Env, oracle: &Address, token: &Address) -> Result<i128,
 ///   `deviation_bps = abs(current - creation) * 10_000 / creation`
 ///
 /// Returns `StreamError::PriceDeviationTooHigh` when the threshold is breached.
-/// Returns `StreamError::OracleError` if `creation_price` is 0 (division guard).
+/// Returns `StreamError::PriceDeviationTooHigh` if `creation_price` is 0 (division guard).
 pub fn assert_price_within_bounds(
     creation_price: i128,
     current_price: i128,
     max_deviation_bps: u32,
 ) -> Result<u32, StreamError> {
     if creation_price <= 0 {
-        return Err(StreamError::OracleError);
+        return Err(StreamError::PriceDeviationTooHigh);
     }
     let diff = (current_price - creation_price).abs();
     // deviation_bps = diff * 10_000 / creation_price  (integer arithmetic, floors)
@@ -56,7 +56,7 @@ pub fn assert_price_within_bounds(
         .checked_mul(10_000)
         .ok_or(StreamError::Overflow)?
         .checked_div(creation_price)
-        .ok_or(StreamError::OracleError)? as u32;
+        .ok_or(StreamError::PriceDeviationTooHigh)? as u32;
 
     if deviation_bps > max_deviation_bps {
         return Err(StreamError::PriceDeviationTooHigh);

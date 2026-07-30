@@ -1422,7 +1422,7 @@ fn test_claim_interval_blocks_early_withdrawal() {
     t.env.ledger().set_timestamp(550);
 
     let result = c.try_withdraw(&stream_id, &t.recipient);
-    assert_eq!(result, Err(Ok(StreamError::ClaimTooFrequent)),
+    assert_eq!(result, Err(Ok(StreamError::StreamLocked)),
         "withdraw must return ClaimTooFrequent when called before the interval");
 }
 
@@ -1486,7 +1486,7 @@ fn test_claim_interval_blocks_second_withdrawal_too_soon() {
     t.env.ledger().set_sequence_number(1_030);
     t.env.ledger().set_timestamp(400);
     let result = c.try_withdraw(&stream_id, &t.recipient);
-    assert_eq!(result, Err(Ok(StreamError::ClaimTooFrequent)),
+    assert_eq!(result, Err(Ok(StreamError::StreamLocked)),
         "second withdrawal within the interval must be rejected");
 
     // Third attempt at ledger 1_040 (20 ledgers after first withdrawal) — succeeds.

@@ -22,10 +22,7 @@ pub enum VestingCurve {
     ///
     /// A `decay_factor` of `0` degenerates to linear behaviour.
     /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
-    TimeDecay {
-        /// Decay rate in basis points per 1 000-second window (0–9 999).
-        decay_factor: u32,
-    },
+    TimeDecay(u32),
 }
 
 /// A single step-vesting tranche: tokens that unlock atomically at `unlock_time`.
@@ -56,9 +53,6 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
-    /// Stream was swept by the admin due to inactivity exceeding the dormancy threshold.
-    /// Remaining deposit was refunded to the sender.
-    DormantCancelled,
 }
 
 /// Status of a milestone.
@@ -227,20 +221,12 @@ pub struct Stream {
     /// Recipients can still `withdraw` normally; admin pause is unaffected.
     pub sender_locked: bool,
 
-    // ── Withdrawal window (business hours gating) ────────────────────────────
-
-    /// Optional withdrawal time window in UTC seconds-of-day format.
-    ///
-    /// When `Some((start, end))`, withdrawals are only allowed when the
-    /// ledger time's time-of-day falls within [start, end) seconds.
-    /// For example, business hours 9 AM - 5 PM UTC would be (32400, 61200).
-    /// 
-    /// Used for regulatory compliance (e.g., licensed financial institutions
-    /// restricting withdrawals to business hours). Enables compliance without
-    /// external orchestration.
-    ///
-    /// `None` means withdrawals are allowed at any time (default).
-    pub withdraw_window: Option<(u32, u32)>,
+    /// Whether the StreamExpiryWarning event has already been emitted.
+    pub expiry_warning_emitted: bool,
+    /// Optional redirect target stream ID.
+    pub redirect_to_stream_id: Option<u64>,
+    /// Whether this stream is a dual-token stream.
+    pub is_dual_stream: bool,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
@@ -273,33 +259,9 @@ pub struct StreamHealth {
     /// Stream end timestamp (Unix seconds).
     pub end_time: u64,
     /// Ledgers remaining before the stream's persistent storage entry expires.
-    /// A value of 0 means the TTL information could not be determined
-    /// (e.g. the entry has already expired or the query is not supported).
     pub ttl_remaining_ledgers: u32,
     /// Derived health classification based on `ttl_remaining_ledgers`.
     pub status: HealthStatus,
-    // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
-
-    /// Whether the `StreamExpiryWarning` event has already been emitted for this
-    /// stream in the current expiry window.  Prevents duplicate warnings when
-    /// multiple interactions occur before `end_time`.
-    pub expiry_warning_emitted: bool,
-
-    // ── Feature (c): Stream redirect ─────────────────────────────────────────
-
-    /// Optional ID of the stream that claimed tokens should be forwarded into.
-    /// When set, a `withdraw` call on this stream will top-up the target stream
-    /// instead of transferring tokens directly to the recipient.
-    /// The target stream's recipient must equal this stream's recipient.
-    pub redirect_to_stream_id: Option<u64>,
-
-    // ── Feature (d): Dual-token streams ──────────────────────────────────────
-
-    /// Whether this stream is a dual-token stream.
-    /// When `true`, a second token (`token2`) and second deposit (`deposit2`) are
-    /// stored separately in persistent storage.  The `token` and `deposit` fields
-    /// represent the primary (first) token allocation as usual.
-    pub is_dual_stream: bool,
 }
 
 /// Aggregate contract statistics.
@@ -326,41 +288,4 @@ pub struct AuditEntry {
     pub timestamp: u64,
     /// Serialised parameters (JSON-style string for human readability).
     pub params: String,
-}
-
-/// A single recipient in a split stream with their proportional weight.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct SplitStreamRecipient {
-    /// The recipient's address.
-    pub recipient: Address,
-    /// The recipient's weight in basis points (0–10,000).
-    /// Must sum to 10,000 across all recipients.
-    pub weight_bps: u16,
-}
-
-/// Represents a split stream: a single deposit distributed across multiple recipients.
-///
-/// A split stream is a collection of N sub-streams, each with a proportional
-/// allocation of the total deposit based on basis points. This enables efficient
-/// royalty distribution, fee splitting, and multi-recipient payments.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct SplitStream {
-    /// Unique split stream identifier.
-    pub split_stream_id: u64,
-    /// Address of the split stream creator / payer.
-    pub sender: Address,
-    /// List of recipients and their basis point weights.
-    pub recipients: Vec<SplitStreamRecipient>,
-    /// Token address used for all sub-streams.
-    pub token: Address,
-    /// Total deposit amount distributed across all sub-streams.
-    pub total_deposit: i128,
-    /// Stream IDs corresponding to each recipient (1:1 with recipients vec).
-    pub stream_ids: Vec<u64>,
-    /// Duration in seconds for each sub-stream.
-    pub duration_seconds: u64,
-    /// Ledger timestamp when the split stream was created.
-    pub created_at: u64,
 }
