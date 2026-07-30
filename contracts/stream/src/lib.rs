@@ -4271,6 +4271,11 @@ impl SoroStreamContract {
     pub fn bump_stream_ttl(env: Env, stream_id: u64) -> Result<(), StreamError> {
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != caller && stream.recipient != caller {
+            return Err(StreamError::NotAuthorized);
+        }
+        if stream.status != StreamStatus::Active {
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
         }
