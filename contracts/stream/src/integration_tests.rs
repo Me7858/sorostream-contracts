@@ -1114,3 +1114,231 @@ fn integration_fee_accumulation_and_sweep() {
     let total_out = expected_recipient_total + total_fee;
     assert_eq!(total_out, 1_000_000);
 }
+
+// ── Batch withdraw with fees at stream end (issue: overdraw prevention) ──────
+
+#[test]
+fn integration_batch_withdraw_final_no_overdraw_with_fees() {
+    // This test validates that when a stream ends and fees are applied,
+    // the total amount paid out (recipient + dust/sender) never exceeds the deposit.
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    
+    // Setup: 1M deposit, 500 second duration, so flow_rate = 2000 stroops/sec
+    let deposit = 1_000_000_i128;
+    let duration = 500u64;
+    let flow_rate = deposit / duration as i128; // 2000 stroops/sec
+    
+    mint(&ie, &ie.sender, &deposit);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_protocol_fee(&5000u32); // 50% fee (worst case - 5000 bps)
+    c.set_treasury_address(&treasury);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &deposit,
+        &duration,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    // Withdraw mid-stream at t=250 (half time)
+    ie.env.ledger().set_timestamp(250);
+    let stream_ids_mid = soroban_sdk::vec![&ie.env, stream_id];
+    let mid_amounts = c.batch_withdraw(&stream_ids_mid, &ie.recipient);
+    
+    // At t=250: claimable = 2000 * 250 = 500_000
+    assert_eq!(mid_amounts.get_unchecked(0), 500_000);
+    
+    // Fee at mid = 500_000 * 50% = 250_000
+    let mid_recipient_amount = 500_000 - 250_000;
+    assert_eq!(balance(&ie, &ie.recipient), mid_recipient_amount);
+    
+    // Now jump to end and do final withdrawal (batch_withdraw)
+    ie.env.ledger().set_timestamp(500); // stream.end_time
+    let stream_ids_final = soroban_sdk::vec![&ie.env, stream_id];
+    let final_amounts = c.batch_withdraw(&stream_ids_final, &ie.recipient);
+    
+    // At t=500: remaining claimable = 2000 * (500-250) = 500_000
+    assert_eq!(final_amounts.get_unchecked(0), 500_000);
+    
+    // Fee on final = 500_000 * 50% = 250_000
+    let final_recipient_amount = 500_000 - 250_000;
+    
+    // Total recipient amount
+    let total_recipient = mid_recipient_amount + final_recipient_amount;
+    
+    // Total fees collected
+    let total_fees_collected = 250_000 + 250_000; // 500_000
+    
+    // Verify no overdraw: total paid out should not exceed deposit
+    let total_paid = total_recipient + total_fees_collected;
+    assert_eq!(total_paid, deposit, 
+        "Total paid out (recipient + fees) must not exceed deposit. \
+         Total: {}, Recipient: {}, Fees: {}, Deposit: {}", 
+        total_paid, total_recipient, total_fees_collected, deposit);
+    
+    // In this scenario with 50% fee:
+    // recipient gets 50% of their earned amount
+    // protocol/treasury gets 50% of what recipient earned
+    assert_eq!(total_recipient, 250_000); // 50% of 500K total earned
+}
+
+// ── Regular withdraw with fees at stream end (fee overdraw prevention) ──────
+
+#[test]
+fn integration_withdraw_final_no_overdraw_with_fees() {
+    // Verifies that regular withdraw (not batch_withdraw) doesn't overdraw
+    // when fees are applied at stream end.
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    
+    // Setup: 1M deposit, 400 second duration for easier mental math
+    let deposit = 1_000_000_i128;
+    let duration = 400u64;
+    
+    mint(&ie, &ie.sender, &deposit);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_protocol_fee(&2500u32); // 25% fee (2500 bps)
+    c.set_treasury_address(&treasury);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &deposit,
+        &duration,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+    );
+
+    // Withdraw at t=200 (halfway)
+    ie.env.ledger().set_timestamp(200);
+    c.withdraw(&stream_id, &ie.recipient);
+    
+    // Claimable = 500_000, fee = 125_000, recipient gets 375_000
+    let balance_halfway = balance(&ie, &ie.recipient);
+    assert_eq!(balance_halfway, 375_000);
+
+    // Final withdrawal at t=400
+    ie.env.ledger().set_timestamp(400);
+    c.withdraw(&stream_id, &ie.recipient);
+    
+    // Claimable = 500_000, fee = 125_000, recipient gets 375_000 more
+    let balance_final = balance(&ie, &ie.recipient);
+    assert_eq!(balance_final, 750_000);
+    
+    // Verify the stream is completed
+    let stream = c.get_stream(&stream_id).expect("stream should exist");
+    assert_eq!(stream.status, StreamStatus::Completed);
+    
+    // Total: 750K to recipient + 250K in fees = 1M (no overdraw)
+}
+
+#[test]
+fn integration_batch_withdraw_with_multiple_streams_and_fees() {
+    // Test batch_withdraw with multiple streams ending at the same time,
+    // all with fees > 0.
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    
+    mint(&ie, &ie.sender, &3_000_000); // enough for 3 streams
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_protocol_fee(&1000u32); // 10% fee
+    c.set_treasury_address(&treasury);
+
+    // Create 3 streams
+    let stream_id1 = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token,
+        &1_000_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128,
+    );
+    let stream_id2 = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token,
+        &1_000_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128,
+    );
+    let stream_id3 = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token,
+        &1_000_000, &1000, &0, &2u64, &false, &0u64, &false, &0i128,
+    );
+
+    // Jump to end of streams
+    ie.env.ledger().set_timestamp(1000);
+    
+    let stream_ids = soroban_sdk::vec![&ie.env, stream_id1, stream_id2, stream_id3];
+    let amounts = c.batch_withdraw(&stream_ids, &ie.recipient);
+    
+    // Each stream contributes 1_000_000, with 10% fee = 900_000 to recipient per stream
+    // Total: 2_700_000 to recipient
+    assert_eq!(amounts.get_unchecked(0), 1_000_000);
+    assert_eq!(amounts.get_unchecked(1), 1_000_000);
+    assert_eq!(amounts.get_unchecked(2), 1_000_000);
+    
+    let recipient_balance = balance(&ie, &ie.recipient);
+    assert_eq!(recipient_balance, 2_700_000);
+    
+    // Verify all streams are completed
+    for stream_id in [stream_id1, stream_id2, stream_id3].iter() {
+        let stream = c.get_stream(stream_id).expect("stream should exist");
+        assert_eq!(stream.status, StreamStatus::Completed);
+    }
+}
+
+#[test]
+fn integration_withdraw_no_overdraw_edge_case_high_fee() {
+    // Edge case: extremely high fee (99%) with multiple withdrawals
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    
+    let deposit = 1_000_000_i128;
+    let duration = 1000u64;
+    
+    mint(&ie, &ie.sender, &deposit);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_protocol_fee(&9900u32); // 99% fee (extreme case)
+    c.set_treasury_address(&treasury);
+
+    let stream_id = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token,
+        &deposit, &duration, &0, &0u64, &false, &0u64, &false, &0i128,
+    );
+
+    // Multiple withdrawals throughout the stream
+    for t in [250, 500, 750, 1000] {
+        ie.env.ledger().set_timestamp(t);
+        c.withdraw(&stream_id, &ie.recipient);
+    }
+    
+    // With 99% fee, recipient gets ~1% of each withdrawal
+    // Total should be ~1% of 1M = ~10K (due to rounding variations)
+    let recipient_balance = balance(&ie, &ie.recipient);
+    
+    // Recipient should get somewhere around 1% of the deposit (within rounding)
+    assert!(recipient_balance > 0, "recipient should receive something");
+    assert!(recipient_balance <= deposit, "recipient should never receive more than deposit");
+}

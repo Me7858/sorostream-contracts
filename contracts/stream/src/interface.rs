@@ -36,6 +36,9 @@ pub trait SoroStreamInterface {
         holdback_amount: i128,
         withdrawal_steps: Option<u32>,
         min_withdrawal_amount: Option<i128>,
+        non_transferable: bool,
+        requires_recipient_approval: bool,
+        withdraw_window: Option<(u32, u32)>,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -64,6 +67,7 @@ pub trait SoroStreamInterface {
         allow_recipient_termination: bool,
         oracle: Option<Address>,
         max_price_deviation_bps: u32,
+        withdraw_window: Option<(u32, u32)>,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_curve(
@@ -79,6 +83,7 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
         curve: VestingCurve,
+        withdraw_window: Option<(u32, u32)>,
     ) -> Result<u64, StreamError>;
 
     fn register_federation(env: Env, admin: Address, federation_name: String, stellar_address: Address) -> Result<(), StreamError>;
@@ -169,6 +174,19 @@ pub trait SoroStreamInterface {
     /// Returns `0` for unknown/never-used token addresses rather than erroring.
     /// Read-only, no auth required.
     fn get_stream_count_by_token(env: Env, token: Address) -> u64;
+
+    /// Returns the number of currently active streams created by a specific sender.
+    ///
+    /// This counter tracks only ACTIVE streams (not cancelled/completed).
+    /// Returns `0` if the sender has never created any streams or all streams are inactive.
+    /// Read-only, no auth required.
+    ///
+    /// # Parameters
+    /// * `sender` - The address of the stream creator to query
+    ///
+    /// # Returns
+    /// The count of currently active streams for this sender
+    fn get_active_stream_count_by_sender(env: Env, sender: Address) -> u32;
 
     fn min_duration(env: Env) -> u64;
     fn set_min_duration(env: Env, admin: Address, seconds: u64);
@@ -385,8 +403,93 @@ pub trait SoroStreamInterface {
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError>;
 
-    // ── Issue #358: Pending streams view ────────────────────────────────────
+    /// Creates a split stream: a single deposit distributed across multiple recipients.
+    ///
+    /// Each recipient receives a proportional allocation of the total deposit based
+    /// on their weight in basis points (bps). This enables efficient royalty distribution,
+    /// fee splitting, and multi-recipient payments.
+    ///
+    /// # Parameters
+    /// * `sender` - The split stream creator / payer. Must have sufficient balance
+    ///   of `token` to cover the total deposit.
+    /// * `recipients` - Vector of `(address, weight_bps)` tuples where `weight_bps`
+    ///   is the recipient's proportional weight.
+    /// * `token` - The token address used for all sub-streams.
+    /// * `total_deposit` - Total amount to be distributed. Must be > 0.
+    /// * `duration_seconds` - Duration in seconds for each sub-stream. Must be within
+    ///   contract-defined min/max duration bounds.
+    /// * `nonce` - A unique value (per sender) used to derive deterministic stream IDs.
+    ///
+    /// # Returns
+    /// The `split_stream_id` identifying the split stream and the vector of sub-stream IDs
+    /// (one per recipient).
+    ///
+    /// # Validation
+    /// - All weights must sum to exactly 10,000 basis points (100.00%).
+    /// - At least 1 recipient is required.
+    /// - No duplicate recipients are allowed.
+    /// - `total_deposit` and `duration_seconds` must satisfy standard stream creation constraints.
+    /// - Sender must authorize the transaction.
+    ///
+    /// # Errors
+    /// - `InvalidWeights` if weights do not sum to exactly 10,000.
+    /// - `EmptyRecipientList` if no recipients are provided.
+    /// - `DuplicateRecipient` if the same address appears multiple times.
+    /// - `ZeroAmount` if `total_deposit <= 0`.
+    /// - `ZeroFlowRate` if any resulting sub-stream amount has `amount / duration_seconds == 0`.
+    /// - `InsufficientBalance` if sender lacks sufficient token balance.
+    /// - `InvalidDuration` if `duration_seconds` is outside [min, max] bounds.
+    /// - Other standard stream creation errors may also apply.
+    ///
+    /// # Event
+    /// Emits `SplitStreamCreated` with the split stream ID, sender, recipients,
+    /// weights, token, and duration.
+    fn create_split_stream(
+        env: Env,
+        sender: Address,
+        recipients: Vec<(Address, u16)>,
+        token: Address,
+        total_deposit: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+    ) -> Result<(u64, Vec<u64>), StreamError>;
 
-    /// Returns all stream IDs for `sender` whose `start_time` is still in the future.
-    fn get_pending_streams(env: Env, sender: Address) -> Vec<u64>;
+    /// Sets the dormancy threshold in days for stream sweeping (0 = disabled).
+    ///
+    /// Only the admin may call this.
+    ///
+    /// # Parameters
+    /// * `admin` - The caller (must be contract admin)
+    /// * `days` - Number of days of inactivity before a stream can be swept (0 = disable)
+    fn set_dormancy_days(env: Env, admin: Address, days: u32) -> Result<(), StreamError>;
+
+    /// Gets the current dormancy threshold in days (0 = disabled).
+    ///
+    /// Read-only, no auth required.
+    fn get_dormancy_days(env: Env) -> u32;
+
+    /// Sweeps dormant streams and reclaims their funds.
+    ///
+    /// Only the admin may call this. For each stream in the provided list that meets
+    /// the dormancy criteria (inactive for >= dormancy_days), the admin cancels it:
+    /// - Remaining deposit is refunded to the sender
+    /// - Stream status is set to DormantCancelled
+    /// - DormantStreamCancelled event is emitted
+    ///
+    /// Streams that do not meet dormancy criteria are skipped silently (no error).
+    /// Dormancy is measured as: `now - last_withdraw_time >= dormancy_days * 86400`
+    ///
+    /// # Parameters
+    /// * `admin` - The caller (must be contract admin)
+    /// * `stream_ids` - Vector of stream IDs to sweep
+    ///
+    /// # Errors
+    /// - `NotAdmin` if caller is not the contract admin
+    /// - `StreamNotFound` if any stream_id doesn't exist (before checking dormancy)
+    /// - Other standard errors may apply
+    ///
+    /// # Events
+    /// Emits `DormantStreamCancelled` for each successfully swept stream
+    fn sweep_dormant_streams(env: Env, admin: Address, stream_ids: Vec<u64>) -> Result<(), StreamError>;
 }

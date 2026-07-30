@@ -97,4 +97,6 @@ pub enum StreamError {
     /// `cancel_stream` was called by the sender on a stream they have irrevocably
     /// locked via `lock_stream`.
     StreamIsLocked = 60,
+    /// Withdrawal attempted outside the configured withdrawal window (business hours).
+    OutsideWithdrawWindow = 61,
 }
