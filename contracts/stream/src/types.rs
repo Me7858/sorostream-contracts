@@ -56,6 +56,9 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
+    /// Stream was swept by the admin due to inactivity exceeding the dormancy threshold.
+    /// Remaining deposit was refunded to the sender.
+    DormantCancelled,
 }
 
 /// Status of a milestone.
@@ -223,6 +226,21 @@ pub struct Stream {
     /// the sender (or their delegate) returns `StreamError::StreamIsLocked`.
     /// Recipients can still `withdraw` normally; admin pause is unaffected.
     pub sender_locked: bool,
+
+    // ── Withdrawal window (business hours gating) ────────────────────────────
+
+    /// Optional withdrawal time window in UTC seconds-of-day format.
+    ///
+    /// When `Some((start, end))`, withdrawals are only allowed when the
+    /// ledger time's time-of-day falls within [start, end) seconds.
+    /// For example, business hours 9 AM - 5 PM UTC would be (32400, 61200).
+    /// 
+    /// Used for regulatory compliance (e.g., licensed financial institutions
+    /// restricting withdrawals to business hours). Enables compliance without
+    /// external orchestration.
+    ///
+    /// `None` means withdrawals are allowed at any time (default).
+    pub withdraw_window: Option<(u32, u32)>,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
@@ -308,4 +326,41 @@ pub struct AuditEntry {
     pub timestamp: u64,
     /// Serialised parameters (JSON-style string for human readability).
     pub params: String,
+}
+
+/// A single recipient in a split stream with their proportional weight.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SplitStreamRecipient {
+    /// The recipient's address.
+    pub recipient: Address,
+    /// The recipient's weight in basis points (0–10,000).
+    /// Must sum to 10,000 across all recipients.
+    pub weight_bps: u16,
+}
+
+/// Represents a split stream: a single deposit distributed across multiple recipients.
+///
+/// A split stream is a collection of N sub-streams, each with a proportional
+/// allocation of the total deposit based on basis points. This enables efficient
+/// royalty distribution, fee splitting, and multi-recipient payments.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SplitStream {
+    /// Unique split stream identifier.
+    pub split_stream_id: u64,
+    /// Address of the split stream creator / payer.
+    pub sender: Address,
+    /// List of recipients and their basis point weights.
+    pub recipients: Vec<SplitStreamRecipient>,
+    /// Token address used for all sub-streams.
+    pub token: Address,
+    /// Total deposit amount distributed across all sub-streams.
+    pub total_deposit: i128,
+    /// Stream IDs corresponding to each recipient (1:1 with recipients vec).
+    pub stream_ids: Vec<u64>,
+    /// Duration in seconds for each sub-stream.
+    pub duration_seconds: u64,
+    /// Ledger timestamp when the split stream was created.
+    pub created_at: u64,
 }
