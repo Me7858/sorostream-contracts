@@ -339,10 +339,20 @@ impl SoroStreamContract {
     pub fn get_pause_expiry(env: Env) -> u64 { get_pause_expiry(&env) }
 
     pub fn add_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError> {
-        check_admin(&env); add_fee_exempt(&env, &addr); Ok(())
+        let admin = storage::read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        admin.require_auth();
+        check_admin(&env);
+        add_fee_exempt(&env, &addr);
+        events::fee_exemption_added(&env, &admin, &addr);
+        Ok(())
     }
     pub fn remove_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError> {
-        check_admin(&env); remove_fee_exempt(&env, &addr); Ok(())
+        let admin = storage::read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        admin.require_auth();
+        check_admin(&env);
+        remove_fee_exempt(&env, &addr);
+        events::fee_exemption_removed(&env, &admin, &addr);
+        Ok(())
     }
     pub fn is_fee_exempt(env: Env, addr: Address) -> bool { is_fee_exempt(&env, &addr) }
 
@@ -727,6 +737,16 @@ impl SoroStreamContract {
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream.token);
         }
+
+        // Issue #357: store optional inheritance recipient.
+        if let Some(ref heir) = inherit_recipient {
+            storage::set_inherit_recipient(&env, stream_id, heir);
+        }
+
+        // Issue #358: add to pending index when start_time is in the future.
+        // (start_time == now for this function, so nothing to index here unless
+        //  create_stream_with_future_start is used. Pending index is populated by
+        //  callers that set start_time > now, which is not this function path.)
 
         // Update sender's last stream creation time (Issue #239)
         set_sender_last_creation_time(&env, &sender, now);
@@ -2457,10 +2477,9 @@ impl SoroStreamContract {
         // ── Linear-vesting cancellation (original logic) ────────────────────
 
         // Issue #13: Cliff enforcement on cancellation.
-        // If the current time is before the cliff, the recipient has earned nothing
-        // yet. We short-circuit to zero rather than calling compute_earned which
-        // would compute flow_rate × elapsed and over-pay the recipient.
-        let recipient_amount = if now < stream.cliff_time {
+        // If the current time is at or before the cliff, the recipient has earned
+        // nothing yet (#299 off-by-one fix: use strict > comparison).
+        let recipient_amount = if now <= stream.cliff_time {
             0i128
         } else {
             let earned = vesting_math::compute_earned(
@@ -2632,7 +2651,7 @@ impl SoroStreamContract {
 
         if now >= stream.lock_until {
             let effective_now = now.min(stream.end_time);
-            if now >= stream.cliff_time {
+            if now > stream.cliff_time {
                 let raw_claimable = vesting_math::compute_claimable(
                     stream.flow_rate,
                     now,
@@ -3227,9 +3246,9 @@ impl SoroStreamContract {
         }
 
         // ── Issue #13: Cliff enforcement ─────────────────────────────────────
-        // If the current time is strictly before cliff_time, no tokens are
-        // claimable regardless of time elapsed since start_time.
-        if now < stream.cliff_time {
+        // Tokens are only claimable when now > cliff_time (strict).  A timestamp
+        // exactly equal to cliff_time must not reveal balance (#299 off-by-one fix).
+        if now <= stream.cliff_time {
             return Ok(0);
         }
 
@@ -3337,6 +3356,27 @@ impl SoroStreamContract {
             }
         }
         streams
+    }
+
+    /// Returns all pending stream IDs for a sender where `start_time > now`.
+    ///
+    /// Iterates the pending index for `sender`, loads each stream, and returns only
+    /// those whose `start_time` is strictly after the current ledger timestamp.
+    /// Entries that have already started are silently skipped (lazy cleanup).
+    pub fn get_pending_streams(env: Env, sender: Address) -> Vec<u64> {
+        let now = env.ledger().timestamp();
+        let ids = storage::get_pending_ids(&env, &sender);
+        let mut pending = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(s) = load_stream(&env, id) {
+                if s.start_time > now {
+                    pending.push_back(id);
+                }
+                // Streams that have already started are left in the index;
+                // they will be cleaned up on the next remove_from_pending_index call.
+            }
+        }
+        pending
     }
 
     /// Pauses an active stream.
@@ -4527,6 +4567,7 @@ impl SoroStreamInterface for SoroStreamContract {
             None,  // min_withdrawal_amount
             false, // non_transferable
             false, // requires_recipient_approval
+            None,  // inherit_recipient
         )
     }
 
