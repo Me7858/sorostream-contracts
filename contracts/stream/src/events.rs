@@ -233,7 +233,7 @@ pub fn metadata_uri_updated(env: &Env, stream_id: u64, metadata_uri: &Option<Str
     let uri_str = if let Some(uri) = metadata_uri {
         uri.clone()
     } else {
-        String::from_slice(env, "")
+        String::from_str(env, "")
     };
     env.events().publish(
         (Symbol::new(env, "MetadataUriUpdated"), stream_id),

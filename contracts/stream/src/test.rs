@@ -469,7 +469,7 @@ fn test_zero_duration_fails() {
     );
 
     // Should fail with ZeroDuration error
-    assert_eq!(result, Err(Ok(StreamError::ZeroDuration)));
+    assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
 }
 
 /// cliff_seconds >= duration_seconds must fail with InvalidCliff.
@@ -1472,7 +1472,8 @@ fn error_invalid_partial_cancel_exceeds_remainder() {
 
 // â”€â”€ Overflow / checked-arithmetic tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// `create_stream` with `now + duration_seconds` overflowing u64 must return
+/// `create_stream` with 
+ow + duration_seconds` overflowing u64 must return
 /// `StreamError::Overflow` instead of panicking.
 #[test]
 fn test_create_stream_end_time_overflow() {
@@ -1491,7 +1492,8 @@ fn test_create_stream_end_time_overflow() {
     assert!(result.is_err());
 }
 
-/// `create_stream` with `now + cliff_seconds` overflowing u64 must return an error.
+/// `create_stream` with 
+ow + cliff_seconds` overflowing u64 must return an error.
 #[test]
 fn test_create_stream_cliff_time_overflow() {
     let t = setup();
@@ -4265,7 +4267,10 @@ fn test_create_stream_minimum_withdraw_full_deposit() {
 
     t.env.ledger().set_timestamp(0);
 
-        &Some(4u32),`n        &None::<i128>,`n        &None::<u32>,`n    );
+        &Some(4u32),
+        &None::<i128>,
+        &None::<u32>,
+    );
 
     // Withdraw steps 1-3.
     for step in 1u64..=3 {
@@ -4312,7 +4317,10 @@ fn test_steps_zero_steps_rejected_at_creation() {
         &0u64,
         &false,
         &0i128,
-        &Some(0u32),`n        &None::<i128>,`n        &None::<u32>,`n    );
+        &Some(0u32),
+        &None::<i128>,
+        &None::<u32>,
+    );
     assert_eq!(
         result,
         Err(Ok(StreamError::InvalidDuration)),
@@ -4727,7 +4735,10 @@ fn test_stream_config_event_emitted_with_steps() {
         after.end_time,
         before.end_time + 1,
         "1-stroop top-up on a flow_rate=1 stream should add exactly 1 second"
-        &Some(4u32),`n        &None::<i128>,`n        &None::<u32>,`n    );
+        &Some(4u32),
+        &None::<i128>,
+        &None::<u32>,
+    );
 
     use soroban_sdk::testutils::Events;
     let config_events: std::vec::Vec<_> = t.env.events().all().iter().filter(|(_, topics, _)| {

@@ -403,7 +403,7 @@ fn test_contract_decay_curve_stored_and_claimable_gte_linear() {
         &t.sender, &t.recipient, &t.token_id,
         &deposit, &duration, &0u64,
         &0u64, &false, &0u64, &false,
-        &VestingCurve::TimeDecay { decay_factor: df },
+        &VestingCurve::TimeDecay(df),
     );
     StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &deposit);
     let linear_id = c.create_stream_with_curve(
@@ -415,7 +415,7 @@ fn test_contract_decay_curve_stored_and_claimable_gte_linear() {
     );
 
     let stream = c.get_stream(&decay_id);
-    assert_eq!(stream.curve, VestingCurve::TimeDecay { decay_factor: df });
+    assert_eq!(stream.curve, VestingCurve::TimeDecay(df));
 
     // Check at several time points that decay ≥ linear.
     for elapsed in [1000u64, 3000, 5000, 7000, 9000, 10_000] {
@@ -443,7 +443,7 @@ fn test_contract_decay_withdraw_pays_correct_amount() {
         &t.sender, &t.recipient, &t.token_id,
         &deposit, &duration, &0u64,
         &0u64, &false, &0u64, &false,
-        &VestingCurve::TimeDecay { decay_factor: df },
+        &VestingCurve::TimeDecay(df),
     );
 
     // Advance past 2 windows (t=2000).
@@ -476,7 +476,7 @@ fn test_contract_decay_full_withdrawal_at_end_time() {
         &t.sender, &t.recipient, &t.token_id,
         &deposit, &duration, &0u64,
         &0u64, &false, &0u64, &false,
-        &VestingCurve::TimeDecay { decay_factor: df },
+        &VestingCurve::TimeDecay(df),
     );
 
     // Move to end_time.
@@ -509,7 +509,7 @@ fn test_contract_simulate_claimable_sequence() {
         &t.sender, &t.recipient, &t.token_id,
         &deposit, &duration, &0u64,
         &0u64, &false, &0u64, &false,
-        &VestingCurve::TimeDecay { decay_factor: df },
+        &VestingCurve::TimeDecay(df),
     );
 
     // simulate_claimable is read-only and query_time-driven — ledger time doesn't matter.

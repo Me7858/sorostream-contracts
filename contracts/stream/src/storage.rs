@@ -1,5 +1,5 @@
 use crate::types::{AuditEntry, Stream, VestingTranche};
-use soroban_sdk::{Address, Bytes, Env, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
 const PAUSED_KEY: &str = "paused";
@@ -22,7 +22,6 @@ const CREATION_FEE_XLM_KEY: &str = "cf_xlm";
 /// Default maximum start-time offset: 365 days in seconds.
 pub const DEFAULT_MAX_FUTURE_START_OFFSET: u64 = 365 * 24 * 60 * 60;
 const MAX_FUTURE_OFFSET_KEY: &str = "mf_start";
-const DORMANCY_DAYS_KEY: &str = "dorm_days";
 
 /// Stores the contract admin address.
 pub fn write_admin(env: &Env, admin: &Address) {
@@ -397,27 +396,6 @@ pub fn write_max_duration(env: &Env, duration: u64) {
         .set(&Symbol::new(env, MAX_DURATION_KEY), &duration);
 }
 
-/// Gets the dormancy threshold in days (0 = dormancy sweeping disabled).
-///
-/// Streams inactive (no withdrawals) for longer than this period can be swept
-/// by the admin to reclaim funds and storage.
-pub fn get_dormancy_days(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, DORMANCY_DAYS_KEY))
-        .unwrap_or(0u32)
-}
-
-/// Sets the dormancy threshold in days (0 = disable sweeping).
-///
-/// When set to N > 0, the admin can sweep streams that have not received
-/// withdrawals for at least N days, refunding remaining deposit to the sender.
-pub fn set_dormancy_days(env: &Env, days: u32) {
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, DORMANCY_DAYS_KEY), &days);
-}
-
 /// Gets the maximum allowed future start-time offset in seconds.
 ///
 /// When a caller creates a scheduled stream with an explicit `start_time`,
@@ -764,13 +742,6 @@ pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
     get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
 }
 
-// --- Accumulated fees per token (sweep_fees #222) ---
-
-fn fees_collected_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "fc"), token.clone())
-}
-
-/// Returns the total accumulated (unsewpt) fees for the given token.
 // --- Holdback escrow helpers ---
 
 fn holdback_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
@@ -797,6 +768,8 @@ pub fn remove_holdback(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&holdback_key(env, stream_id));
+}
+
 // ---------------------------------------------------------------------------
 // Step-vesting tranche helpers
 // ---------------------------------------------------------------------------
@@ -826,6 +799,8 @@ pub fn remove_tranches(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&tranche_key(env, stream_id));
+}
+
 // --- Rate Limiting ---
 
 const RATE_LIMIT_WINDOW_KEY: &str = "rl_win";
@@ -992,6 +967,8 @@ pub fn drain_fees_collected(env: &Env, token: &Address) -> i128 {
             .remove(&fees_collected_key(env, token));
     }
     amount
+}
+
 /// Sets accumulated fees for a token.
 pub fn set_fees_collected(env: &Env, token: &Address, amount: i128) {
     env.storage()
@@ -1380,306 +1357,4 @@ pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
     remove_dual_stream_token2(env, stream_id);
     remove_dual_stream_deposit2(env, stream_id);
     remove_dual_stream_withdrawn2(env, stream_id);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Per-token active stream count
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Storage key for the active stream count of a specific token: ("tsc", token).
-fn token_stream_count_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "tsc"), token.clone())
-}
-
-/// Returns the number of currently active streams for the given token address.
-/// Returns 0 for unknown tokens rather than erroring.
-pub fn get_token_stream_count(env: &Env, token: &Address) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&token_stream_count_key(env, token))
-        .unwrap_or(0u64)
-}
-
-/// Increments the active stream count for a token by 1.
-///
-/// Called on every successful stream creation.
-pub fn increment_token_stream_count(env: &Env, token: &Address) {
-    let key = token_stream_count_key(env, token);
-    let current = get_token_stream_count(env, token);
-    let next = current.checked_add(1).expect("token stream count overflow");
-    env.storage().persistent().set(&key, &next);
-}
-
-/// Decrements the active stream count for a token by 1, saturating at 0.
-///
-/// Called on stream cancellation, expiry, or natural completion.
-pub fn decrement_token_stream_count(env: &Env, token: &Address) {
-    let key = token_stream_count_key(env, token);
-    let current = get_token_stream_count(env, token);
-    if current > 0 {
-        env.storage().persistent().set(&key, &(current - 1));
-    }
-}
-
-
-// --- Split Stream Storage ---
-
-use crate::types::{SplitStream, SplitStreamRecipient};
-
-const SPLIT_STREAM_COUNT_KEY: &str = "sps_cnt";
-
-/// Returns a storage key for a split stream by ID.
-fn split_stream_key(split_stream_id: u64) -> u64 {
-    split_stream_id
-}
-
-/// Derives a deterministic split stream ID from sender, token, nonce, and creation time.
-pub fn derive_split_stream_id(
-    env: &Env,
-    sender: &Address,
-    token: &Address,
-    nonce: u64,
-    created_at: u64,
-) -> u64 {
-    let mut buf = Bytes::new(env);
-    buf.append(&sender.to_xdr(env));
-    buf.append(&token.to_xdr(env));
-    buf.append(&Bytes::from_array(env, &nonce.to_be_bytes()));
-    buf.append(&Bytes::from_array(env, &created_at.to_be_bytes()));
-    let hash = env.crypto().sha256(&buf);
-    let hash_bytes = hash.to_array();
-    u64::from_be_bytes([
-        hash_bytes[0],
-        hash_bytes[1],
-        hash_bytes[2],
-        hash_bytes[3],
-        hash_bytes[4],
-        hash_bytes[5],
-        hash_bytes[6],
-        hash_bytes[7],
-    ])
-}
-
-/// Persists a split stream to persistent storage.
-pub fn save_split_stream(env: &Env, split_stream: &SplitStream) {
-    let key = split_stream_key(split_stream.split_stream_id);
-    env.storage().persistent().set(&key, split_stream);
-}
-
-/// Loads a split stream from persistent storage. Returns None if not found.
-pub fn load_split_stream(env: &Env, split_stream_id: u64) -> Option<SplitStream> {
-    let key = split_stream_key(split_stream_id);
-    env.storage().persistent().get(&key)
-}
-
-/// Removes a split stream from persistent storage.
-pub fn remove_split_stream(env: &Env, split_stream_id: u64) {
-    let key = split_stream_key(split_stream_id);
-    env.storage().persistent().remove(&key);
-}
-
-/// Checks if a split stream exists.
-pub fn split_stream_exists(env: &Env, split_stream_id: u64) -> bool {
-    let key = split_stream_key(split_stream_id);
-    env.storage().persistent().has(&key)
-}
-
-/// Indexes a split stream ID in the global enumeration list.
-pub fn index_global_split_stream(env: &Env, split_stream_id: u64) {
-    let cnt_key = Symbol::new(env, SPLIT_STREAM_COUNT_KEY);
-    let idx: u32 = env.storage().instance().get(&cnt_key).unwrap_or(0u32);
-    let slot_key = (Symbol::new(env, "sps_gi"), idx);
-    env.storage().persistent().set(&slot_key, &split_stream_id);
-    env.storage().instance().set(&cnt_key, &(idx + 1));
-}
-
-/// Returns the total number of split streams in the global index.
-pub fn get_global_split_stream_count(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, SPLIT_STREAM_COUNT_KEY))
-        .unwrap_or(0u32)
-}
-
-/// Returns the split stream ID at a given position in the global index.
-pub fn get_global_split_stream_at(env: &Env, idx: u32) -> Option<u64> {
-    let slot_key = (Symbol::new(env, "sps_gi"), idx);
-    env.storage().persistent().get(&slot_key)
-}
-
-/// Returns a paginated list of all split stream IDs (for enumeration).
-///
-/// # Parameters
-/// - `start`: Starting index in the global split stream list.
-/// - `limit`: Maximum number of IDs to return.
-///
-/// # Returns
-/// A vector of split stream IDs, which may be shorter than `limit` if fewer
-/// IDs remain.
-pub fn get_all_split_stream_ids(env: &Env, start: u32, limit: u32) -> Vec<u64> {
-    let total = get_global_split_stream_count(env);
-    let end = start.saturating_add(limit).min(total);
-    let mut result = Vec::new(env);
-    for i in start..end {
-        if let Some(split_stream_id) = get_global_split_stream_at(env, i) {
-            result.push_back(split_stream_id);
-        }
-    }
-    result
-}
-
-/// Retrieves all split streams created by a specific sender (paginated).
-///
-/// # Parameters
-/// - `sender`: The address of the split stream creator.
-/// - `start`: Starting index within the sender's split streams.
-/// - `limit`: Maximum number of split streams to return.
-///
-/// # Returns
-/// A vector of split streams, which may be shorter than `limit` if fewer
-/// split streams exist for this sender.
-pub fn get_split_streams_by_sender(
-    env: &Env,
-    sender: &Address,
-    start: u32,
-    limit: u32,
-) -> Vec<SplitStream> {
-    let all_ids = get_all_split_stream_ids(env, 0, u32::MAX);
-    let mut result = Vec::new(env);
-    let mut count = 0u32;
-    for split_stream_id in all_ids.iter() {
-        if let Some(split_stream) = load_split_stream(env, split_stream_id) {
-            if split_stream.sender == *sender {
-                if count >= start && result.len() < limit as usize {
-                    result.push_back(split_stream);
-                }
-                count += 1;
-            }
-        }
-    }
-    result
-}
-
-/// Retrieves all split streams containing a specific recipient (paginated).
-///
-/// # Parameters
-/// - `recipient`: The address to search for in split stream recipients.
-/// - `start`: Starting index within the matching split streams.
-/// - `limit`: Maximum number of split streams to return.
-///
-/// # Returns
-/// A vector of split streams containing this recipient.
-pub fn get_split_streams_by_recipient(
-    env: &Env,
-    recipient: &Address,
-    start: u32,
-    limit: u32,
-) -> Vec<SplitStream> {
-    let all_ids = get_all_split_stream_ids(env, 0, u32::MAX);
-    let mut result = Vec::new(env);
-    let mut count = 0u32;
-    for split_stream_id in all_ids.iter() {
-        if let Some(split_stream) = load_split_stream(env, split_stream_id) {
-            // Check if recipient is in the split stream
-            let mut found = false;
-            for split_recipient in split_stream.recipients.iter() {
-                if split_recipient.recipient == *recipient {
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                if count >= start && result.len() < limit as usize {
-                    result.push_back(split_stream);
-                }
-                count += 1;
-            }
-        }
-    }
-    result
-}
-
-
-// --- Per-Sender Active Stream Counter (Optimization for cap enforcement) ---
-
-/// Returns a storage key for a sender's active stream count.
-fn sender_active_count_key(env: &Env, sender: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "sac"), sender.clone())
-}
-
-/// Returns the number of currently active streams for a specific sender.
-///
-/// This counter tracks only ACTIVE streams (not cancelled/completed).
-/// Used for efficient cap enforcement without traversing the sender's index.
-///
-/// Returns 0 if the sender has never created any streams.
-pub fn get_active_stream_count_by_sender(env: &Env, sender: &Address) -> u32 {
-    env.storage()
-        .persistent()
-        .get(&sender_active_count_key(env, sender))
-        .unwrap_or(0u32)
-}
-
-/// Increments the active stream count for a sender by 1.
-///
-/// Called when a stream is created and immediately becomes active
-/// (i.e., when `requires_recipient_approval = false`).
-///
-/// # Panics
-/// Panics if the per-sender counter would overflow u32::MAX.
-/// This requires 4 billion active streams from one sender and is not reachable.
-pub fn increment_sender_active_stream_count(env: &Env, sender: &Address) {
-    let key = sender_active_count_key(env, sender);
-    let current: u32 = env.storage().persistent().get(&key).unwrap_or(0u32);
-    let next = current.checked_add(1).expect("sender active stream count overflow");
-    env.storage().persistent().set(&key, &next);
-}
-
-/// Decrements the active stream count for a sender by 1 (saturates at 0).
-///
-/// Called when a stream is cancelled, expires, or completes.
-/// Saturates at 0 to handle any edge cases with counter drift.
-pub fn decrement_sender_active_stream_count(env: &Env, sender: &Address) {
-    let key = sender_active_count_key(env, sender);
-    let current: u32 = env.storage().persistent().get(&key).unwrap_or(0u32);
-    if current > 0 {
-        env.storage().persistent().set(&key, &(current - 1));
-    }
-}
-
-/// Sets the active stream count for a sender directly.
-///
-/// Used during recalibration to correct any counter drift.
-/// Should only be called by admin after verifying the correct count.
-pub fn set_sender_active_stream_count(env: &Env, sender: &Address, count: u32) {
-    let key = sender_active_count_key(env, sender);
-    env.storage().persistent().set(&key, &count);
-}
-
-/// Recalculates the active stream count for a specific sender by scanning their streams.
-///
-/// This is an O(N) operation where N is the number of streams ever created by this sender.
-/// Used to correct counter drift after bulk operations or as a recovery mechanism.
-///
-/// # Parameters
-/// * `sender` - The sender address whose count should be recalibrated
-///
-/// # Returns
-/// The corrected count of active streams for this sender
-pub fn recalibrate_sender_active_stream_count(env: &Env, sender: &Address) -> u32 {
-    let total_sender_count = get_sender_stream_count(env, sender);
-    let mut active_count = 0u32;
-
-    for i in 0..total_sender_count {
-        if let Some(stream_id) = env.storage().persistent().get::<(Symbol, Address, u32), u64>(&sender_slot_key(env, sender, i)) {
-            if let Some(stream) = load_stream(env, stream_id) {
-                if stream.status == types::StreamStatus::Active {
-                    active_count += 1;
-                }
-            }
-        }
-    }
-
-    set_sender_active_stream_count(env, sender, active_count);
-    active_count
 }

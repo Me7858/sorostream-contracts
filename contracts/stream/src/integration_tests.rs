@@ -4,9 +4,10 @@ extern crate std;
 use crate::{SoroStreamContract, SoroStreamContractClient};
 use crate::types::StreamStatus;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    Address, Env, Symbol, Val,
+    IntoVal,
 };
 
 struct IntegrationEnv {
@@ -74,7 +75,6 @@ fn integration_full_lifecycle() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     assert_eq!(balance(&ie, &ie.sender), 0);
@@ -122,7 +122,6 @@ fn integration_lifecycle_with_cliff() {
         &0u64,
         &false, &0u64,
         &false,
-        &0i128,
     );
 
     // Before cliff: claimable is zero
@@ -167,7 +166,6 @@ fn integration_create_cancel_split() {
         &0u64,
         &false, &0u64,
         &false,
-        &0i128,
     );
 
     ie.env.ledger().set_timestamp(400);
@@ -205,7 +203,6 @@ fn integration_topup_extends_and_pays() {
         &0u64,
         &false, &0u64,
         &false,
-        &0i128,
     );
 
     // Top up at t=200 with 500_000 more
@@ -255,7 +252,6 @@ fn integration_treasury_fees_on_batch_withdraw() {
         &0u64,
         &false, &0u64,
         &false,
-        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -298,7 +294,6 @@ fn integration_zero_fee_no_treasury_deduction() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -374,7 +369,6 @@ fn integration_multi_stream_interleaved() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
     let s2 = c.create_stream(
         &ie.sender,
@@ -387,7 +381,6 @@ fn integration_multi_stream_interleaved() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // t=500: withdraw from both
@@ -442,7 +435,6 @@ fn integration_partial_cancel_lifecycle() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // At t=200, partial cancel reclaiming 300_000
@@ -501,8 +493,7 @@ fn integration_auto_renew_with_sac() {
 
     let stream_id = c.create_stream(
         &sender, &recipient, &token, &1_000_000, &1000, &0, &0u64, &true, &0u64,
-        &false,
-        &0i128,
+        &false
     );
 
     // Complete first cycle
@@ -536,17 +527,14 @@ fn integration_query_streams_by_sender_recipient() {
     let s1 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-        &0i128,
     );
     let s2 = c.create_stream(
         &ie.sender, &r2, &ie.token, &1_000_000, &1000, &0, &1u64, &false, &0u64,
         &false,
-        &0i128,
     );
     let s3 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &2u64, &false, &0u64,
         &false,
-        &0i128,
     );
 
     // By sender: should find all 3
@@ -584,12 +572,10 @@ fn integration_stats_reflect_lifecycle() {
     c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &0u64, &false, &0u64,
         &false,
-        &0i128,
     );
     c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &2_000_000, &2000, &0, &1u64, &false, &0u64,
         &false,
-        &0i128,
     );
 
     let stats = c.get_stats();
@@ -661,7 +647,6 @@ fn integration_treasury_contract_balance_tracking() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -713,7 +698,6 @@ fn integration_treasury_contract_withdraw() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     ie.env.ledger().set_timestamp(500);
@@ -752,7 +736,6 @@ fn integration_stream_active_past_end_time() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // Partial withdraw at t=500
@@ -802,7 +785,6 @@ fn integration_get_claimable_post_end_time_without_prior_withdrawal() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // No withdrawal before end_time
@@ -837,7 +819,6 @@ fn integration_get_stream_still_active_at_exact_end_time() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // At exactly end_time
@@ -886,8 +867,7 @@ fn integration_auto_renew_completed_on_insufficient_funds() {
         &0u64,
         &true,  // auto_renew enabled
         &0u64,
-        &false,
-        &0i128,
+        &false
     );
 
     // After create_stream, sender balance is 0 (all tokens locked in contract).
@@ -989,8 +969,7 @@ fn integration_auto_renew_fails_with_partial_sender_balance() {
         &0u64,
         &true,  // auto_renew enabled
         &0u64,
-        &false,
-        &0i128,
+        &false
     );
 
     // Sender has 100 stroops — present but less than the 1_000_000 needed for renewal.
@@ -1071,7 +1050,6 @@ fn integration_fee_accumulation_and_sweep() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // Withdraw at t=300: claimable = 300K, fee = 15K
@@ -1149,7 +1127,6 @@ fn integration_batch_withdraw_final_no_overdraw_with_fees() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // Withdraw mid-stream at t=250 (half time)
@@ -1227,7 +1204,6 @@ fn integration_withdraw_final_no_overdraw_with_fees() {
         &false,
         &0u64,
         &false,
-        &0i128,
     );
 
     // Withdraw at t=200 (halfway)
@@ -1247,7 +1223,7 @@ fn integration_withdraw_final_no_overdraw_with_fees() {
     assert_eq!(balance_final, 750_000);
     
     // Verify the stream is completed
-    let stream = c.get_stream(&stream_id).expect("stream should exist");
+    let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Completed);
     
     // Total: 750K to recipient + 250K in fees = 1M (no overdraw)
@@ -1272,15 +1248,15 @@ fn integration_batch_withdraw_with_multiple_streams_and_fees() {
     // Create 3 streams
     let stream_id1 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token,
-        &1_000_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128,
+        &1_000_000, &1000, &0, &0u64, &false, &0u64, &false,
     );
     let stream_id2 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token,
-        &1_000_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128,
+        &1_000_000, &1000, &0, &1u64, &false, &0u64, &false,
     );
     let stream_id3 = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token,
-        &1_000_000, &1000, &0, &2u64, &false, &0u64, &false, &0i128,
+        &1_000_000, &1000, &0, &2u64, &false, &0u64, &false,
     );
 
     // Jump to end of streams
@@ -1300,7 +1276,7 @@ fn integration_batch_withdraw_with_multiple_streams_and_fees() {
     
     // Verify all streams are completed
     for stream_id in [stream_id1, stream_id2, stream_id3].iter() {
-        let stream = c.get_stream(stream_id).expect("stream should exist");
+        let stream = c.get_stream(stream_id);
         assert_eq!(stream.status, StreamStatus::Completed);
     }
 }
@@ -1325,7 +1301,7 @@ fn integration_withdraw_no_overdraw_edge_case_high_fee() {
 
     let stream_id = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token,
-        &deposit, &duration, &0, &0u64, &false, &0u64, &false, &0i128,
+        &deposit, &duration, &0, &0u64, &false, &0u64, &false,
     );
 
     // Multiple withdrawals throughout the stream
@@ -1342,3 +1318,71 @@ fn integration_withdraw_no_overdraw_edge_case_high_fee() {
     assert!(recipient_balance > 0, "recipient should receive something");
     assert!(recipient_balance <= deposit, "recipient should never receive more than deposit");
 }
+
+// ── Issue #282: Grace period claim + recover ────────────────────────────────
+
+#[test]
+fn integration_grace_period_claim_and_recover() {
+    use crate::errors::StreamError;
+
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_grace_period_ledgers(&10u32);
+    assert_eq!(c.get_grace_period_ledgers(), 10);
+
+    // Two streams: one for recipient claim during grace, one for recover after grace.
+    // A full withdraw removes the stream, so both ACs cannot share one stream.
+    mint(&ie, &ie.sender, &2_000_000);
+
+    let stream_claim = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+    let stream_recover = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // end_time + 1: still inside grace (10 ledgers × 5s = 50s)
+    ie.env.ledger().set_timestamp(1001);
+
+    let blocked = c.try_recover_expired(&stream_recover, &ie.sender);
+    assert_eq!(blocked, Err(Ok(StreamError::GracePeriodActive)));
+
+    let recipient_before = balance(&ie, &ie.recipient);
+    c.withdraw(&stream_claim, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), recipient_before + 1_000_000);
+    assert!(c.try_get_stream(&stream_claim).is_err());
+
+    // end_time + grace_seconds + 1 = 1000 + 50 + 1
+    ie.env.ledger().set_timestamp(1051);
+
+    let sender_before = balance(&ie, &ie.sender);
+    c.recover_expired(&stream_recover, &ie.sender);
+    assert_eq!(balance(&ie, &ie.sender), sender_before + 1_000_000);
+    assert!(c.try_get_stream(&stream_recover).is_err());
+
+    let after_recover = c.try_withdraw(&stream_recover, &ie.recipient);
+    assert_eq!(after_recover, Err(Ok(StreamError::StreamNotFound)));
+}
+
