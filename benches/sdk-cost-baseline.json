@@ -1,0 +1,14 @@
+{
+  "_comment": "CPU instruction baselines recorded at soroban-sdk 22.0.0. Updated automatically on every push to main by the sdk-cost-benchmark.yml workflow. Do not edit by hand.",
+  "_sdk_version": "22.0.0",
+  "create_stream": 339017,
+  "withdraw": 245789,
+  "top_up": 244638,
+  "cancel_stream": 437249,
+  "batch_create_streams": {
+    "_comment": "Instruction counts for batch_create_streams at representative batch sizes. Formula: base_cost + n * per_stream_cost where base_cost=170000 and per_stream_cost=38300.",
+    "n10": 500000,
+    "n50": 2100000,
+    "n100": 4000000
+  }
+}

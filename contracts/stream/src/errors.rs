@@ -5,29 +5,98 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum StreamError {
-    /// No stream exists with the given ID.
     StreamNotFound = 1,
-    /// Caller is not the stream recipient.
     NotRecipient = 2,
-    /// Caller is not the stream sender.
     NotSender = 3,
-    /// Stream is not in Active status.
     StreamNotActive = 4,
-    /// Amount must be greater than zero.
     ZeroAmount = 5,
-    /// Duration must be greater than zero.
     InvalidDuration = 6,
-    /// Contract has insufficient token balance.
     InsufficientBalance = 7,
-    /// Optimistic concurrency version mismatch (issue #236).
-    /// The caller provided an expected_version that does not match the stored version.
-    VersionConflict = 8,
-    /// SEP-0010 auth token has expired (issue #235).
-    AuthTokenExpired = 9,
-    /// SEP-0010 auth nonce has already been used — replay attack rejected (issue #235).
-    AuthNonceReplayed = 10,
-    /// SEP-0010 Ed25519 signature is invalid (issue #235).
-    AuthInvalidSignature = 11,
-    /// Factory: caller is not the admin (issue #237).
-    Unauthorized = 12,
+    InvalidCliff = 8,
+    AlreadyInitialized = 9,
+    NotInitialized = 10,
+    DuplicateStream = 11,
+    InvalidStartTime = 12,
+    InvalidPartialCancel = 13,
+    ContractPaused = 14,
+    Overflow = 15,
+    ZeroFlowRate = 16,
+    BatchLengthMismatch = 17,
+    TokenMismatch = 18,
+    StreamLocked = 19,
+    NotAuthorized = 20,
+    StreamNotPaused = 21,
+    StreamDurationTooShort = 22,
+    StreamIdConflict = 23,
+    SenderStreamLimitExceeded = 24,
+    InvalidNonce = 25,
+    MigrationAlreadyApplied = 26,
+    StreamNotSettled = 27,
+    WithdrawalCooldownActive = 28,
+    RecipientNotWhitelisted = 29,
+    MetadataTooLong = 30,
+    InvalidEndTime = 31,
+    InsufficientXlmForFee = 32,
+    DuplicateStreamId = 33,
+    ReentrancyDetected = 34,
+    InvalidMetadataUri = 35,
+    StreamNotComplete = 36,
+    TokenNotWhitelisted = 37,
+    /// One or more tranches have invalid data (e.g. zero amount, unsorted unlock times,
+    /// total tranche amount does not match deposit, or empty tranche list on step-vesting).
+    InvalidTranches = 38,
+    /// Oracle price deviates from the creation price by more than `max_price_deviation_bps`.
+    PriceDeviationTooHigh = 39,
+    /// Oracle contract call failed or returned an unexpected value.
+    OracleError = 40,
+    /// Sender has exceeded the allowed stream creation rate.
+    RateLimitExceeded = 41,
+    /// Withdrawal or operation would exceed slippage tolerance.
+    SlippageExceeded = 42,
+    /// The provided slippage parameter is invalid (e.g. > 10 000 bps).
+    InvalidSlippage = 43,
+    /// Stream duration exceeds the configured maximum.
+    DurationExceedsMax = 44,
+    /// Token address is not a valid deployed SAC.
+    InvalidTokenAddress = 45,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 46,
+    /// Stream ID derived from (sender, recipient, start_time, nonce) collided with an
+    /// existing entry even after the defensive retry increment.
+    IDCollision = 46,
+    /// A withdrawal was attempted before the next evenly-spaced step threshold has
+    /// been reached.
+    NextStepNotReached = 47,
+    /// The claimable amount is below the stream's configured `min_withdrawal_amount` floor.
+    AmountBelowMinimum = 48,
+    /// `start_time` is further in the future than the admin-configured
+    /// `max_future_start_offset_seconds` (default: 365 days).
+    StartTimeTooFar = 49,
+    /// Expiry warning window must be a positive ledger count.
+    InvalidExpiryWindow = 50,
+    /// Sender is below the promotion threshold and has hit the new-sender stream cap.
+    NewSenderStreamCapExceeded = 51,
+    /// The redirect target stream does not exist or its recipient doesn't match.
+    InvalidRedirectTarget = 52,
+    /// Setting this redirect would create a circular chain (A→B→A or longer).
+    CircularRedirect = 53,
+    /// Redirect target stream must have the same recipient as the source stream.
+    RedirectRecipientMismatch = 54,
+    /// Dual stream requires both token addresses to be distinct.
+    DuplicateTokenInDualStream = 55,
+    /// Operation requires a dual-token stream but the stream only has one token.
+    NotDualStream = 56,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 57,
+    /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
+    StreamNonTransferable = 58,
+    /// `withdraw` was called on a stream still in `PendingApproval` state.
+    /// The recipient must call `approve_stream` first.
+    AwaitingApproval = 59,
+    /// `cancel_stream` was called by the sender on a stream they have irrevocably
+    /// locked via `lock_stream`.
+    StreamIsLocked = 60,
+    /// Withdrawal attempted outside the configured withdrawal window (business hours).
+    OutsideWithdrawWindow = 61,
 }

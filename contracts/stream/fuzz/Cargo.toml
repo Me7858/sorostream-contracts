@@ -1,0 +1,28 @@
+[package]
+name = "sorostream-stream-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[dependencies.sorostream-stream]
+path = ".."
+features = ["testutils"]
+
+[[bin]]
+name = "create_stream"
+path = "fuzz_targets/create_stream.rs"
+test = false
+doc = false
+bench = false
+
+# A cargo-fuzz crate is its own workspace root so it doesn't get pulled into
+# (or fight dependency resolution with) the parent contracts workspace.
+[workspace]

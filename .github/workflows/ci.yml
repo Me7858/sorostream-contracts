@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly Monday 08:00 UTC – catch new advisories even when the codebase is idle
+    - cron: "0 8 * * 1"
+
+jobs:
+  audit:
+    name: Dependency Audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
+
+  supply-chain:
+    name: Supply Chain & Licenses (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+      - name: Run cargo deny
+        run: cargo deny check
+  build-lint-test:
+    name: Build, Lint & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Build WASM
+        run: cargo build --target wasm32v1-none --release
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --lib -- --skip proptest_tests --skip differential_fuzz --skip integration_tests
+
+  integration:
+    name: Integration & Regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Build WASM
+        run: cargo build --target wasm32v1-none --release
+      - name: Integration tests
+        run: cargo test integration_tests -- --nocapture
+      - name: Event field integration tests
+        run: cargo test event_field_tests -- --nocapture
+      - name: Testnet manifest validation
+        run: cargo test testnet_manifest_loads -- --nocapture
+      - name: Storage baseline regression
+        run: cargo test --package sorostream-stream -- storage_bench::check_storage_baseline_regression --nocapture
+      - name: Build size-optimised WASM
+        run: cargo build --target wasm32v1-none --profile release-size
+      - name: Record WASM binary size
+        id: wasm_size
+        run: |
+          SIZE=$(wc -c < target/wasm32v1-none/release/sorostream_stream.wasm)
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "WASM binary size: $SIZE bytes"
+      - name: Check WASM size regression
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin main
+          git checkout origin/main -- wasm-size.log 2>/dev/null || echo "0" > wasm-size.log
+          BASELINE=$(cat wasm-size.log | tr -d '[:space:]')
+          CURRENT=${{ steps.wasm_size.outputs.size }}
+          if [ "$BASELINE" -gt 0 ] 2>/dev/null; then
+            GROWTH=$(( (CURRENT - BASELINE) * 100 / BASELINE ))
+            echo "Baseline: $BASELINE bytes, Current: $CURRENT bytes, Growth: ${GROWTH}%"
+            if [ "$GROWTH" -gt 5 ]; then
+              echo "::error::WASM binary grew by ${GROWTH}% (${BASELINE} -> ${CURRENT}), exceeding the 5% threshold"
+              exit 1
+            fi
+          else
+            echo "No baseline size found, skipping regression check"
+          fi
+
+  property-tests:
+    name: Property Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Property-based tests (1,000 iterations per property)
+        env:
+          PROPTEST_CASES: 1000
+        run: cargo test proptest_tests -- --nocapture
+        timeout-minutes: 10
+
+  coverage:
+    name: Contract Coverage Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Branch coverage instrumentation (`--branch`) is nightly-only in
+      # rustc/LLVM's source-based coverage today, so this job pins nightly
+      # rather than the `stable` toolchain the rest of CI uses.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run test suite under instrumentation
+        run: cargo llvm-cov --package sorostream-stream --branch --no-report
+      - name: Generate LCOV report
+        run: cargo llvm-cov report --branch --lcov --output-path lcov.info
+      - name: Generate HTML report
+        run: cargo llvm-cov report --branch --html --output-dir target/llvm-cov/html
+      - name: Upload LCOV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+      - name: Enforce 80% branch coverage threshold
+        run: cargo llvm-cov report --branch --fail-under-branches 80
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/llvm-cov/html
+
+  publish-coverage-pages:
+    name: Publish Coverage Report to GitHub Pages
+    needs: coverage
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
