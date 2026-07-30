@@ -799,15 +799,73 @@ pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
     );
 }
 
-/// Emitted when a recipient rejects a stream before any balance has been claimed.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Split Stream Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+use soroban_sdk::Vec;
+
+/// Emitted when a split stream is created with multiple recipients.
+///
+/// A split stream distributes a single deposit across N sub-streams, each
+/// with a proportional allocation based on basis points.
 ///
 /// # Event Data
-/// - `stream_id`: The rejected stream
-/// - `recipient`: The recipient who rejected the stream
-/// - `refund_amount`: The remaining deposit returned to the sender
-pub fn stream_rejected(env: &Env, stream_id: u64, recipient: &Address, refund_amount: i128) {
+/// - `split_stream_id`: Unique identifier for the split stream
+/// - `sender`: The split stream creator / payer
+/// - `total_deposit`: Total amount distributed across all recipients
+/// - `stream_ids`: Vector of sub-stream IDs (one per recipient, in order)
+/// - `recipients`: Vector of recipient addresses (parallel to stream_ids)
+/// - `weights_bps`: Vector of weights in basis points (parallel to recipients)
+/// - `token`: Token address used for all sub-streams
+/// - `duration_seconds`: Duration in seconds for each sub-stream
+pub fn split_stream_created(
+    env: &Env,
+    split_stream_id: u64,
+    sender: &Address,
+    total_deposit: i128,
+    stream_ids: &Vec<u64>,
+    recipients: &Vec<Address>,
+    weights_bps: &Vec<u16>,
+    token: &Address,
+    duration_seconds: u64,
+) {
     env.events().publish(
-        (Symbol::new(env, "StreamRejected"), stream_id),
-        (recipient.clone(), refund_amount),
+        (Symbol::new(env, "SplitStreamCreated"), split_stream_id),
+        (
+            sender.clone(),
+            total_deposit,
+            stream_ids.clone(),
+            recipients.clone(),
+            weights_bps.clone(),
+            token.clone(),
+            duration_seconds,
+        ),
+    );
+}
+
+
+/// Emitted when an admin sweeps a dormant stream.
+///
+/// A dormant stream is one that has not received withdrawals for longer than
+/// the configured dormancy threshold. Admin can sweep these to reclaim capital
+/// and storage.
+///
+/// # Event Data
+/// - `stream_id`: The swept stream
+/// - `sender`: The stream creator (who receives the refund)
+/// - `refund_amount`: Amount refunded to sender (remaining deposit)
+/// - `last_withdraw_time`: Last time tokens were withdrawn from this stream
+pub fn dormant_stream_cancelled(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    refund_amount: i128,
+    last_withdraw_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "DormantStreamCancelled"), stream_id),
+        (sender.clone(), refund_amount, last_withdraw_time),
     );
 }

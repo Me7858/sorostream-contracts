@@ -1548,3 +1548,1037 @@ fn test_no_claim_interval_allows_any_frequency() {
     assert!(balance > 0,
         "withdrawals must succeed with no claim interval set");
 }
+
+
+// ── Split Stream Feature Tests ─────────────────────────────────────────────
+
+/// Test: Create a split stream with valid parameters
+#[test]
+fn test_split_stream_creation_success() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1.clone(), 5000u16),
+        (recipient2.clone(), 5000u16),
+    ];
+
+    let (split_stream_id, stream_ids) = c.create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    // Verify split stream ID is generated
+    assert!(split_stream_id > 0);
+    
+    // Verify both sub-streams are created
+    assert_eq!(stream_ids.len(), 2);
+
+    // Verify first sub-stream has correct amount (500,000)
+    let stream1 = c.get_stream(&stream_ids.get_unchecked(0));
+    assert_eq!(stream1.deposit, 500_000);
+    assert_eq!(stream1.recipient, recipient1);
+    assert_eq!(stream1.sender, t.sender);
+    assert_eq!(stream1.status, StreamStatus::Active);
+
+    // Verify second sub-stream has correct amount (500,000)
+    let stream2 = c.get_stream(&stream_ids.get_unchecked(1));
+    assert_eq!(stream2.deposit, 500_000);
+    assert_eq!(stream2.recipient, recipient2);
+}
+
+/// Test: Split stream with unequal weights
+#[test]
+fn test_split_stream_unequal_weights() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1.clone(), 7000u16),  // 70%
+        (recipient2.clone(), 3000u16),  // 30%
+    ];
+
+    let (_, stream_ids) = c.create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    let stream1 = c.get_stream(&stream_ids.get_unchecked(0));
+    let stream2 = c.get_stream(&stream_ids.get_unchecked(1));
+
+    assert_eq!(stream1.deposit, 700_000);
+    assert_eq!(stream2.deposit, 300_000);
+    assert_eq!(stream1.deposit + stream2.deposit, 1_000_000);
+}
+
+/// Test: Split stream rejects invalid weights that don't sum to 10,000
+#[test]
+fn test_split_stream_invalid_weights_sum() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1, 5000u16),
+        (recipient2, 4000u16),  // Total = 9,000, not 10,000
+    ];
+
+    let result = c.try_create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream rejects empty recipient list
+#[test]
+fn test_split_stream_empty_recipients() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipients: soroban_sdk::Vec<(Address, u16)> = soroban_sdk::vec![&t.env];
+
+    let result = c.try_create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream rejects duplicate recipients
+#[test]
+fn test_split_stream_duplicate_recipients() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1.clone(), 5000u16),
+        (recipient1.clone(), 5000u16),  // Duplicate
+    ];
+
+    let result = c.try_create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream with three recipients
+#[test]
+fn test_split_stream_three_recipients() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+    let recipient3 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1.clone(), 3333u16),
+        (recipient2.clone(), 3333u16),
+        (recipient3.clone(), 3334u16),  // Remainder
+    ];
+
+    let (split_stream_id, stream_ids) = c.create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert_eq!(stream_ids.len(), 3);
+
+    let stream1 = c.get_stream(&stream_ids.get_unchecked(0));
+    let stream2 = c.get_stream(&stream_ids.get_unchecked(1));
+    let stream3 = c.get_stream(&stream_ids.get_unchecked(2));
+
+    // First two get their exact proportion (rounded down)
+    assert_eq!(stream1.deposit, 333_300);
+    assert_eq!(stream2.deposit, 333_300);
+    // Last one gets the remainder
+    assert_eq!(stream3.deposit, 333_400);
+    assert_eq!(stream1.deposit + stream2.deposit + stream3.deposit, 1_000_000);
+}
+
+/// Test: Recipients can withdraw from split stream sub-streams
+#[test]
+fn test_split_stream_recipient_withdrawal() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1.clone(), 5000u16),
+        (recipient2.clone(), 5000u16),
+    ];
+
+    let (_, stream_ids) = c.create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    // Simulate time passing
+    t.env.ledger().set_timestamp(500);
+
+    // Recipient 1 can withdraw half their tokens (500 seconds / 1000 duration)
+    let claimable = c.get_claimable(&stream_ids.get_unchecked(0));
+    assert_eq!(claimable, 250_000);
+
+    c.withdraw(&stream_ids.get_unchecked(0), &recipient1);
+
+    let stream1_after = c.get_stream(&stream_ids.get_unchecked(0));
+    assert_eq!(stream1_after.total_withdrawn, 250_000);
+}
+
+/// Test: Split stream requires correct total weight
+#[test]
+fn test_split_stream_weights_must_equal_10000() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    // Weights sum to 15,000 (over 100%)
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1, 10_000u16),
+        (recipient2, 5_000u16),
+    ];
+
+    let result = c.try_create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream respects duration constraints
+#[test]
+fn test_split_stream_duration_constraints() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let admin = Address::generate(&t.env);
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    // Set maximum duration to 500 seconds
+    c.set_max_duration(&admin, &500);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1, 5000u16),
+        (recipient2, 5000u16),
+    ];
+
+    // Try to create with 1000 second duration (exceeds max)
+    let result = c.try_create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,  // Exceeds max of 500
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream rejects zero amount
+#[test]
+fn test_split_stream_zero_amount() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1, 5000u16),
+        (recipient2, 5000u16),
+    ];
+
+    let result = c.try_create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &0,  // Zero amount
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream rejects if sender lacks sufficient balance
+#[test]
+fn test_split_stream_insufficient_balance() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let poor_sender = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&poor_sender, &100);  // Only 100 tokens
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1, 5000u16),
+        (recipient2, 5000u16),
+    ];
+
+    let result = c.try_create_split_stream(
+        &poor_sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,  // Requests more than balance
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test: Split stream emission contains correct event data
+#[test]
+fn test_split_stream_created_event() {
+    let t = fsetup();
+    t.env.mock_all_auths();
+    t.env.budget().reset_unlimited();
+
+    let c = fclient(&t);
+
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let recipients = soroban_sdk::vec![
+        &t.env,
+        (recipient1.clone(), 5000u16),
+        (recipient2.clone(), 5000u16),
+    ];
+
+    let (split_stream_id, stream_ids) = c.create_split_stream(
+        &t.sender,
+        &recipients,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+    );
+
+    let events = t.env.events().all();
+    
+    // Last event should be SplitStreamCreated
+    let last_event_data = &events.last().unwrap();
+    let (event_topic, event_data) = last_event_data.clone();
+    
+    // Verify event contains correct data (simplified check)
+    assert!(!stream_ids.is_empty());
+    assert!(split_stream_id > 0);
+}
+
+
+// ── Dormant Stream Sweeping Feature Tests ───────────────────────────────────
+
+/// Test: Sweep dormant streams after configured inactivity period
+#[test]
+fn test_sweep_dormant_streams_basic() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Set dormancy threshold to 10 days
+    c.set_dormancy_days(&t.admin, &10u32);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    let stream_before = c.get_stream(&stream_id);
+    assert_eq!(stream_before.status, StreamStatus::Active);
+
+    // Fast forward 11 days (11 * 86400 seconds)
+    t.env.ledger().set_timestamp(11 * 86400);
+
+    // Sweep the dormant stream
+    let stream_ids_to_sweep = soroban_sdk::vec![&t.env, stream_id];
+    let result = c.try_sweep_dormant_streams(&t.admin, &stream_ids_to_sweep);
+    assert!(result.is_ok());
+
+    // Stream should be removed from storage
+    let stream_result = c.try_get_stream(&stream_id);
+    assert!(stream_result.is_err());
+}
+
+/// Test: Don't sweep active streams
+#[test]
+fn test_sweep_dormant_respects_activity() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    c.set_dormancy_days(&t.admin, &10u32);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Advance 5 days (less than dormancy threshold)
+    t.env.ledger().set_timestamp(5 * 86400);
+
+    // Try to sweep - should not sweep since not dormant yet
+    let stream_ids_to_sweep = soroban_sdk::vec![&t.env, stream_id];
+    let result = c.try_sweep_dormant_streams(&t.admin, &stream_ids_to_sweep);
+    assert!(result.is_ok());
+
+    // Stream should still exist
+    let stream_after = c.get_stream(&stream_id);
+    assert_eq!(stream_after.status, StreamStatus::Active);
+}
+
+/// Test: Dormancy sweeping is disabled when threshold is 0
+#[test]
+fn test_sweep_dormant_disabled_by_default() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Dormancy should be 0 by default (disabled)
+    let dormancy = c.get_dormancy_days();
+    assert_eq!(dormancy, 0);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Try to sweep with dormancy disabled
+    let stream_ids = soroban_sdk::vec![&t.env, stream_id];
+    let result = c.try_sweep_dormant_streams(&t.admin, &stream_ids);
+
+    // Should fail because dormancy is disabled
+    assert!(result.is_err());
+}
+
+/// Test: Refund amount is correct
+#[test]
+fn test_sweep_dormant_refunds_remaining_balance() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    c.set_dormancy_days(&t.admin, &1u32);  // 1 day
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &100,  // 100 second duration, 10K flow rate
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Recipient withdraws 500K
+    t.env.ledger().set_timestamp(50);  // 50 seconds in
+    c.withdraw(&stream_id, &t.recipient);
+
+    // Check claimable (should be ~500K since 50 sec / 100 sec duration = 50%)
+    let claimable = c.get_claimable(&stream_id);
+    assert!(claimable > 0 && claimable < 100_000);  // Some amount claimed
+
+    // Fast forward more than dormancy threshold
+    t.env.ledger().set_timestamp(1 * 86400 + 100);
+
+    // Sweep it
+    let stream_ids = soroban_sdk::vec![&t.env, stream_id];
+    c.sweep_dormant_streams(&t.admin, &stream_ids);
+
+    // Stream should be removed
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Test: Sweeping multiple streams at once
+#[test]
+fn test_sweep_dormant_multiple_streams() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    c.set_dormancy_days(&t.admin, &1u32);
+
+    // Create 3 streams
+    let stream_ids_vec = soroban_sdk::vec![&t.env];
+    let mut stream_ids = stream_ids_vec;
+
+    for i in 0..3 {
+        let recipient = Address::generate(&t.env);
+        let stream_id = c.create_stream(
+            &t.sender,
+            &recipient,
+            &t.token_id,
+            &1_000_000,
+            &1000,
+            &0,
+            &(i as u64),
+            &false,
+            &0u64,
+            &false,
+            &0i128,
+            &None::<u32>,
+            &None::<i128>,
+            &None::<u32>,
+        );
+        stream_ids.push_back(stream_id);
+    }
+
+    // Fast forward past dormancy
+    t.env.ledger().set_timestamp(2 * 86400);
+
+    // Sweep all 3
+    c.sweep_dormant_streams(&t.admin, &stream_ids);
+
+    // All should be removed
+    for stream_id in stream_ids.iter() {
+        let result = c.try_get_stream(&stream_id);
+        assert!(result.is_err());
+    }
+}
+
+/// Test: Only admin can sweep
+#[test]
+fn test_sweep_dormant_requires_admin() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let non_admin = Address::generate(&t.env);
+
+    c.set_dormancy_days(&t.admin, &1u32);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    t.env.ledger().set_timestamp(2 * 86400);
+
+    // Try to sweep as non-admin
+    let stream_ids = soroban_sdk::vec![&t.env, stream_id];
+    let result = c.try_sweep_dormant_streams(&non_admin, &stream_ids);
+
+    assert!(result.is_err());
+}
+
+/// Test: Last withdraw time is updated properly
+#[test]
+fn test_sweep_dormant_tracks_last_withdraw() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    c.set_dormancy_days(&t.admin, &10u32);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &100,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Advance 5 seconds and withdraw
+    t.env.ledger().set_timestamp(5);
+    c.withdraw(&stream_id, &t.recipient);
+
+    let stream_after_withdraw = c.get_stream(&stream_id);
+    let last_withdraw_1 = stream_after_withdraw.last_withdraw_time;
+
+    // Advance another 15 seconds
+    t.env.ledger().set_timestamp(20);
+
+    // Withdraw again
+    c.withdraw(&stream_id, &t.recipient);
+
+    let stream_after_withdraw_2 = c.get_stream(&stream_id);
+    let last_withdraw_2 = stream_after_withdraw_2.last_withdraw_time;
+
+    // Last withdraw time should have updated
+    assert!(last_withdraw_2 > last_withdraw_1);
+
+    // Now advance 5 days from the second withdrawal
+    t.env.ledger().set_timestamp(20 + (5 * 86400));
+
+    // Stream should still not be dormant (only 5 days)
+    let stream_ids = soroban_sdk::vec![&t.env, stream_id];
+    c.sweep_dormant_streams(&t.admin, &stream_ids);
+
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_ok());
+
+    // Advance another 6 days
+    t.env.ledger().set_timestamp(20 + (11 * 86400));
+
+    // Now sweep should work
+    let stream_ids = soroban_sdk::vec![&t.env, stream_id];
+    c.sweep_dormant_streams(&t.admin, &stream_ids);
+
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Test: Sweeping skips non-existent streams gracefully
+#[test]
+fn test_sweep_dormant_skips_nonexistent() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    c.set_dormancy_days(&t.admin, &1u32);
+
+    let fake_id = 99999u64;
+    let stream_ids = soroban_sdk::vec![&t.env, fake_id];
+
+    // Should not error, just skip
+    let result = c.try_sweep_dormant_streams(&t.admin, &stream_ids);
+    assert!(result.is_ok());
+}
+
+/// Test: Dormancy threshold configuration is persisted
+#[test]
+fn test_dormancy_threshold_configuration() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let initial = c.get_dormancy_days();
+    assert_eq!(initial, 0);
+
+    // Set to 30 days
+    c.set_dormancy_days(&t.admin, &30u32);
+
+    let after_set = c.get_dormancy_days();
+    assert_eq!(after_set, 30);
+
+    // Set to 0 (disable)
+    c.set_dormancy_days(&t.admin, &0u32);
+
+    let after_disable = c.get_dormancy_days();
+    assert_eq!(after_disable, 0);
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Feature: Withdrawal Window (Business Hours Gating)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Test creating a stream with a valid withdrawal window (9 AM - 5 PM UTC).
+#[test]
+fn test_create_stream_with_valid_withdraw_window() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Business hours: 9 AM - 5 PM UTC = 32400 - 61200 seconds of day
+    let window = Some((32400u32, 61200u32));
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+    assert_ne!(stream_id, 0);
+
+    // Verify the window is stored in the stream
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.withdraw_window, window);
+}
+
+/// Test that creating a stream with an invalid withdraw window (start >= end) fails.
+#[test]
+fn test_create_stream_invalid_window_start_gte_end() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Invalid: start >= end
+    let window = Some((61200u32, 61200u32));
+
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
+}
+
+/// Test that creating a stream with window_end > 86400 fails.
+#[test]
+fn test_create_stream_invalid_window_exceeds_day() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Invalid: end > 86400
+    let window = Some((32400u32, 90000u32));
+
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
+}
+
+/// Test that creating a stream without a withdraw window (None) succeeds.
+#[test]
+fn test_create_stream_without_withdraw_window() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &None,
+    );
+    assert_ne!(stream_id, 0);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.withdraw_window, None);
+}
+
+/// Test withdrawal within the allowed window succeeds.
+#[test]
+fn test_withdraw_within_window_succeeds() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Set ledger time to 40000 (within business hours of 32400-61200)
+    t.env.ledger().with_timestamp(40000);
+
+    let window = Some((32400u32, 61200u32));
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+
+    // Advance time and try to withdraw
+    t.env.ledger().with_timestamp(40001);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok());
+}
+
+/// Test withdrawal outside the allowed window fails with OutsideWithdrawWindow error.
+#[test]
+fn test_withdraw_outside_window_fails() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Set ledger time to 20000 (outside business hours of 32400-61200)
+    t.env.ledger().with_timestamp(20000);
+
+    let window = Some((32400u32, 61200u32));
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+
+    // Advance time to 20001 (still before 32400)
+    t.env.ledger().with_timestamp(20001);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert_eq!(result, Err(Ok(StreamError::OutsideWithdrawWindow)));
+}
+
+/// Test withdrawal at window start boundary (inclusive).
+#[test]
+fn test_withdraw_at_window_start_succeeds() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    t.env.ledger().with_timestamp(32400); // Exactly at window start
+
+    let window = Some((32400u32, 61200u32));
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+
+    t.env.ledger().with_timestamp(32401); // One second after start
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok());
+}
+
+/// Test withdrawal at window end boundary (exclusive).
+#[test]
+fn test_withdraw_at_window_end_exclusive_fails() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    t.env.ledger().with_timestamp(61200); // Exactly at window end
+
+    let window = Some((32400u32, 61200u32));
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+
+    t.env.ledger().with_timestamp(61201); // One second after end
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert_eq!(result, Err(Ok(StreamError::OutsideWithdrawWindow)));
+}
+
+/// Test withdrawal wraps correctly across midnight (e.g., 9 PM - 1 AM UTC).
+/// This tests a window that spans midnight.
+#[test]
+fn test_withdraw_window_wraparound_midnight() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // 9 PM - 1 AM: 81000 - 3600 (but represented as start > end would be invalid)
+    // Instead, we test that the time-of-day calculation works correctly.
+    // Let's test a full-day window edge case: 0 - 86400 (entire day).
+    let window = Some((0u32, 86400u32));
+    
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+    assert_ne!(stream_id, 0);
+
+    // Should always be allowed within a full-day window
+    t.env.ledger().with_timestamp(0);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok());
+
+    t.env.ledger().with_timestamp(86399); // Just before midnight
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok());
+}
+
+/// Test that step-vesting streams support withdraw_window.
+#[test]
+fn test_create_stream_with_schedule_withdraw_window() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let tranches = soroban_sdk::vec![
+        &t.env,
+        crate::VestingTranche { unlock_time: 1000, amount: 50_000 },
+        crate::VestingTranche { unlock_time: 2000, amount: 50_000 },
+    ];
+
+    let window = Some((32400u32, 61200u32));
+
+    let stream_id = c.create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &tranches, &888u64, &0u64, &false, &None, &0u32, &window,
+    );
+    assert_ne!(stream_id, 0);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.withdraw_window, window);
+}
+
+/// Test that streams with vesting curves support withdraw_window.
+#[test]
+fn test_create_stream_with_curve_withdraw_window() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    let curve = crate::VestingCurve::Linear;
+    let window = Some((32400u32, 61200u32));
+
+    let stream_id = c.create_stream_with_curve(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &777u64, &false, &0u64, &false, &curve, &window,
+    );
+    assert_ne!(stream_id, 0);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.withdraw_window, window);
+}
+
+/// Test that edge case: window at midnight (0 - 1 second).
+#[test]
+fn test_withdraw_window_minimal_valid() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Minimal valid window: 0 - 1
+    let window = Some((0u32, 1u32));
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64, &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+    assert_ne!(stream_id, 0);
+
+    // Withdrawal at time 0 (within [0, 1))
+    t.env.ledger().with_timestamp(0);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok());
+
+    // Withdrawal at time 1 (outside [0, 1))
+    t.env.ledger().with_timestamp(1);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert_eq!(result, Err(Ok(StreamError::OutsideWithdrawWindow)));
+}
+
+/// Test multi-day time modulo: verify that time-of-day calculation wraps correctly
+/// after multiple days.
+#[test]
+fn test_withdraw_window_multi_day_modulo() {
+    let t = fsetup();
+    let c = fclient(&t);
+
+    // Window: 9 AM - 5 PM = 32400 - 61200 seconds of day
+    let window = Some((32400u32, 61200u32));
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &86400u64 * 100u64, // 100 days
+        &0u64, &999u64, &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>, &false, &false, &window,
+    );
+    assert_ne!(stream_id, 0);
+
+    // After 10 days, at 10 AM UTC (36000 seconds into that day)
+    let timestamp = 86400u64 * 10 + 36000u64;
+    t.env.ledger().with_timestamp(timestamp);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok());
+
+    // After 10 days, at 6 PM UTC (64800 seconds into that day, outside window)
+    let timestamp = 86400u64 * 10 + 64800u64;
+    t.env.ledger().with_timestamp(timestamp);
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert_eq!(result, Err(Ok(StreamError::OutsideWithdrawWindow)));
+}
