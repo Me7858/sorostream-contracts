@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use soroban_sdk::{Address, Bytes, Env, String, Symbol};
 
 /// Emitted when a new stream is created.

@@ -26,25 +26,23 @@ use soroban_sdk::{
 };
 use types::VestingTranche;
 use storage::{
-    accumulate_fees, add_fee_exempt, add_rate_limit_exempt,
-    add_token_to_whitelist, add_to_blocklist, add_to_whitelist,
+    accumulate_fees, add_fee_exempt, add_to_blocklist,
     append_audit_entry, check_admin, cleanup_dual_stream_storage,
     clear_pending_fee_proposal, clear_reentrancy_lock, decrement_active_stream_count,
-    decrement_token_stream_count, DEFAULT_MAX_FUTURE_START_OFFSET, derive_stream_id,
+    decrement_token_stream_count, derive_stream_id,
     drain_fees_collected, effective_sender_limit, extend_instance_ttl,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm,
-    get_delegate, get_dual_stream_deposit2, get_dual_stream_token2,
-    get_dual_stream_withdrawn2, get_expiry_warning_window, get_federation_address,
+    get_delegate, get_expiry_warning_window, get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
-    get_rate_limit_state, get_rate_limit_window, get_sender_last_creation_time,
+    get_rate_limit_state, get_rate_limit_window,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
-    get_slippage_params, get_stream_creation_cooldown, get_token_stream_count,
+    get_token_stream_count,
     get_treasury, get_withdrawal_cooldown, get_xlm_token,
-    increment_active_stream_count, increment_batch_nonce, increment_dual_stream_withdrawn2,
-    increment_fees_collected, increment_sender_lifetime_count, increment_token_stream_count,
+    increment_active_stream_count, increment_batch_nonce,
+    increment_sender_lifetime_count, increment_token_stream_count,
     index_by_recipient, index_by_sender, index_global_stream,
     is_blocked, is_fee_exempt, is_paused_or_auto_unpause,
     is_rate_limit_exempt, is_reentrancy_locked, is_sender_promoted,
@@ -56,18 +54,16 @@ use storage::{
     read_max_future_start_offset, read_min_duration, read_pending_fee_proposal,
     read_version, record_migration, register_federation_address,
     remove_delegate, remove_fee_exempt, remove_from_blocklist,
-    remove_from_whitelist, remove_holdback, remove_rate_limit_exempt,
+    remove_holdback,
     remove_stream, remove_token_from_whitelist, remove_tranches,
-    save_stream, save_tranches, sender_count_key,
-    sender_slot_key, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_dual_stream_deposit2, set_dual_stream_token2,
-    set_dual_stream_withdrawn2, set_expiry_warning_window, set_fees_collected,
-    set_grace_period_ledgers, set_holdback, set_max_streams_per_sender,
+    save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
+    set_delegate, set_expiry_warning_window,
+    set_grace_period_ledgers, set_max_streams_per_sender,
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
-    set_pause_expiry, set_protocol_fee, set_rate_limit_max_creations,
-    set_rate_limit_state, set_rate_limit_window, set_reentrancy_lock,
+    set_pause_expiry, set_protocol_fee,
+    set_rate_limit_state, set_reentrancy_lock,
     set_sender_last_creation_time, set_sender_limit, set_sender_promotion_threshold,
-    set_slippage_params, set_stream_creation_cooldown, set_token_whitelist_enabled,
+    set_slippage_params, set_stream_creation_cooldown,
     set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
     set_xlm_token, stream_exists, unindex_by_recipient,
     unindex_by_sender, unregister_federation_address, write_admin,
@@ -103,6 +99,7 @@ fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
 }
 
 // ── Helper: rate limiting ────────────────────────────────────────────────────
+#[allow(dead_code)]
 fn check_rate_limit(env: &Env, sender: &Address, now: u64) -> Result<(), StreamError> {
     if is_rate_limit_exempt(env, sender) { return Ok(()); }
     let window = get_rate_limit_window(env);
@@ -119,6 +116,7 @@ fn check_rate_limit(env: &Env, sender: &Address, now: u64) -> Result<(), StreamE
 }
 
 // ── Helper: token whitelist ───────────────────────────────────────────────────
+#[allow(dead_code)]
 fn check_token_whitelist(env: &Env, token: &Address) -> Result<(), StreamError> {
     if is_token_whitelist_enabled(env) && !is_token_whitelisted(env, token) {
         return Err(StreamError::TokenNotWhitelisted);
@@ -134,6 +132,7 @@ fn validate_token_address(env: &Env, token: &Address) -> Result<(), StreamError>
 }
 
 // ── Feature (a): maybe emit StreamExpiryWarning ───────────────────────────────
+#[allow(dead_code)]
 fn maybe_emit_expiry_warning(env: &Env, stream: &mut Stream) {
     if stream.expiry_warning_emitted { return; }
     let now = env.ledger().timestamp();
@@ -150,6 +149,7 @@ fn maybe_emit_expiry_warning(env: &Env, stream: &mut Stream) {
 }
 
 // ── Feature (b): new-sender cap check ────────────────────────────────────────
+#[allow(dead_code)]
 fn check_new_sender_cap(env: &Env, sender: &Address) -> Result<(), StreamError> {
     if is_sender_promoted(env, sender) { return Ok(()); }
     let cap = get_new_sender_stream_cap(env);
@@ -159,6 +159,7 @@ fn check_new_sender_cap(env: &Env, sender: &Address) -> Result<(), StreamError> 
     Ok(())
 }
 
+#[allow(dead_code)]
 fn post_create_sender_accounting(env: &Env, sender: &Address) {
     let was_promoted = is_sender_promoted(env, sender);
     increment_sender_lifetime_count(env, sender);
@@ -586,6 +587,7 @@ impl SoroStreamContract {
     }
 
     /// Creates a new payment stream using a federation name (Issue #238).
+    #[allow(dead_code)]
     fn create_stream_with_federation(
         env: Env,
         sender: Address,
@@ -668,6 +670,7 @@ impl SoroStreamContract {
     /// `oracle` is `Some(addr)`, `get_price(token)` is called immediately to
     /// record the baseline price; subsequent withdrawals will fail if the current
     /// price deviates by more than `max_price_deviation_bps`.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn create_stream_with_schedule(
         env: Env,
@@ -854,6 +857,7 @@ impl SoroStreamContract {
     /// `VestingCurve::Linear`.  Values ≥ 10 000 are clamped to 9 999 internally.
     ///
     /// All other fields behave identically to `create_stream`.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn create_stream_with_curve(
         env: Env,

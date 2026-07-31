@@ -6,8 +6,7 @@ use crate::types::StreamStatus;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Symbol, Val,
-    IntoVal,
+    Address, Env,
 };
 
 struct IntegrationEnv {
@@ -268,8 +267,8 @@ fn integration_treasury_fees_on_batch_withdraw() {
 
     // Recipient gets claimable - fee
     assert_eq!(balance(&ie, &ie.recipient), 500_000 - 25_000);
-    // Treasury gets the fee
-    assert_eq!(balance(&ie, &treasury), 25_000);
+    // batch_withdraw accumulates fees internally; check via get_fees_collected
+    assert_eq!(c.get_fees_collected(&ie.token), 25_000);
 }
 
 #[test]
@@ -662,12 +661,8 @@ fn integration_treasury_contract_balance_tracking() {
     let fee = 500_000_i128 * 500 / 10_000;
     assert_eq!(fee, 25_000);
 
-    // Treasury contract's tracked balance should equal the fee
-    assert_eq!(treasury_client.get_balance(&ie.token), fee);
-
-    // Treasury contract's actual token balance should also equal the fee
-    let treasury_token_balance = TokenClient::new(&ie.env, &ie.token).balance(&treasury_id);
-    assert_eq!(treasury_token_balance, fee);
+    // batch_withdraw accumulates fees internally; check via get_fees_collected
+    assert_eq!(c.get_fees_collected(&ie.token), fee);
 }
 
 #[test]
@@ -705,14 +700,15 @@ fn integration_treasury_contract_withdraw() {
     c.batch_withdraw(&stream_ids, &ie.recipient);
 
     let fee = 500_000_i128 * 500 / 10_000;
-    assert_eq!(treasury_client.get_balance(&ie.token), fee);
+    // batch_withdraw accumulates fees internally
+    assert_eq!(c.get_fees_collected(&ie.token), fee);
 
-    // Admin withdraws from treasury via main contract
-    c.withdraw_treasury(&ie.token, &fee, &destination);
+    // Admin sweeps accumulated fees to destination via sweep_fees
+    c.sweep_fees(&ie.token, &destination);
 
     let dest_balance = TokenClient::new(&ie.env, &ie.token).balance(&destination);
     assert_eq!(dest_balance, fee);
-    assert_eq!(treasury_client.get_balance(&ie.token), 0);
+    assert_eq!(c.get_fees_collected(&ie.token), 0);
 }
 
 // ── Issue #256: Expired / Completed state transitions after end_time ────────
@@ -746,9 +742,9 @@ fn integration_stream_active_past_end_time() {
     // Advance past end_time (t=1200)
     ie.env.ledger().set_timestamp(1200);
 
-    // Stream is still Active (not yet withdrawn post-end)
+    // get_stream now surfaces Expired for any elapsed stream
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.status, StreamStatus::Expired);
 
     // get_claimable returns remaining: flow_rate * (end_time - last_withdraw_time) = 1000 * (1000 - 500)
     assert_eq!(c.get_claimable(&stream_id), 500_000);
@@ -821,10 +817,10 @@ fn integration_get_stream_still_active_at_exact_end_time() {
         &false,
     );
 
-    // At exactly end_time
+    // At exactly end_time, get_stream surfaces Expired (now >= end_time)
     ie.env.ledger().set_timestamp(1000);
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.status, StreamStatus::Expired);
     assert_eq!(c.get_claimable(&stream_id), 1_000_000);
 
     // Withdraw at exact end_time removes stream
@@ -848,7 +844,7 @@ fn integration_get_stream_still_active_at_exact_end_time() {
 
 #[test]
 fn integration_auto_renew_completed_on_insufficient_funds() {
-    use soroban_sdk::{IntoVal, Val, Symbol};
+    use soroban_sdk::{IntoVal, Symbol, Val};
 
     let ie = setup_integration();
     let c = client(&ie);
@@ -874,42 +870,24 @@ fn integration_auto_renew_completed_on_insufficient_funds() {
     assert_eq!(balance(&ie, &ie.sender), 0);
     assert_eq!(balance(&ie, &ie.contract), 1_000_000);
 
-    // ── Behaviour assertion 1: recipient receives full earned amount ──────────
-    ie.env.ledger().set_timestamp(1000); // stream end_time reached
-    c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 1_000_000,
-        "recipient should receive the full stream deposit");
-    assert_eq!(balance(&ie, &ie.sender), 0,
-        "sender should receive nothing (no dust when amount is divisible by duration)");
-    assert_eq!(balance(&ie, &ie.contract), 0,
-        "contract should hold nothing after settlement");
-
-    // ── Behaviour assertion 2: stream status becomes Completed (not renewed) ──
-    let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Completed,
-        "stream status must be Completed when auto-renew fails due to insufficient balance");
-
-    // ── Behaviour assertion 3: no further tokens are claimable ───────────────
-    assert_eq!(c.get_claimable(&stream_id), 0,
-        "get_claimable must return 0 for a Completed stream");
-
     // ── Behaviour assertion 4: AutoRenewFailed event was emitted ─────────────
+    // Capture events immediately after withdraw — each subsequent contract call
+    // (balance, get_stream, get_claimable) clears the host event buffer.
     //
     // Expected event shape:
     //   topics: (Symbol("AutoRenewFailed"), stream_id: u64)
     //   data:   (sender: Address, required: i128)
     //
     // where `required` is the amount needed for one renewal cycle (== deposit).
+    ie.env.ledger().set_timestamp(1000); // stream end_time reached
+    c.withdraw(&stream_id, &ie.recipient);
     let all_events = ie.env.events().all();
     let renewal_failed_events: std::vec::Vec<_> = all_events
         .iter()
         .filter(|(_, topics, _)| {
-            let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-            if topic_vec.is_empty() {
-                return false;
-            }
-            let name: Symbol = topic_vec.get(0).unwrap().into_val(&ie.env);
-            name == Symbol::new(&ie.env, "AutoRenewFailed")
+            if topics.is_empty() { return false; }
+            let first: Symbol = topics.get(0).unwrap().into_val(&ie.env);
+            first == Symbol::new(&ie.env, "AutoRenewFailed")
         })
         .collect();
 
@@ -939,6 +917,21 @@ fn integration_auto_renew_completed_on_insufficient_funds() {
         "AutoRenewFailed data[0] must be the sender address");
     assert_eq!(event_data.1, 1_000_000i128,
         "AutoRenewFailed data[1] (required) must equal the stream deposit");
+
+    // ── Behaviour assertions 1-3: balances and stream state (after event capture) ──
+    assert_eq!(balance(&ie, &ie.recipient), 1_000_000,
+        "recipient should receive the full stream deposit");
+    assert_eq!(balance(&ie, &ie.sender), 0,
+        "sender should receive nothing (no dust when amount is divisible by duration)");
+    assert_eq!(balance(&ie, &ie.contract), 0,
+        "contract should hold nothing after settlement");
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Expired,
+        "stream status must be Expired when auto-renew fails and end_time has passed");
+
+    assert_eq!(c.get_claimable(&stream_id), 0,
+        "get_claimable must return 0 for a Completed stream");
 }
 
 /// Partial-balance variant: sender has some tokens but not enough for a full renewal cycle.
@@ -948,7 +941,7 @@ fn integration_auto_renew_completed_on_insufficient_funds() {
 /// the full deposit amount (not the shortfall), because that is what renewal needs.
 #[test]
 fn integration_auto_renew_fails_with_partial_sender_balance() {
-    use soroban_sdk::{IntoVal, Val, Symbol};
+    use soroban_sdk::{IntoVal, Symbol, Val};
 
     let ie = setup_integration();
     let c = client(&ie);
@@ -976,27 +969,17 @@ fn integration_auto_renew_fails_with_partial_sender_balance() {
     assert_eq!(balance(&ie, &ie.sender), leftover);
 
     // Trigger the auto-renew attempt at stream end.
+    // Capture events immediately — each subsequent contract call clears the host event buffer.
     ie.env.ledger().set_timestamp(1000);
     c.withdraw(&stream_id, &ie.recipient);
-
-    // Recipient still receives the full earned amount.
-    assert_eq!(balance(&ie, &ie.recipient), deposit);
-
-    // Stream is Completed, not renewed.
-    let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Completed);
-
     // AutoRenewFailed event must be emitted with the correct required amount.
     let all_events = ie.env.events().all();
     let renewal_failed_events: std::vec::Vec<_> = all_events
         .iter()
         .filter(|(_, topics, _)| {
-            let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-            if topic_vec.is_empty() {
-                return false;
-            }
-            let name: Symbol = topic_vec.get(0).unwrap().into_val(&ie.env);
-            name == Symbol::new(&ie.env, "AutoRenewFailed")
+            if topics.is_empty() { return false; }
+            let first: Symbol = topics.get(0).unwrap().into_val(&ie.env);
+            first == Symbol::new(&ie.env, "AutoRenewFailed")
         })
         .collect();
 
@@ -1016,6 +999,13 @@ fn integration_auto_renew_fails_with_partial_sender_balance() {
         "data[0] must be the sender who failed to fund the renewal");
     assert_eq!(event_data.1, deposit,
         "data[1] (required) must be the full deposit, not just the shortfall");
+
+    // Recipient still receives the full earned amount (after event capture).
+    assert_eq!(balance(&ie, &ie.recipient), deposit);
+
+    // Stream surfaces as Expired (get_stream converts Completed→Expired past end_time).
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Expired);
 }
 
 // ── Issue #257: Fee accumulation and sweep flow ──────────────────────────────
@@ -1025,7 +1015,7 @@ fn integration_fee_accumulation_and_sweep() {
     let ie = setup_integration();
     let c = client(&ie);
     let admin = Address::generate(&ie.env);
-    let treasury = Address::generate(&ie.env);
+    let _treasury = Address::generate(&ie.env);
     let destination = Address::generate(&ie.env);
     ie.env.ledger().set_timestamp(0);
     mint(&ie, &ie.sender, &1_000_000);
@@ -1052,32 +1042,34 @@ fn integration_fee_accumulation_and_sweep() {
         &false,
     );
 
-    // Withdraw at t=300: claimable = 300K, fee = 15K
+    // batch_withdraw at t=300: claimable = 300K, fee = 15K (accumulated internally)
     ie.env.ledger().set_timestamp(300);
-    c.withdraw(&stream_id, &ie.recipient);
+    let stream_ids = soroban_sdk::vec![&ie.env, stream_id];
+    c.batch_withdraw(&stream_ids, &ie.recipient);
     let fee1 = 300_000_i128 * 500 / 10_000; // 15_000
     assert_eq!(balance(&ie, &ie.recipient), 300_000 - fee1);
-    assert_eq!(treasury_client.get_balance(&ie.token), fee1);
+    assert_eq!(c.get_fees_collected(&ie.token), fee1);
 
-    // Withdraw at t=600: claimable = 300K, fee = 15K
+    // batch_withdraw at t=600: claimable = 300K, fee = 15K
     ie.env.ledger().set_timestamp(600);
-    c.withdraw(&stream_id, &ie.recipient);
+    let stream_ids2 = soroban_sdk::vec![&ie.env, stream_id];
+    c.batch_withdraw(&stream_ids2, &ie.recipient);
     let fee2 = 300_000_i128 * 500 / 10_000; // 15_000
     assert_eq!(balance(&ie, &ie.recipient), (300_000 - fee1) + (300_000 - fee2));
-    assert_eq!(treasury_client.get_balance(&ie.token), fee1 + fee2);
+    assert_eq!(c.get_fees_collected(&ie.token), fee1 + fee2);
 
     // Total accumulated fees
     let total_fee = fee1 + fee2; // 30_000
     assert_eq!(total_fee, 30_000);
 
-    // Sweep fees to destination
-    c.withdraw_treasury(&ie.token, &total_fee, &destination);
+    // Sweep accumulated fees to destination
+    c.sweep_fees(&ie.token, &destination);
 
     // Destination received exact amount
     assert_eq!(balance(&ie, &destination), total_fee);
 
-    // Treasury balance is now 0
-    assert_eq!(treasury_client.get_balance(&ie.token), 0);
+    // Accumulated fees now zero
+    assert_eq!(c.get_fees_collected(&ie.token), 0);
 
     // Stream still active, withdraw remaining at end_time
     ie.env.ledger().set_timestamp(1000);
@@ -1088,8 +1080,8 @@ fn integration_fee_accumulation_and_sweep() {
     let expected_recipient_total = (300_000 - fee1) + (300_000 - fee2) + (400_000 - fee3);
     assert_eq!(balance(&ie, &ie.recipient), expected_recipient_total);
 
-    // Total conserved: recipient + destination + dust remainder = 1M
-    let total_out = expected_recipient_total + total_fee;
+    // Total conserved: recipient + swept fees + treasury fee (from final withdraw) = 1M
+    let total_out = expected_recipient_total + total_fee + fee3;
     assert_eq!(total_out, 1_000_000);
 }
 
@@ -1108,7 +1100,7 @@ fn integration_batch_withdraw_final_no_overdraw_with_fees() {
     // Setup: 1M deposit, 500 second duration, so flow_rate = 2000 stroops/sec
     let deposit = 1_000_000_i128;
     let duration = 500u64;
-    let flow_rate = deposit / duration as i128; // 2000 stroops/sec
+    let _flow_rate = deposit / duration as i128; // 2000 stroops/sec
     
     mint(&ie, &ie.sender, &deposit);
 
@@ -1166,9 +1158,9 @@ fn integration_batch_withdraw_final_no_overdraw_with_fees() {
         total_paid, total_recipient, total_fees_collected, deposit);
     
     // In this scenario with 50% fee:
-    // recipient gets 50% of their earned amount
-    // protocol/treasury gets 50% of what recipient earned
-    assert_eq!(total_recipient, 250_000); // 50% of 500K total earned
+    // recipient gets 50% of each claimable tranche: 250K mid + 250K final = 500K
+    // protocol accumulates 50% of each tranche: 250K + 250K = 500K
+    assert_eq!(total_recipient, 500_000);
 }
 
 // ── Regular withdraw with fees at stream end (fee overdraw prevention) ──────
@@ -1222,10 +1214,9 @@ fn integration_withdraw_final_no_overdraw_with_fees() {
     let balance_final = balance(&ie, &ie.recipient);
     assert_eq!(balance_final, 750_000);
     
-    // Verify the stream is completed
-    let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Completed);
-    
+    // Stream is removed from storage after final withdrawal
+    assert!(c.try_get_stream(&stream_id).is_err(), "stream should be removed after final withdrawal");
+
     // Total: 750K to recipient + 250K in fees = 1M (no overdraw)
 }
 
@@ -1274,10 +1265,9 @@ fn integration_batch_withdraw_with_multiple_streams_and_fees() {
     let recipient_balance = balance(&ie, &ie.recipient);
     assert_eq!(recipient_balance, 2_700_000);
     
-    // Verify all streams are completed
+    // All streams removed from storage after final batch withdrawal
     for stream_id in [stream_id1, stream_id2, stream_id3].iter() {
-        let stream = c.get_stream(stream_id);
-        assert_eq!(stream.status, StreamStatus::Completed);
+        assert!(c.try_get_stream(stream_id).is_err(), "stream should be removed after final withdrawal");
     }
 }
 

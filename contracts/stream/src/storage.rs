@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
 use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
 
