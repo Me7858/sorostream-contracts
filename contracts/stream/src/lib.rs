@@ -1758,11 +1758,10 @@ impl SoroStreamContract {
                     let step_interval = duration / steps as u64;
                     // Determine how many step boundaries now has crossed.
                     let elapsed_from_start = now.saturating_sub(stream.start_time);
-                    let steps_elapsed = if step_interval > 0 {
-                        (elapsed_from_start / step_interval).min(steps as u64) as u32
-                    } else {
-                        steps
-                    };
+                    let steps_elapsed = elapsed_from_start
+                        .checked_div(step_interval)
+                        .map(|v| v.min(steps as u64) as u32)
+                        .unwrap_or(steps);
                     if steps_elapsed > stream.current_step {
                         let new_step = steps_elapsed.min(steps);
                         let completed_step = new_step; // 1-based for the event
@@ -2622,7 +2621,7 @@ impl SoroStreamContract {
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
         let is_sender = stream.sender == caller;
-        let is_delegate = get_delegate(&env, stream_id).map_or(false, |d| d == caller);
+        let is_delegate = get_delegate(&env, stream_id).is_some_and(|d| d == caller);
         if !is_sender && !is_delegate {
             return Err(StreamError::NotAuthorized);
         }
@@ -2668,7 +2667,7 @@ impl SoroStreamContract {
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
         let is_sender = stream.sender == caller;
-        let is_delegate = get_delegate(&env, stream_id).map_or(false, |d| d == caller);
+        let is_delegate = get_delegate(&env, stream_id).is_some_and(|d| d == caller);
         if !is_sender && !is_delegate {
             return Err(StreamError::NotAuthorized);
         }
