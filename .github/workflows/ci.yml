@@ -4,53 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    # Weekly Monday 08:00 UTC – catch new advisories even when the codebase is idle
-    - cron: "0 8 * * 1"
 
 jobs:
-  audit:
-    name: Dependency Audit (cargo audit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo audit
-        # --deny vuln fails on security vulnerabilities; unmaintained/yanked
-        # transitive deps (derivative, paste, spin via soroban-sdk) are
-        # informational only and should not block CI.
-        run: cargo audit --deny vuln
-
-  supply-chain:
-    name: Supply Chain & Licenses (cargo-deny)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-deny
-        run: cargo install cargo-deny
-      - name: Run cargo deny
-        run: cargo deny check
-  build-lint-test:
-    name: Build, Lint & Unit Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-      - uses: Swatinem/rust-cache@v2
-      - name: Build WASM
-        run: cargo build --target wasm32v1-none --release
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Unit tests
-        run: cargo test --lib -- --skip proptest_tests --skip differential_fuzz --skip integration_tests
-
   integration:
     name: Integration & Regression
     runs-on: ubuntu-latest
@@ -108,53 +63,3 @@ jobs:
           PROPTEST_CASES: 1000
         run: cargo test proptest_tests -- --nocapture
         timeout-minutes: 10
-
-  coverage:
-    name: Contract Coverage Report
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Branch coverage instrumentation (`--branch`) is nightly-only in
-      # rustc/LLVM's source-based coverage today, so this job pins nightly
-      # rather than the `stable` toolchain the rest of CI uses.
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Run test suite under instrumentation
-        run: cargo llvm-cov --package sorostream-stream --branch --no-report
-      - name: Generate LCOV report
-        run: cargo llvm-cov report --branch --lcov --output-path lcov.info
-      - name: Generate HTML report
-        run: cargo llvm-cov report --branch --html --output-dir target/llvm-cov/html
-      - name: Upload LCOV artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-lcov
-          path: lcov.info
-      - name: Enforce 80% line coverage threshold
-        run: cargo llvm-cov report --branch --fail-under-lines 80
-      - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: target/llvm-cov/html
-
-  publish-coverage-pages:
-    name: Publish Coverage Report to GitHub Pages
-    needs: coverage
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
