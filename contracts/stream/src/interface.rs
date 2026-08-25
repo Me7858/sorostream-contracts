@@ -238,10 +238,18 @@ pub trait SoroStreamInterface {
     fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
     fn get_delegate(env: Env, stream_id: u64) -> Option<Address>;
 
-    fn set_rate_limit_window(env: Env, admin: Address, window_seconds: u64) -> Result<(), StreamError>;
+    /// Sets the sliding-window size for the per-sender rate limit, in **ledgers**.
+    /// Default: 720 ledgers (~1 hour at 5 s/ledger). Only admin may call this.
+    fn set_rate_limit_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), StreamError>;
+    /// Sets the maximum number of streams a sender may create within one window.
+    /// Default: 20. Only admin may call this.
     fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError>;
+    /// Exempts an address from all rate limiting. Only admin may call this.
     fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError>;
+    /// Removes a rate-limit exemption. Only admin may call this.
     fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError>;
+    /// Returns the number of stream creations the sender may still perform in the current window.
+    /// Returns `u32::MAX` for exempt addresses.
     fn remaining_quota(env: Env, address: Address) -> u32;
 
     fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
