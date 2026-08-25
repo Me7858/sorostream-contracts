@@ -388,6 +388,9 @@ impl SoroStreamContract {
         // Get current time early for validations
         let now = env.ledger().timestamp();
 
+        // Check rate limit (per-sender creation frequency cap)
+        check_rate_limit(&env, &sender, now)?;
+
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
         }
@@ -703,6 +706,12 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
+
+        let now = env.ledger().timestamp();
+
+        // Check rate limit (per-sender creation frequency cap)
+        check_rate_limit(&env, &sender, now)?;
+
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
         }
@@ -744,7 +753,6 @@ impl SoroStreamContract {
 
         mark_nonce_used(&env, &sender, nonce);
 
-        let now = env.ledger().timestamp();
         // end_time is the unlock_time of the last tranche.
         let last_tranche = tranches.get(tranches.len() - 1).unwrap();
         let end_time = last_tranche.unlock_time;
@@ -896,6 +904,12 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
+
+        let now = env.ledger().timestamp();
+
+        // Check rate limit (per-sender creation frequency cap)
+        check_rate_limit(&env, &sender, now)?;
+
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
         }
@@ -929,7 +943,6 @@ impl SoroStreamContract {
 
         mark_nonce_used(&env, &sender, nonce);
 
-        let now = env.ledger().timestamp();
         let end_time = now
             .checked_add(duration_seconds)
             .ok_or(StreamError::Overflow)?;
@@ -3084,6 +3097,11 @@ impl SoroStreamContract {
         }
         sender.require_auth();
 
+        let now = env.ledger().timestamp();
+
+        // Check rate limit (per-sender creation frequency cap)
+        check_rate_limit(&env, &sender, now)?;
+
         let expected_nonce = get_batch_nonce(&env, &sender);
         if nonce != expected_nonce {
             return Err(StreamError::InvalidNonce);
@@ -3094,7 +3112,6 @@ impl SoroStreamContract {
             return Err(StreamError::BatchLengthMismatch);
         }
 
-        let now = env.ledger().timestamp();
         let end_time = now
             .checked_add(duration_seconds)
             .ok_or(StreamError::Overflow)?;
