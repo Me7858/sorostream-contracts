@@ -1,0 +1,30 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Weekly Monday 09:00 UTC (an hour after the dependency-audit cron in ci.yml)
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+jobs:
+  create-stream-fuzz:
+    name: Fuzz create_stream (libFuzzer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/stream/fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz create_stream for 10,000,000 iterations
+        working-directory: contracts/stream/fuzz
+        run: cargo fuzz run create_stream -- -runs=10000000
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: create-stream-fuzz-crashes
+          path: contracts/stream/fuzz/artifacts/create_stream/

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 /// Vesting release curve applied to a payment stream.
 ///
@@ -22,10 +22,7 @@ pub enum VestingCurve {
     ///
     /// A `decay_factor` of `0` degenerates to linear behaviour.
     /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
-    TimeDecay {
-        /// Decay rate in basis points per 1 000-second window (0–9 999).
-        decay_factor: u32,
-    },
+    TimeDecay(u32),
 }
 
 /// A single step-vesting tranche: tokens that unlock atomically at `unlock_time`.
@@ -56,6 +53,10 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
+    /// Stream was created with `escrow_hold = true` and the sender has not yet
+    /// called `activate_stream`. Funds are locked in escrow; no tokens accrue.
+    /// The sender may cancel at zero cost while in this state.
+    EscrowHold,
 }
 
 /// Status of a milestone.
@@ -78,6 +79,8 @@ pub struct Milestone {
     pub amount: i128,
     /// Hash of the milestone description (for reference).
     pub description_hash: BytesN<32>,
+    /// Ledger timestamp at which this milestone becomes automatically claimable (0 if sender-gated).
+    pub unlock_time: u64,
     /// Current status of the milestone.
     pub status: MilestoneStatus,
 }
@@ -124,6 +127,10 @@ pub struct Stream {
     pub metadata_uri: Option<String>,
     /// Optional milestones for gated release (empty if not milestone-gated).
     pub milestones: Vec<Milestone>,
+    /// Whether this stream uses timestamp-gated milestone release mode.
+    /// When true, milestones unlock automatically at their unlock_time (no sender approval needed).
+    /// When false, milestones require sender approval via release_milestone().
+    pub milestone_release_mode: bool,
     /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
     pub locked: bool,
     /// Optional holdback amount kept in escrow until explicitly released (in stroops).
@@ -224,18 +231,24 @@ pub struct Stream {
     /// Recipients can still `withdraw` normally; admin pause is unaffected.
     pub sender_locked: bool,
 
-    // ── Recipient allowlist enforcement ──────────────────────────────────────
+    /// Whether the StreamExpiryWarning event has already been emitted.
+    pub expiry_warning_emitted: bool,
+    /// Optional redirect target stream ID.
+    pub redirect_to_stream_id: Option<u64>,
+    /// Whether this stream is a dual-token stream.
+    pub is_dual_stream: bool,
+    /// Optional tag for grouping streams (e.g. project or department label).
+    /// Allows senders to categorize and query streams by tag without iterating all streams.
+    pub tag: Option<String>,
 
-    /// Whether this stream enforces the recipient allowlist.
-    ///
-    /// When `true`, the recipient must be on the admin-managed recipient allowlist
-    /// at stream creation time. This flag is immutable after creation and is used
-    /// for regulated payment scenarios where senders want on-chain verification that
-    /// recipients have been approved.
-    ///
-    /// Note: The allowlist check happens at creation time only; if a recipient is
-    /// removed from the allowlist later, the stream continues to function normally.
-    pub enforce_recipient_allowlist: bool,
+    // ── On-complete callback (composable DeFi) ──────────────────────────────
+
+    /// Optional contract address to invoke when the stream completes.
+    /// If set, the contract's function specified by `on_complete_function` will be called.
+    pub on_complete_contract: Option<Address>,
+    /// Optional function signature to invoke on stream completion.
+    /// Only used if `on_complete_contract` is set.
+    pub on_complete_function: Option<Symbol>,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
@@ -268,33 +281,9 @@ pub struct StreamHealth {
     /// Stream end timestamp (Unix seconds).
     pub end_time: u64,
     /// Ledgers remaining before the stream's persistent storage entry expires.
-    /// A value of 0 means the TTL information could not be determined
-    /// (e.g. the entry has already expired or the query is not supported).
     pub ttl_remaining_ledgers: u32,
     /// Derived health classification based on `ttl_remaining_ledgers`.
     pub status: HealthStatus,
-    // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
-
-    /// Whether the `StreamExpiryWarning` event has already been emitted for this
-    /// stream in the current expiry window.  Prevents duplicate warnings when
-    /// multiple interactions occur before `end_time`.
-    pub expiry_warning_emitted: bool,
-
-    // ── Feature (c): Stream redirect ─────────────────────────────────────────
-
-    /// Optional ID of the stream that claimed tokens should be forwarded into.
-    /// When set, a `withdraw` call on this stream will top-up the target stream
-    /// instead of transferring tokens directly to the recipient.
-    /// The target stream's recipient must equal this stream's recipient.
-    pub redirect_to_stream_id: Option<u64>,
-
-    // ── Feature (d): Dual-token streams ──────────────────────────────────────
-
-    /// Whether this stream is a dual-token stream.
-    /// When `true`, a second token (`token2`) and second deposit (`deposit2`) are
-    /// stored separately in persistent storage.  The `token` and `deposit` fields
-    /// represent the primary (first) token allocation as usual.
-    pub is_dual_stream: bool,
 }
 
 /// Aggregate contract statistics.
@@ -321,4 +310,68 @@ pub struct AuditEntry {
     pub timestamp: u64,
     /// Serialised parameters (JSON-style string for human readability).
     pub params: String,
+}
+
+
+/// Override action type for administrative dispute resolution.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OverrideAction {
+    /// Force-cancel the stream and split funds based on current earned amount.
+    Cancel,
+    /// Force-complete the stream and release remaining balance to recipient.
+    Complete,
+}
+
+/// Status of an admin override request.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OverrideRequestStatus {
+    /// Request has been initiated, awaiting timelock expiry.
+    Pending,
+    /// Timelock has expired and override can be executed.
+    Ready,
+    /// Override has been executed.
+    Executed,
+    /// Request was cancelled before execution.
+    Cancelled,
+}
+
+/// An admin override request for dispute resolution on a stream.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminOverrideRequest {
+    /// Unique request ID.
+    pub request_id: u64,
+    /// Stream ID to override.
+    pub stream_id: u64,
+    /// The action to perform (Cancel or Complete).
+    pub action: OverrideAction,
+    /// Admin who initiated this request.
+    pub initiator: Address,
+    /// Ledger timestamp when this request was created.
+    pub created_at: u64,
+    /// Ledger timestamp after which this request can be executed.
+    pub executable_at: u64,
+    /// Current status of the request.
+    pub status: OverrideRequestStatus,
+    /// Reason/description for the override.
+    pub reason: String,
+}
+
+/// Optional filter struct for querying streams efficiently without iterating all records.
+///
+/// All fields are optional; a `None` value means no filtering on that criterion.
+/// Multiple filters are combined with AND logic (all must match).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamQueryFilter {
+    /// Optional status filter. If set, only streams with this status are returned.
+    pub status: Option<StreamStatus>,
+    /// Optional asset (token) filter. If set, only streams using this token are returned.
+    pub asset: Option<Address>,
+    /// Optional sender filter. If set, only streams created by this address are returned.
+    pub sender: Option<Address>,
+    /// Optional recipient filter. If set, only streams targeting this address are returned.
+    pub recipient: Option<Address>,
 }

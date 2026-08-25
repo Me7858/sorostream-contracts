@@ -4,7 +4,10 @@
 # ── Advisory database ────────────────────────────────────────────────────────
 [advisories]
 vulnerability = "deny"
-unmaintained = "warn"
+# "none" skips the unmaintained check for transitive deps we don't control
+# (derivative, paste via soroban-sdk). Use "workspace" to only flag crates
+# owned by this workspace.
+unmaintained = "none"
 yanked = "warn"
 notice = "warn"
 
