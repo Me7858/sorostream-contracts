@@ -53,6 +53,10 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
+    /// Stream was created with `escrow_hold = true` and the sender has not yet
+    /// called `activate_stream`. Funds are locked in escrow; no tokens accrue.
+    /// The sender may cancel at zero cost while in this state.
+    EscrowHold,
 }
 
 /// Status of a milestone.

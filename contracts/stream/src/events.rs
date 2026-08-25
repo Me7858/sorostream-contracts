@@ -283,6 +283,43 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Escrow Hold Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a stream is created with escrow_hold = true.
+///
+/// # Event Data
+/// - `stream_id`: The stream placed in escrow
+/// - `sender`: The stream creator (who must activate it)
+/// - `recipient`: The stream recipient
+/// - `amount`: The amount locked in escrow
+pub fn stream_placed_in_escrow(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamPlacedInEscrow"), stream_id),
+        (sender.clone(), recipient.clone(), amount),
+    );
+}
+
+/// Emitted when a stream is activated after being in escrow_hold state.
+///
+/// # Event Data
+/// - `stream_id`: The activated stream
+/// - `sender`: The sender who activated it
+/// - `activation_timestamp`: Ledger timestamp of activation
+pub fn stream_activated(env: &Env, stream_id: u64, sender: &Address, activation_timestamp: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamActivated"), stream_id),
+        (sender.clone(), activation_timestamp),
+    );
+}
+
 /// Emitted when accumulated protocol fees are swept from the contract to a destination.
 /// Emitted when the sender releases the holdback escrow to the recipient.
 pub fn holdback_released(env: &Env, stream_id: u64, amount: i128, recipient: &Address) {

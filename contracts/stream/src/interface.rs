@@ -81,6 +81,7 @@ pub trait SoroStreamInterface {
         curve: VestingCurve,
         on_complete_contract: Option<Address>,
         on_complete_function: Option<Symbol>,
+        escrow_hold: bool,
     ) -> Result<u64, StreamError>;
 
     fn register_federation(env: Env, admin: Address, federation_name: String, stellar_address: Address) -> Result<(), StreamError>;
@@ -96,6 +97,12 @@ pub trait SoroStreamInterface {
     fn remove_from_whitelist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
     fn update_metadata(env: Env, sender: Address, stream_id: u64, metadata: Bytes) -> Result<(), StreamError>;
     fn cancel_auto_renew(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
+
+    /// Activates a stream that was created with escrow_hold = true.
+    ///
+    /// Transitions the stream from EscrowHold to Active state, enabling token flow.
+    /// Only the sender may call this. No-op if the stream is not in EscrowHold state.
+    fn activate_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
 
     fn withdraw(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
     fn cancel_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
@@ -174,6 +181,7 @@ pub trait SoroStreamInterface {
         holdback_amount: i128,
         on_complete_contract: Option<Address>,
         on_complete_function: Option<Symbol>,
+        escrow_hold: bool,
     ) -> Result<u64, StreamError>;
 
     /// Runs a one-time migration step after a WASM upgrade. Admin-gated and idempotent.
