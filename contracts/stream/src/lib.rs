@@ -131,6 +131,23 @@ fn validate_token_address(env: &Env, token: &Address) -> Result<(), StreamError>
     Ok(())
 }
 
+fn validate_recipient_address(env: &Env, sender: &Address, recipient: &Address) -> Result<(), StreamError> {
+    if recipient == sender || recipient == &env.current_contract_address() {
+        return Err(StreamError::NotRecipient);
+    }
+    Ok(())
+}
+
+fn refreshed_stream_view(env: &Env, mut stream: Stream) -> Stream {
+    let now = env.ledger().timestamp();
+    if (stream.status == StreamStatus::Active || stream.status == StreamStatus::Completed)
+        && now >= stream.end_time
+    {
+        stream.status = StreamStatus::Expired;
+    }
+    stream
+}
+
 // ── Feature (a): maybe emit StreamExpiryWarning ───────────────────────────────
 #[allow(dead_code)]
 fn maybe_emit_expiry_warning(env: &Env, stream: &mut Stream) {
@@ -399,6 +416,12 @@ impl SoroStreamContract {
         if cliff_seconds > duration_seconds {
             return Err(StreamError::InvalidCliff);
         }
+        validate_recipient_address(&env, &sender, &recipient)?;
+        check_token_whitelist(&env, &token)?;
+        validate_token_address(&env, &token)?;
+        validate_recipient_address(&env, &sender, &recipient)?;
+        check_token_whitelist(&env, &token)?;
+        validate_token_address(&env, &token)?;
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
             return Err(StreamError::RecipientNotWhitelisted);
         }
@@ -699,6 +722,9 @@ impl SoroStreamContract {
         if tranches.is_empty() {
             return Err(StreamError::InvalidTranches);
         }
+        validate_recipient_address(&env, &sender, &recipient)?;
+        check_token_whitelist(&env, &token)?;
+        validate_token_address(&env, &token)?;
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
             return Err(StreamError::RecipientNotWhitelisted);
         }
@@ -2525,6 +2551,8 @@ impl SoroStreamContract {
         if stream.token != token {
             return Err(StreamError::TokenMismatch);
         }
+        check_token_whitelist(&env, &token)?;
+        validate_token_address(&env, &token)?;
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
         }
@@ -2708,14 +2736,8 @@ impl SoroStreamContract {
     /// persisted value is still `Active` or `Completed`. This makes it unnecessary
     /// for clients to compare timestamps themselves.
     pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
-        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
-        // Surface Expired status to callers without requiring an explicit mark_expired call.
-        if stream.status == StreamStatus::Active || stream.status == StreamStatus::Completed {
-            let now = env.ledger().timestamp();
-            if now >= stream.end_time {
-                stream.status = StreamStatus::Expired;
-            }
-        }        Ok(stream)
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        Ok(refreshed_stream_view(&env, stream))
     }
 
     /// Explicitly marks an elapsed stream as Expired, compacting its storage entry.
@@ -3043,6 +3065,8 @@ impl SoroStreamContract {
             let amount = amounts.get_unchecked(i);
             let token = tokens.get_unchecked(i);
 
+            validate_recipient_address(&env, &sender, &recipient)?;
+            check_token_whitelist(&env, &token)?;
             if amount <= 0 {
                 return Err(StreamError::ZeroAmount);
             }
