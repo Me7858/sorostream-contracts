@@ -283,6 +283,43 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Escrow Hold Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a stream is created with escrow_hold = true.
+///
+/// # Event Data
+/// - `stream_id`: The stream placed in escrow
+/// - `sender`: The stream creator (who must activate it)
+/// - `recipient`: The stream recipient
+/// - `amount`: The amount locked in escrow
+pub fn stream_placed_in_escrow(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamPlacedInEscrow"), stream_id),
+        (sender.clone(), recipient.clone(), amount),
+    );
+}
+
+/// Emitted when a stream is activated after being in escrow_hold state.
+///
+/// # Event Data
+/// - `stream_id`: The activated stream
+/// - `sender`: The sender who activated it
+/// - `activation_timestamp`: Ledger timestamp of activation
+pub fn stream_activated(env: &Env, stream_id: u64, sender: &Address, activation_timestamp: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamActivated"), stream_id),
+        (sender.clone(), activation_timestamp),
+    );
+}
+
 /// Emitted when accumulated protocol fees are swept from the contract to a destination.
 /// Emitted when the sender releases the holdback escrow to the recipient.
 pub fn holdback_released(env: &Env, stream_id: u64, amount: i128, recipient: &Address) {
@@ -841,6 +878,25 @@ pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
 }
 
 
+/// Emitted when a sender updates the flow rate of an active stream.
+///
+/// # Event Data
+/// - `stream_id`: The stream whose rate was updated
+/// - `old_rate`: The previous tokens-per-second flow rate
+/// - `new_rate`: The new tokens-per-second flow rate
+/// - `new_end_time`: The adjusted stream end time after rate change
+/// - `remaining_deposit`: The remaining deposit after balance settlement
+pub fn stream_rate_updated(
+    env: &Env,
+    stream_id: u64,
+    old_rate: i128,
+    new_rate: i128,
+    new_end_time: u64,
+    remaining_deposit: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRateUpdated"), stream_id),
+        (old_rate, new_rate, new_end_time, remaining_deposit),
 // ─────────────────────────────────────────────────────────────────────────────
 // Split Stream Events
 // ─────────────────────────────────────────────────────────────────────────────
@@ -908,5 +964,57 @@ pub fn dormant_stream_cancelled(
     env.events().publish(
         (Symbol::new(env, "DormantStreamCancelled"), stream_id),
         (sender.clone(), refund_amount, last_withdraw_time),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// On-Complete Callback Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when an on_complete callback is invoked when a stream reaches its end_time.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+/// - `on_complete_function`: The function name that was called
+pub fn on_complete_invoked(
+    env: &Env,
+    stream_id: u64,
+    on_complete_contract: &Address,
+    on_complete_function: &Symbol,
+) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteInvoked"), stream_id),
+        (on_complete_contract.clone(), on_complete_function.clone()),
+    );
+}
+
+/// Emitted when an on_complete callback execution succeeds.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+pub fn on_complete_success(env: &Env, stream_id: u64, on_complete_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteSuccess"), stream_id),
+        on_complete_contract.clone(),
+    );
+}
+
+/// Emitted when an on_complete callback execution fails.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+/// - `error_message`: Description of the error that occurred
+pub fn on_complete_failed(
+    env: &Env,
+    stream_id: u64,
+    on_complete_contract: &Address,
+    error_message: &String,
+) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteFailed"), stream_id),
+        (on_complete_contract.clone(), error_message.clone()),
     );
 }

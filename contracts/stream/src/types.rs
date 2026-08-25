@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 /// Vesting release curve applied to a payment stream.
 ///
@@ -53,6 +53,10 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
+    /// Stream was created with `escrow_hold = true` and the sender has not yet
+    /// called `activate_stream`. Funds are locked in escrow; no tokens accrue.
+    /// The sender may cancel at zero cost while in this state.
+    EscrowHold,
 }
 
 /// Status of a milestone.
@@ -236,6 +240,15 @@ pub struct Stream {
     /// Optional tag for grouping streams (e.g. project or department label).
     /// Allows senders to categorize and query streams by tag without iterating all streams.
     pub tag: Option<String>,
+
+    // ── On-complete callback (composable DeFi) ──────────────────────────────
+
+    /// Optional contract address to invoke when the stream completes.
+    /// If set, the contract's function specified by `on_complete_function` will be called.
+    pub on_complete_contract: Option<Address>,
+    /// Optional function signature to invoke on stream completion.
+    /// Only used if `on_complete_contract` is set.
+    pub on_complete_function: Option<Symbol>,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
