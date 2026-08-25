@@ -5400,3 +5400,524 @@ fn test_get_claimable_zero_dust_before_start() {
         assert_eq!(claimable, 0, "get_claimable must return 0 before cliff, not dust at t={}", t_val);
     }
 }
+
+
+/// Test case demonstrating the token refund vulnerability in cancel_stream.
+/// 
+/// VULNERABILITY: When cancel_stream is called:
+/// 1. EFFECTS phase: Stream record is deleted from storage
+/// 2. INTERACTIONS phase: Token transfers to recipient and sender
+///
+/// If the token transfer fails (e.g., insufficient balance, frozen account, failed token call),
+/// the stream record is already gone, making the unstreamed tokens inaccessible.
+/// 
+/// The sender cannot recover the unstreamed amount because:
+/// - The stream record was deleted
+/// - The tokens remain in the contract
+/// - There's no way to reconstruct the stream or claim the orphaned tokens
+///
+/// FIX: Move token transfers to occur BEFORE storage deletion (INTERACTIONS before EFFECTS).
+/// This ensures atomicity: if transfers fail, the stream record remains intact and can be
+/// retried or recovered.
+
+#[test]
+fn test_cancel_stream_token_refund_ordering_vulnerability() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1,000 total seconds and 100,000 token deposit
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128,  // deposit
+        &1000u64,      // duration in seconds
+        &0u64,         // cliff
+        &0u64,         // start_time
+        &false,        // auto_renew
+        &0u64,         // end_time_or_cliff
+        &false,        // is_step_vesting
+        &0i128,        // holdback_amount
+        &None::<u32>,  // decay_factor
+        &None::<i128>, // decay_offset
+    );
+
+    // Advance time to 300 seconds (30% of stream)
+    t.env.ledger().set_timestamp(300);
+
+    // Record balances before cancellation
+    let sender_balance_before = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    let recipient_balance_before = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+
+    // Cancel the stream
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // EXPECTED BEHAVIOR:
+    // - Recipient gets earned amount: (300 / 1000) * 100_000 = 30_000
+    // - Sender gets refund: 100_000 - 30_000 = 70_000 (unstreamed portion)
+    
+    let sender_balance_after = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    let recipient_balance_after = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+
+    let sender_received = sender_balance_after - sender_balance_before;
+    let recipient_received = recipient_balance_after - recipient_balance_before;
+
+    assert_eq!(recipient_received, 30_000, "recipient should receive earned 30% of deposit");
+    assert_eq!(sender_received, 70_000, "sender should receive unstreamed 70% refund");
+
+    // Stream should be deleted
+    assert!(
+        c.try_get_stream(&stream_id).is_err(),
+        "stream must be deleted after cancellation"
+    );
+
+    // VULNERABILITY SCENARIO (not directly testable in mock environment):
+    // If token transfer failed between:
+    //   1. Stream deletion (remove_stream called)
+    //   2. Refund transfer (token_client.transfer failed)
+    //
+    // Then:
+    //   - Stream record is gone
+    //   - 70_000 tokens remain in contract (not transferred to sender)
+    //   - Sender cannot recover because stream record doesn't exist
+    //   - No function exists to reclaim orphaned tokens
+}
+
+
+#[test]
+fn test_flow_rate_bounds_validation_prevents_overflow() {
+    let t = setup();
+    let c = client(&t);
+
+    // Attempting to create a stream with amount = i128::MAX and duration = 1 second
+    // would normally result in flow_rate = i128::MAX, which would overflow on any multiplication
+    // The validation should reject this at creation time with StreamError::Overflow
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &i128::MAX,          // Extremely large amount
+        &1u64,               // Very short duration (1 second)
+        &0u64,               // cliff
+        &0u64,               // start_time
+        &false,              // auto_renew
+        &0u64,               // end_time_or_cliff
+        &false,              // is_step_vesting
+        &0i128,              // holdback_amount
+        &None::<u32>,        // decay_factor
+        &None::<i128>,       // decay_offset
+    );
+
+    // Should fail at creation time with Overflow error, not at withdraw time
+    assert!(result.is_err(), "Should reject stream with unsafe flow_rate at creation");
+    
+    // Verify it's an Overflow error (or similar bounds-checking error)
+    match result {
+        Err(e) => {
+            // The error should indicate the flow_rate is too large
+            // It could be Overflow, InvalidDuration, or similar
+            assert!(
+                matches!(e, StreamError::Overflow),
+                "Expected Overflow error for unsafe flow_rate, got: {:?}",
+                e
+            );
+        }
+        Ok(_) => panic!("Should have rejected stream with i128::MAX amount and 1-second duration"),
+    }
+}
+
+#[test]
+fn test_large_flow_rate_with_long_duration_succeeds() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(100);
+
+    // Create a stream with a very large amount but long enough duration that flow_rate is safe
+    // Example: deposit = 10^18 (realistic for USDC with many stroops)
+    //          duration = 1 year (31,536,000 seconds)
+    //          flow_rate ~= 31,709,791 stroops/sec (safe to multiply by elapsed)
+    
+    let large_deposit = 1_000_000_000_000_000_000i128;  // 10^18 stroops
+    let one_year_seconds = 365u64 * 24 * 60 * 60;       // 31,536,000 seconds
+
+    // First mint enough tokens
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &large_deposit);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &large_deposit,
+        &one_year_seconds,
+        &0u64,               // cliff
+        &0u64,               // start_time
+        &false,              // auto_renew
+        &0u64,               // end_time_or_cliff
+        &false,              // is_step_vesting
+        &0i128,              // holdback_amount
+        &None::<u32>,        // decay_factor
+        &None::<i128>,       // decay_offset
+    );
+
+    // Should succeed - the stream should be created
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, large_deposit);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // Advance time to mid-stream and verify we can withdraw
+    t.env.ledger().set_timestamp(100 + one_year_seconds / 2);
+    
+    let claimable = c.get_claimable(&stream_id);
+    assert!(
+        claimable > 0,
+        "Should be able to compute claimable amount at mid-stream"
+    );
+    assert!(
+        claimable < large_deposit,
+        "Claimable should be less than full deposit at mid-stream"
+    );
+}
+
+#[test]
+fn test_extremely_large_flow_rate_causes_creation_error() {
+    let t = setup();
+    let c = client(&t);
+
+    // Attempt to create with flow_rate that would be close to i128::MAX
+    // This should be caught at creation time, not at withdraw time
+    let unsafe_amount = 9_223_372_036_854_775_800i128;  // Close to i128::MAX
+    let short_duration = 2u64;  // 2 seconds, so flow_rate ~= i128::MAX / 2
+
+    // Mint enough for this test
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &unsafe_amount);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &unsafe_amount,
+        &short_duration,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+    );
+
+    // Should fail at creation with Overflow error
+    assert!(result.is_err(), "Should reject extremely large flow_rate at creation");
+}
+
+
+#[test]
+fn test_zero_duration_explicitly_rejected() {
+    let t = setup();
+    let c = client(&t);
+
+    // Test that zero-duration streams are explicitly rejected
+    // This should fail with InvalidDuration, not at withdrawal time or with unclear errors
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,  // amount
+        &0u64,         // duration_seconds = 0 (zero duration)
+        &0u64,         // cliff_seconds
+        &0u64,         // nonce
+        &false,        // auto_renew
+        &0u64,         // lock_until
+        &false,        // allow_recipient_termination
+        &0i128,        // holdback_amount
+        &None::<u32>,  // withdrawal_steps
+        &None::<i128>, // min_withdrawal_amount
+    );
+
+    // Should fail with InvalidDuration error
+    assert!(
+        result.is_err(),
+        "Zero-duration stream should be rejected at creation time"
+    );
+    
+    match result {
+        Err(e) => {
+            assert_eq!(
+                e,
+                Ok(StreamError::InvalidDuration),
+                "Expected InvalidDuration error for zero-duration stream"
+            );
+        }
+        Ok(_) => panic!("Zero-duration stream should not be allowed"),
+    }
+}
+
+#[test]
+fn test_minimal_duration_is_allowed() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Verify that the minimal non-zero duration (1 second) is allowed
+    // and works correctly
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,  // amount
+        &1u64,         // duration_seconds = 1 (minimal non-zero)
+        &0u64,         // cliff_seconds
+        &0u64,         // nonce
+        &false,        // auto_renew
+        &0u64,         // lock_until
+        &false,        // allow_recipient_termination
+        &0i128,        // holdback_amount
+        &None::<u32>,  // withdrawal_steps
+        &None::<i128>, // min_withdrawal_amount
+    );
+
+    // Should succeed
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 100_000);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.flow_rate, 100_000);  // 100_000 / 1 = 100_000
+    
+    // Verify end_time > start_time
+    assert!(
+        stream.end_time > stream.start_time,
+        "Stream with 1-second duration should have end_time > start_time"
+    );
+}
+
+#[test]
+fn test_zero_duration_cannot_be_bypassed_with_minimum_duration_zero() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Even if minimum duration is set to 0, zero-duration streams should still be rejected
+    // This tests that the explicit zero-duration check is independent of the minimum duration setting
+    
+    // The setup already calls set_min_duration(0), so minimum duration is 0
+    // But zero-duration should still be rejected
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,   // amount
+        &0u64,         // duration_seconds = 0 (explicitly zero)
+        &0u64,         // cliff_seconds
+        &1u64,         // nonce (different from other tests)
+        &false,        // auto_renew
+        &0u64,         // lock_until
+        &false,        // allow_recipient_termination
+        &0i128,        // holdback_amount
+        &None::<u32>,  // withdrawal_steps
+        &None::<i128>, // min_withdrawal_amount
+    );
+
+    // Should fail even though minimum duration is 0
+    assert!(
+        result.is_err(),
+        "Zero-duration stream should be rejected even when min_duration is 0"
+    );
+    
+    match result {
+        Err(e) => {
+            assert_eq!(
+                e,
+                Ok(StreamError::InvalidDuration),
+                "Should get InvalidDuration error, not StreamDurationTooShort or other errors"
+            );
+        }
+        Ok(_) => panic!("Zero-duration should never be allowed"),
+    }
+}
+
+
+#[test]
+fn test_batch_create_insufficient_balance_rejects_entire_batch() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Create vectors for batch create
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    recipients.push_back(Address::generate(&t.env));
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(400_000i128);  // First stream
+    amounts.push_back(700_000i128);  // Second stream (total = 1,100,000)
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(t.token_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    
+    // Sender only has 1,000,000 tokens, but needs 1,100,000
+    // The batch should be ENTIRELY rejected, with no streams created
+    let result = c.try_batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1000u64,  // duration
+        &false,    // auto_renew
+        &lock_untils,
+        &0u64,     // nonce
+    );
+    
+    // Should fail due to insufficient balance
+    assert!(result.is_err(), "Batch should be rejected due to insufficient balance");
+    
+    // Verify NO streams were created (all-or-nothing)
+    let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
+    assert_eq!(all_stream_ids.len(), 0, "No streams should be created when batch fails");
+}
+
+#[test]
+fn test_batch_create_sufficient_balance_succeeds_for_all() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Mint enough tokens for multiple streams
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &1_000_000);
+    
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    recipients.push_back(Address::generate(&t.env));
+    recipients.push_back(Address::generate(&t.env));
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(300_000i128);
+    amounts.push_back(300_000i128);
+    amounts.push_back(300_000i128);
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(t.token_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    
+    let stream_ids = c.batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1000u64,
+        &false,
+        &lock_untils,
+        &0u64,
+    );
+    
+    // All 3 streams should be created
+    assert_eq!(stream_ids.len(), 3, "All 3 streams should be created");
+    
+    // Verify all streams exist with correct parameters
+    for i in 0..3 {
+        let stream_id = stream_ids.get(i).unwrap();
+        let stream = c.get_stream(&stream_id);
+        assert_eq!(stream.deposit, 300_000i128);
+        assert_eq!(stream.status, StreamStatus::Active);
+    }
+}
+
+#[test]
+fn test_batch_create_validates_flow_rate_bounds() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Mint a huge amount to test flow rate bounds
+    let huge_amount = i128::MAX / 2;
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &huge_amount);
+    
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(huge_amount);  // Extremely large amount
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    
+    // Even with sufficient balance, flow_rate = huge_amount / 1 would overflow
+    // So the batch should be rejected in Phase 1
+    let result = c.try_batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1u64,  // 1-second duration (makes flow_rate = huge_amount)
+        &false,
+        &lock_untils,
+        &0u64,
+    );
+    
+    // Should fail due to unsafe flow_rate
+    assert!(result.is_err(), "Batch should reject unsafe flow_rate");
+    
+    // No streams should be created
+    let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
+    assert_eq!(all_stream_ids.len(), 0, "No streams should be created with unsafe flow_rate");
+}
+
+#[test]
+fn test_batch_create_multi_token_balance_check() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Create a second token
+    let token_admin = Address::generate(&t.env);
+    let token2_id = t.env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    
+    // Mint tokens: sender has 600_000 of token1 but only 100_000 of token2
+    let token1_client = TokenClient::new(&t.env, &t.token_id);
+    token1_client.mint(&t.sender, &600_000);
+    
+    let token2_client = TokenClient::new(&t.env, &token2_id);
+    token2_client.mint(&t.sender, &100_000);
+    
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    recipients.push_back(Address::generate(&t.env));
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(300_000i128);  // Token 1: 300_000 needed
+    amounts.push_back(200_000i128);  // Token 2: 200_000 needed (but only has 100_000)
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(token2_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    
+    // Batch should fail: insufficient token2 balance
+    let result = c.try_batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1000u64,
+        &false,
+        &lock_untils,
+        &0u64,
+    );
+    
+    assert!(result.is_err(), "Batch should fail due to insufficient token2 balance");
+    
+    // No streams should be created
+    let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
+    assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
+}
