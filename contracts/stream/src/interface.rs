@@ -36,6 +36,9 @@ pub trait SoroStreamInterface {
         holdback_amount: i128,
         withdrawal_steps: Option<u32>,
         min_withdrawal_amount: Option<i128>,
+        non_transferable: bool,
+        requires_recipient_approval: bool,
+        enforce_recipient_allowlist: bool,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -109,6 +112,34 @@ pub trait SoroStreamInterface {
     fn set_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
     fn add_to_whitelist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
     fn remove_from_whitelist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
+
+    /// Sets whether the recipient allowlist is enabled globally.
+    ///
+    /// When enabled and a stream is created with `enforce_recipient_allowlist = true`,
+    /// the recipient must be on the allowlist. Admin only.
+    ///
+    /// Note: This is distinct from the stream creation whitelist (for general compliance).
+    /// The recipient allowlist is for per-stream enforcement scenarios.
+    fn set_recipient_allowlist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
+
+    /// Returns whether the recipient allowlist is currently enabled.
+    fn is_recipient_allowlist_enabled(env: Env) -> bool;
+
+    /// Adds a recipient address to the allowlist for regulated stream creation.
+    ///
+    /// Only the admin may call this. Once added, this address can receive streams
+    /// that have `enforce_recipient_allowlist = true`.
+    fn add_to_recipient_allowlist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
+
+    /// Removes a recipient address from the allowlist.
+    ///
+    /// Only the admin may call this. After removal, this address cannot receive
+    /// new streams with `enforce_recipient_allowlist = true`.
+    fn remove_from_recipient_allowlist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
+
+    /// Returns whether a recipient is on the allowlist.
+    fn is_recipient_allowed(env: Env, recipient: Address) -> bool;
+
     fn update_metadata(env: Env, sender: Address, stream_id: u64, metadata: Bytes) -> Result<(), StreamError>;
     fn cancel_auto_renew(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
 

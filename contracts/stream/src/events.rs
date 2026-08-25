@@ -490,6 +490,38 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     );
 }
 
+/// Emitted when a recipient is added to the allowlist.
+pub fn recipient_allowlisted(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientAllowlisted"),),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when a recipient is removed from the allowlist.
+pub fn recipient_disallowlisted(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientDisallowlisted"),),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when recipient allowlist is toggled globally.
+pub fn recipient_allowlist_toggled(env: &Env, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientAllowlistToggled"),),
+        enabled,
+    );
+}
+
+/// Emitted when a stream is created with allowlist enforcement enabled.
+pub fn stream_created_with_allowlist_enforcement(env: &Env, stream_id: u64, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamCreatedWithAllowlistEnforcement"), stream_id),
+        recipient.clone(),
+    );
+}
+
 /// Emitted when a federation name is registered (Issue #238).
 pub fn federation_registered(env: &Env, federation_name: &String, stellar_address: &Address) {
     env.events().publish(

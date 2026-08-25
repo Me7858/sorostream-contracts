@@ -657,6 +657,11 @@ impl SoroStreamContract {
             events::stream_config(&env, stream_id, withdrawal_steps, min_withdrawal_amount);
         }
 
+        // Emit supplemental event if recipient allowlist enforcement is enabled
+        if enforce_recipient_allowlist {
+            events::stream_created_with_allowlist_enforcement(&env, stream_id, &recipient);
+        }
+
         Ok(stream_id)
     }
 
@@ -691,6 +696,226 @@ impl SoroStreamContract {
             lock_until,
             allow_recipient_termination,
         )
+    }
+
+    /// Creates a payment stream with a caller-supplied `start_time`.
+    ///
+    /// Funds are locked in the contract immediately, but streaming does not begin
+    /// until the specified `start_time` is reached. This allows advance scheduling
+    /// of payment streams.
+    ///
+    /// `start_time` must satisfy `now <= start_time <= now + max_future_start_offset`.
+    /// Returns `InvalidStartTime` for past timestamps and `StartTimeTooFar` when
+    /// the offset limit is exceeded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_scheduled(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        start_time: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+        holdback_amount: i128,
+    ) -> Result<u64, StreamError> {
+        sender.require_auth();
+
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Validate start_time: must be >= now
+        if start_time < now {
+            return Err(StreamError::InvalidStartTime);
+        }
+
+        // Validate start_time is not too far in the future
+        let max_offset = read_max_future_start_offset(&env);
+        let max_start_time = now.saturating_add(max_offset);
+        if start_time > max_start_time {
+            return Err(StreamError::StartTimeTooFar);
+        }
+
+        // Validate cliff: cliff_seconds must not exceed duration_seconds
+        if cliff_seconds > duration_seconds {
+            return Err(StreamError::InvalidCliff);
+        }
+
+        // Basic validations (same as create_stream)
+        if nonce_used(&env, &sender, nonce) {
+            return Err(StreamError::DuplicateStream);
+        }
+        if amount <= 0 {
+            return Err(StreamError::ZeroAmount);
+        }
+        if holdback_amount < 0 || holdback_amount >= amount {
+            return Err(StreamError::ZeroAmount);
+        }
+
+        // Recipient whitelist check
+        if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
+            return Err(StreamError::RecipientNotWhitelisted);
+        }
+
+        // Recipient allowlist check
+        if is_recipient_allowed(&env, &recipient) == false {
+            return Err(StreamError::RecipientNotAllowed);
+        }
+
+        let min_dur = read_min_duration(&env);
+        if duration_seconds < min_dur {
+            return Err(StreamError::StreamDurationTooShort);
+        }
+
+        let max_dur = read_max_duration(&env);
+        if max_dur > 0 && duration_seconds > max_dur {
+            return Err(StreamError::DurationExceedsMax);
+        }
+
+        let streaming_amount = amount
+            .checked_sub(holdback_amount)
+            .ok_or(StreamError::Overflow)?;
+        let flow_rate = streaming_amount / duration_seconds as i128;
+        if flow_rate == 0 {
+            return Err(StreamError::ZeroFlowRate);
+        }
+
+        let sender_count = get_sender_stream_count(&env, &sender);
+        let limit = effective_sender_limit(&env, &sender);
+        if sender_count >= limit {
+            return Err(StreamError::SenderStreamLimitExceeded);
+        }
+
+        if is_blocked(&env, &sender) || is_blocked(&env, &recipient) {
+            return Err(StreamError::AddressBlocked);
+        }
+
+        let max_per_token = get_max_streams_per_token(&env);
+        if max_per_token > 0 && get_token_stream_count(&env, &token) >= max_per_token {
+            return Err(StreamError::TokenStreamCapExceeded);
+        }
+
+        mark_nonce_used(&env, &sender, nonce);
+
+        // Calculate end_time from start_time
+        let end_time = start_time
+            .checked_add(duration_seconds)
+            .ok_or(StreamError::Overflow)?;
+        if end_time <= start_time {
+            return Err(StreamError::InvalidEndTime);
+        }
+
+        // Calculate cliff_time from start_time
+        let cliff_time = start_time
+            .checked_add(cliff_seconds)
+            .ok_or(StreamError::Overflow)?;
+
+        // Defensive stream ID collision check
+        const MAX_ID_RETRIES: u64 = 3;
+        let mut stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
+        if stream_exists(&env, stream_id) {
+            let mut found = false;
+            for retry in 1u64..=MAX_ID_RETRIES {
+                let candidate = derive_stream_id(
+                    &env, &sender, &recipient, now, nonce ^ (retry << 32),
+                );
+                if !stream_exists(&env, candidate) {
+                    stream_id = candidate;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(StreamError::IDCollision);
+            }
+        }
+
+        let creation_fee = get_creation_fee_xlm(&env);
+        if creation_fee > 0 {
+            let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+            let xlm_token = get_xlm_token(&env).ok_or(StreamError::NotInitialized)?;
+            token::Client::new(&env, &xlm_token).transfer(
+                &sender,
+                &treasury,
+                &creation_fee,
+            );
+            events::creation_fee_collected(&env, creation_fee, &treasury);
+        }
+
+        // Transfer tokens from sender to contract
+        token::Client::new(&env, &token).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let stream = Stream {
+            id: stream_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            deposit: streaming_amount,
+            flow_rate,
+            start_time,
+            cliff_time,
+            lock_until,
+            end_time,
+            last_withdraw_time: start_time,
+            status: StreamStatus::Active,
+            auto_renew,
+            allow_recipient_termination,
+            last_pause_time: 0,
+            total_withdrawn: 0,
+            metadata: Bytes::new(&env),
+            locked: false,
+            metadata_uri: None,
+            milestones: Vec::new(&env),
+            holdback_amount,
+            holdback_claimed: false,
+            is_dual_stream: false,
+            is_step_vesting: false,
+            tranches_claimed: 0,
+            oracle: None,
+            max_price_deviation_bps: 0,
+            creation_price: 0,
+            curve: VestingCurve::Linear,
+            withdrawal_steps: None,
+            current_step: 0,
+            min_withdrawal_amount: None,
+            non_transferable: false,
+            requires_recipient_approval: false,
+            approval_timestamp: 0,
+            sender_locked: false,
+            enforce_recipient_allowlist: false,
+        };
+
+        save_stream(&env, &stream);
+        extend_instance_ttl(&env);
+        index_by_sender(&env, &sender, stream_id);
+        index_by_recipient(&env, &recipient, stream_id);
+        index_global_stream(&env, stream_id);
+        increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &stream.token);
+
+        set_sender_last_creation_time(&env, &sender, now);
+
+        events::stream_created(
+            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
+        );
+
+        // Emit event specifically for future-dated stream
+        events::stream_scheduled(
+            &env, stream_id, &sender, &recipient, start_time, end_time,
+        );
+
+        Ok(stream_id)
     }
 
     /// Returns the minimum allowed stream duration in seconds.
@@ -2770,6 +2995,201 @@ impl SoroStreamContract {
 
         clear_reentrancy_lock(&env);
         Ok(())
+    }
+
+    /// Splits a stream by canceling it and atomically creating multiple new streams
+    /// with proportionally split balances among new recipients.
+    ///
+    /// The sender calls this with:
+    /// - `stream_id`: the stream to cancel
+    /// - `recipients`: new recipient addresses
+    /// - `proportions`: proportion values defining how to split the earned amount
+    /// - `nonce`: unique nonce for new stream IDs
+    ///
+    /// Returns a vector of newly created stream IDs.
+    ///
+    /// # Flow
+    ///
+    /// 1. Load and validate the original stream
+    /// 2. Verify sender authorization
+    /// 3. Cancel the stream, computing earned vs. refundable amounts
+    /// 4. Send sender refund immediately
+    /// 5. Atomically create new streams with split earned amount
+    /// 6. Emit StreamSplit event
+    ///
+    /// # Errors
+    ///
+    /// Returns errors for invalid input, stream not found, unauthorized access, or
+    /// stream creation failures for the new streams.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_stream(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        recipients: Vec<Address>,
+        proportions: Vec<u128>,
+        nonce: u64,
+    ) -> Result<Vec<u64>, StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+        if is_reentrancy_locked(&env) {
+            return Err(StreamError::ReentrancyDetected);
+        }
+        set_reentrancy_lock(&env);
+
+        sender.require_auth();
+
+        // Validate inputs
+        if recipients.len() as u32 == 0 || recipients.len() as u32 > 100 {
+            return Err(StreamError::BatchLengthMismatch);
+        }
+        if recipients.len() != proportions.len() {
+            return Err(StreamError::BatchLengthMismatch);
+        }
+
+        // Load original stream
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        // Verify authorization
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        // Stream must be in a state that allows cancellation
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        // Cannot split if sender has locked the stream
+        if stream.sender_locked {
+            return Err(StreamError::StreamIsLocked);
+        }
+
+        // Determine current time for calculations
+        let now = if stream.status == StreamStatus::Paused {
+            stream.last_pause_time
+        } else {
+            env.ledger().timestamp()
+        };
+
+        // Compute amounts owed to recipient vs. refundable to sender
+        let recipient_amount = if now < stream.cliff_time {
+            // Before cliff: recipient earns nothing
+            0i128
+        } else {
+            let earned = vesting_math::compute_earned(
+                stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+            ).ok_or(StreamError::Overflow)?;
+            let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+            earned.min(available)
+        };
+
+        let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+        let recipient_amount_clamped = recipient_amount.min(available);
+        let refund_amount = available.saturating_sub(recipient_amount_clamped);
+
+        // Include holdback in sender refund if not yet settled
+        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
+            get_holdback(&env, stream_id)
+        } else {
+            0
+        };
+
+        // Calculate original stream duration
+        let original_duration = stream.end_time.saturating_sub(stream.start_time);
+
+        // Calculate total proportions (sum of all proportions)
+        let mut total_proportions: u128 = 0;
+        for p in proportions.iter() {
+            total_proportions = total_proportions
+                .checked_add(*p)
+                .ok_or(StreamError::Overflow)?;
+        }
+
+        if total_proportions == 0 {
+            clear_reentrancy_lock(&env);
+            return Err(StreamError::ZeroAmount);
+        }
+
+        // EFFECTS: Remove original stream from storage before creating new ones
+        remove_stream(&env, stream_id);
+        unindex_by_sender(&env, &stream.sender, stream_id);
+        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        if holdback_refund > 0 {
+            remove_holdback(&env, stream_id);
+        }
+
+        // Decrement active count and token stream count
+        if stream.status == StreamStatus::Active {
+            decrement_active_stream_count(&env);
+            decrement_token_stream_count(&env, &stream.token);
+        }
+
+        // INTERACTIONS: Transfer refund to sender
+        if refund_amount > 0 || holdback_refund > 0 {
+            let total_refund = refund_amount.saturating_add(holdback_refund);
+            token::Client::new(&env, &stream.token).transfer(
+                &env.current_contract_address(),
+                &stream.sender,
+                &total_refund,
+            );
+        }
+
+        // Create new streams with split amounts
+        let mut new_stream_ids = Vec::with_capacity(&env, recipients.len() as u32);
+        let token_client = token::Client::new(&env, &stream.token);
+
+        for (idx, recipient) in recipients.iter().enumerate() {
+            let proportion = proportions.get(idx as u32).unwrap();
+            
+            // Calculate this stream's share of earned amount
+            let stream_share = (recipient_amount_clamped as u128)
+                .checked_mul(*proportion)
+                .ok_or(StreamError::Overflow)?
+                .checked_div(total_proportions)
+                .ok_or(StreamError::Overflow)? as i128;
+
+            if stream_share <= 0 {
+                // Skip zero-amount streams but don't error
+                continue;
+            }
+
+            // Create new stream with same parameters as original
+            let new_stream_id = Self::create_stream(
+                env.clone(),
+                stream.sender.clone(),
+                recipient.clone(),
+                stream.token.clone(),
+                stream_share,
+                original_duration,
+                stream.cliff_time.saturating_sub(stream.start_time),
+                nonce ^ (idx as u64), // Vary nonce for each new stream
+                stream.auto_renew,
+                stream.lock_until.saturating_sub(stream.start_time),
+                stream.allow_recipient_termination,
+                0i128, // No holdback on split streams
+                None,  // No withdrawal steps
+                None,  // No min withdrawal amount
+                stream.non_transferable,
+                false, // No approval requirement for split streams
+            )?;
+
+            new_stream_ids.push_back(new_stream_id);
+        }
+
+        // Emit split event
+        events::stream_split(
+            &env,
+            stream_id,
+            &stream.sender,
+            &new_stream_ids,
+            recipient_amount_clamped,
+            refund_amount.saturating_add(holdback_refund),
+        );
+
+        clear_reentrancy_lock(&env);
+        Ok(new_stream_ids)
     }
 
     /// Transfers claim rights of a stream to a new recipient.
