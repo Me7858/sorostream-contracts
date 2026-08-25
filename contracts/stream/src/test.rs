@@ -5400,3 +5400,561 @@ fn test_get_claimable_zero_dust_before_start() {
         assert_eq!(claimable, 0, "get_claimable must return 0 before cliff, not dust at t={}", t_val);
     }
 }
+
+
+#[test]
+fn test_query_streams_empty_filter() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create some streams
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+    let _stream_id2 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Query with empty filter (no criteria specified)
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 2, "Empty filter should return all streams");
+}
+
+#[test]
+fn test_query_streams_by_status() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    let stream_id2 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Cancel one stream
+    c.cancel_stream(&stream_id2, &t.sender);
+
+    // Query for Active streams
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Active),
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let active_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(active_results.len(), 1, "Should return only active stream");
+    assert_eq!(active_results.get(0).id, stream_id1);
+
+    // Query for Cancelled streams
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Cancelled),
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let cancelled_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(
+        cancelled_results.len(),
+        1,
+        "Should return only cancelled stream"
+    );
+    assert_eq!(cancelled_results.get(0).id, stream_id2);
+}
+
+#[test]
+fn test_query_streams_by_sender() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let sender2 = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&sender2, &1_000_000);
+
+    // Create stream from sender1
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream from sender2
+    let _stream_id2 = c.create_stream(
+        &sender2,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Query for streams from sender1
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: Some(t.sender.clone()),
+        recipient: None,
+    };
+    let sender1_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(sender1_results.len(), 1, "Should return only sender1 streams");
+    assert_eq!(sender1_results.get(0).sender, t.sender);
+
+    // Query for streams from sender2
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: Some(sender2.clone()),
+        recipient: None,
+    };
+    let sender2_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(sender2_results.len(), 1, "Should return only sender2 streams");
+    assert_eq!(sender2_results.get(0).sender, sender2);
+}
+
+#[test]
+fn test_query_streams_by_recipient() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let recipient2 = Address::generate(&t.env);
+
+    // Create stream to recipient1
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream to recipient2
+    let _stream_id2 = c.create_stream(
+        &t.sender,
+        &recipient2,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Query for streams to recipient1
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: Some(t.recipient.clone()),
+    };
+    let recipient1_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(
+        recipient1_results.len(),
+        1,
+        "Should return only recipient1 streams"
+    );
+    assert_eq!(recipient1_results.get(0).recipient, t.recipient);
+
+    // Query for streams to recipient2
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: Some(recipient2.clone()),
+    };
+    let recipient2_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(
+        recipient2_results.len(),
+        1,
+        "Should return only recipient2 streams"
+    );
+    assert_eq!(recipient2_results.get(0).recipient, recipient2);
+}
+
+#[test]
+fn test_query_streams_by_asset() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let token_admin2 = Address::generate(&t.env);
+    let token_id2 = t
+        .env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    StellarAssetClient::new(&t.env, &token_id2).mint(&t.sender, &1_000_000);
+
+    // Create stream with token1
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream with token2
+    let _stream_id2 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &token_id2,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Query for streams using token1
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: Some(t.token_id.clone()),
+        sender: None,
+        recipient: None,
+    };
+    let token1_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(token1_results.len(), 1, "Should return only token1 streams");
+    assert_eq!(token1_results.get(0).token, t.token_id);
+
+    // Query for streams using token2
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: Some(token_id2.clone()),
+        sender: None,
+        recipient: None,
+    };
+    let token2_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(token2_results.len(), 1, "Should return only token2 streams");
+    assert_eq!(token2_results.get(0).token, token_id2);
+}
+
+#[test]
+fn test_query_streams_multiple_filters() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let sender2 = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&sender2, &1_000_000);
+
+    let recipient2 = Address::generate(&t.env);
+
+    // Create stream1: sender1, recipient1, Active
+    let stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream2: sender2, recipient1, Active
+    let stream_id2 = c.create_stream(
+        &sender2,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream3: sender1, recipient2, Active
+    let stream_id3 = c.create_stream(
+        &t.sender,
+        &recipient2,
+        &t.token_id,
+        &75_000i128,
+        &750u64,
+        &0u64,
+        &2u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream4: sender1, recipient1, Cancelled
+    let stream_id4 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &25_000i128,
+        &250u64,
+        &0u64,
+        &3u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+    c.cancel_stream(&stream_id4, &t.sender);
+
+    // Query: sender1, recipient1, Active
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Active),
+        asset: None,
+        sender: Some(t.sender.clone()),
+        recipient: Some(t.recipient.clone()),
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 1, "Should return only matching stream");
+    assert_eq!(results.get(0).id, stream_id1);
+
+    // Query: sender1, Active (any recipient)
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Active),
+        asset: None,
+        sender: Some(t.sender.clone()),
+        recipient: None,
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 2, "Should return sender1's active streams");
+    let ids: Vec<u64> = vec![results.get(0).id, results.get(1).id];
+    assert!(ids.contains(&stream_id1));
+    assert!(ids.contains(&stream_id3));
+
+    // Query: recipient1 (any sender/status)
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: Some(t.recipient.clone()),
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 3, "Should return all streams to recipient1");
+}
+
+#[test]
+fn test_query_streams_pagination() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create 5 streams
+    for i in 0..5 {
+        let _stream_id = c.create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_id,
+            &(100_000 - (i * 10_000)) as i128,
+            &1000u64,
+            &0u64,
+            &(i as u64),
+            &false,
+            &0u64,
+            &false,
+            &0i128,
+            &None::<u32>,
+            &None::<i128>,
+            &false,
+        );
+    }
+
+    // Query with empty filter to get all
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+
+    // Get first page (limit=2)
+    let page1 = c.query_streams(&filter, &0u32, &2u32);
+    assert_eq!(page1.len(), 2, "First page should have 2 results");
+
+    // Get second page (start=2, limit=2)
+    let page2 = c.query_streams(&filter, &2u32, &2u32);
+    assert_eq!(page2.len(), 2, "Second page should have 2 results");
+
+    // Get third page (start=4, limit=2) - should only have 1
+    let page3 = c.query_streams(&filter, &4u32, &2u32);
+    assert_eq!(page3.len(), 1, "Third page should have 1 result");
+
+    // Verify no overlap between pages
+    let page1_ids: Vec<u64> = (0..page1.len()).map(|i| page1.get(i as u32).id).collect();
+    let page2_ids: Vec<u64> = (0..page2.len()).map(|i| page2.get(i as u32).id).collect();
+    let page3_ids: Vec<u64> = (0..page3.len()).map(|i| page3.get(i as u32).id).collect();
+
+    for id in page1_ids.iter() {
+        assert!(!page2_ids.contains(id), "Pages should not overlap");
+        assert!(!page3_ids.contains(id), "Pages should not overlap");
+    }
+    for id in page2_ids.iter() {
+        assert!(!page3_ids.contains(id), "Pages should not overlap");
+    }
+}
+
+#[test]
+fn test_query_streams_limit_capped_at_20() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create 25 streams
+    for i in 0..25 {
+        let _stream_id = c.create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_id,
+            &(100_000 - (i * 1_000)) as i128,
+            &1000u64,
+            &0u64,
+            &(i as u64),
+            &false,
+            &0u64,
+            &false,
+            &0i128,
+            &None::<u32>,
+            &None::<i128>,
+            &false,
+        );
+    }
+
+    // Query with limit=50 should be capped at 20
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let results = c.query_streams(&filter, &0u32, &50u32);
+    assert_eq!(
+        results.len(),
+        20,
+        "Limit should be capped at 20, got {}",
+        results.len()
+    );
+}

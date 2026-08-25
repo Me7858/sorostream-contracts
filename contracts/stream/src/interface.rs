@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche};
+use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -81,6 +81,20 @@ pub trait SoroStreamInterface {
         curve: VestingCurve,
     ) -> Result<u64, StreamError>;
 
+    /// Creates a stream with timestamp-gated milestones (tranches).
+    /// Each milestone automatically unlocks at its unlock_time without requiring sender approval.
+    fn create_stream_with_milestones(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        milestones: Vec<(i128, u64, BytesN<32>)>,  // (amount, unlock_time, description_hash)
+        nonce: u64,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+    ) -> Result<u64, StreamError>;
+
     fn register_federation(env: Env, admin: Address, federation_name: String, stellar_address: Address) -> Result<(), StreamError>;
     fn unregister_federation(env: Env, admin: Address, federation_name: String) -> Result<(), StreamError>;
     fn resolve_federation(env: Env, federation_name: String) -> Result<Address, StreamError>;
@@ -108,8 +122,11 @@ pub trait SoroStreamInterface {
     fn is_participant(env: Env, stream_id: u64, address: Address) -> Result<bool, StreamError>;
     fn get_streams_by_sender(env: Env, sender: Address, start: u32, limit: u32) -> Vec<Stream>;
     fn get_streams_by_recipient(env: Env, recipient: Address, start: u32, limit: u32) -> Vec<Stream>;
+    fn get_streams_by_tag(env: Env, sender: Address, tag: String, start: u32, limit: u32) -> Vec<Stream>;
+    fn set_stream_tag(env: Env, stream_id: u64, sender: Address, tag: Option<String>) -> Result<(), StreamError>;
     fn get_active_streams_by_sender(env: Env, sender: Address) -> Vec<Stream>;
     fn get_active_streams_by_recipient(env: Env, recipient: Address) -> Vec<Stream>;
+    fn query_streams(env: Env, filter: StreamQueryFilter, start: u32, limit: u32) -> Vec<Stream>;
     fn simulate_claimable(env: Env, stream_id: u64, query_time: u64) -> Result<i128, StreamError>;
 
     fn pause_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
@@ -348,4 +365,30 @@ pub trait SoroStreamInterface {
     /// # Errors
     /// Returns `StreamError::StreamNotFound` if no stream with this ID exists.
     fn get_stream_health(env: Env, stream_id: u64) -> Result<StreamHealth, StreamError>;
+
+    // ── Admin Override: Dispute Resolution ────────────────────────────────────
+
+    /// Sets the timelock delay (in seconds) required before admin overrides can be executed.
+    /// Only the admin may call this.
+    fn set_admin_override_timelock(env: Env, timelock_seconds: u64) -> Result<(), StreamError>;
+
+    /// Returns the current admin override timelock in seconds.
+    fn get_admin_override_timelock(env: Env) -> u64;
+
+    /// Initiates an admin override request for a stream (Cancel or Complete).
+    /// Requires the mandatory timelock delay before execution.
+    /// Only the admin may call this. Returns the request ID.
+    fn initiate_admin_override(
+        env: Env,
+        stream_id: u64,
+        action: OverrideAction,
+        reason: String,
+    ) -> Result<u64, StreamError>;
+
+    /// Executes a previously-initiated admin override request after the timelock has expired.
+    /// Only the admin may call this.
+    fn execute_admin_override(env: Env, request_id: u64) -> Result<(), StreamError>;
+
+    /// Returns an admin override request by ID.
+    fn get_override_request(env: Env, request_id: u64) -> Result<AdminOverrideRequest, StreamError>;
 }
