@@ -17,6 +17,7 @@ use soroban_sdk::{
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
 const ADMIN_KEY: &str = "admin";
+const PENDING_ADMIN_KEY: &str = "pending_admin";
 const GUARDIAN_KEY: &str = "guardian";
 const TOKEN_KEY: &str = "token";
 const PROPOSAL_THRESHOLD_KEY: &str = "p_thresh";
@@ -91,6 +92,10 @@ pub enum GovernanceError {
 
 fn read_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, ADMIN_KEY))
+}
+
+fn read_pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
 }
 
 fn check_admin(env: &Env) {
@@ -434,6 +439,34 @@ impl GovernanceContract {
             return Err(GovernanceError::InvalidParam);
         }
         env.storage().instance().set(&Symbol::new(&env, TIMELOCK_PERIOD_KEY), &seconds);
+        Ok(())
+    }
+
+    /// Proposes a new admin. Only admin may call this.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), GovernanceError> {
+        check_admin(&env);
+        env.storage().instance().set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"),),
+            new_admin,
+        );
+        Ok(())
+    }
+
+    /// Accepts the admin role. The pending admin must call this.
+    pub fn accept_admin(env: Env, accepted_by: Address) -> Result<(), GovernanceError> {
+        accepted_by.require_auth();
+        let pending = read_pending_admin(&env)
+            .ok_or(GovernanceError::NotInitialized)?;
+        if accepted_by != pending {
+            return Err(GovernanceError::NotAdmin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, ADMIN_KEY), &accepted_by);
+        env.storage().instance().remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 }

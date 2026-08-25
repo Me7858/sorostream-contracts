@@ -54,6 +54,7 @@ pub struct DeploymentInfo {
 // ---------------------------------------------------------------------------
 
 const ADMIN_KEY: &str = "admin";
+const PENDING_ADMIN_KEY: &str = "pending_admin";
 const CONTRACTS_KEY: &str = "contracts";
 const INFO_PREFIX: &str = "info";
 
@@ -67,6 +68,14 @@ fn contracts_key(env: &Env) -> Symbol {
 
 fn info_key(env: &Env, addr: &Address) -> (Symbol, Address) {
     (Symbol::new(env, INFO_PREFIX), addr.clone())
+}
+
+fn read_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&admin_key(env))
+}
+
+fn read_pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,5 +215,36 @@ impl StreamFactory {
     /// Returns the current factory admin address.
     pub fn get_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&admin_key(&env))
+    }
+
+    /// Proposes a new admin. Only the current admin may call this.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), FactoryError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key(&env))
+            .ok_or(FactoryError::NotInitialized)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        Ok(())
+    }
+
+    /// Accepts the admin role. The pending admin must call this.
+    pub fn accept_admin(env: Env, accepted_by: Address) -> Result<(), FactoryError> {
+        accepted_by.require_auth();
+        let pending = read_pending_admin(&env)
+            .ok_or(FactoryError::NotInitialized)?;
+        if accepted_by != pending {
+            return Err(FactoryError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&admin_key(&env), &accepted_by);
+        env.storage()
+            .instance()
+            .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        Ok(())
     }
 }

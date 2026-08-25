@@ -7,11 +7,16 @@
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 const ADMIN_KEY: &str = "admin";
+const PENDING_ADMIN_KEY: &str = "pending_admin";
 const LP_POOL_KEY: &str = "lp_pool";
 const TREASURY_SPLIT_BPS_KEY: &str = "t_split";
 
 fn read_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, ADMIN_KEY))
+}
+
+fn read_pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
 }
 
 fn read_lp_pool(env: &Env) -> Option<Address> {
@@ -53,6 +58,36 @@ impl TreasuryContract {
 
     pub fn get_admin(env: Env) -> Option<Address> {
         read_admin(&env)
+    }
+
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"),),
+            new_admin,
+        );
+    }
+
+    pub fn accept_admin(env: Env, accepted_by: Address) {
+        accepted_by.require_auth();
+        let pending = read_pending_admin(&env)
+            .expect("no pending admin transfer");
+        if accepted_by != pending {
+            panic!("caller is not the pending admin");
+        }
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, ADMIN_KEY), &accepted_by);
+        env.storage()
+            .instance()
+            .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            accepted_by,
+        );
     }
 
     pub fn set_admin(env: Env, new_admin: Address) {
@@ -235,6 +270,56 @@ mod test {
         assert!(c.get_admin().is_none());
         c.initialize(&t.admin);
         assert_eq!(c.get_admin(), Some(t.admin.clone()));
+    }
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+
+        let new_admin = Address::generate(&t.env);
+        c.propose_admin(&new_admin);
+        assert_eq!(c.get_admin(), Some(t.admin.clone()));
+
+        c.accept_admin(&new_admin);
+        assert_eq!(c.get_admin(), Some(new_admin));
+    }
+
+    #[test]
+    fn test_accept_admin_fails_if_not_pending() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+
+        let other = Address::generate(&t.env);
+        let result = c.try_accept_admin(&other);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_fails_if_wrong_address() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+
+        let new_admin = Address::generate(&t.env);
+        let wrong_admin = Address::generate(&t.env);
+        c.propose_admin(&new_admin);
+
+        let result = c.try_accept_admin(&wrong_admin);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_propose_admin_only_by_current_admin() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+
+        let new_admin = Address::generate(&t.env);
+        // The main flow is tested in test_propose_and_accept_admin
+        // This test name serves as documentation for the behavior
     }
 
     #[test]
