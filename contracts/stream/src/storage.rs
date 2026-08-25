@@ -842,18 +842,19 @@ fn rate_limit_key(env: &Env, addr: &Address) -> (Symbol, Address) {
     (Symbol::new(env, "rl"), addr.clone())
 }
 
-/// Gets rate limit state: (window_start_time, count_in_current_window)
+/// Gets rate limit state: (window_start_time, count_in_current_window) from temporary storage
+/// This uses temporary storage so the rate limit window is sliding and relative to ledger time.
 pub fn get_rate_limit_state(env: &Env, addr: &Address) -> (u64, u32) {
     env.storage()
-        .persistent()
+        .temporary()
         .get(&rate_limit_key(env, addr))
         .unwrap_or((0u64, 0u32))
 }
 
-/// Sets rate limit state.
+/// Sets rate limit state in temporary storage.
 pub fn set_rate_limit_state(env: &Env, addr: &Address, window_start: u64, count: u32) {
     env.storage()
-        .persistent()
+        .temporary()
         .set(&rate_limit_key(env, addr), &(window_start, count));
 }
 
