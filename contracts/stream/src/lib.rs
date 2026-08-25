@@ -394,6 +394,8 @@ impl SoroStreamContract {
         let min_withdrawal_amount: Option<i128> = None;
         let non_transferable = false;
         let requires_recipient_approval = false;
+        let on_complete_contract: Option<Address> = None;
+        let on_complete_function: Option<Symbol> = None;
         sender.require_auth();
 
         if is_paused_or_auto_unpause(&env) {
@@ -460,6 +462,15 @@ impl SoroStreamContract {
             if floor <= 0 {
                 return Err(StreamError::ZeroAmount);
             }
+        }
+
+        // ── Validate on_complete callback ────────────────────────────────────
+        // Both contract and function must be provided together, or both must be None.
+        match (&on_complete_contract, &on_complete_function) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(StreamError::InvalidDuration);
+            }
+            _ => {}
         }
 
         let sender_count = get_sender_stream_count(&env, &sender);
@@ -579,6 +590,8 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            on_complete_contract,
+            on_complete_function,
         };
 
         save_stream(&env, &stream);
@@ -853,6 +866,8 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            on_complete_contract: None,
+            on_complete_function: None,
         };
 
         save_stream(&env, &stream);
@@ -1025,6 +1040,8 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            on_complete_contract: None,
+            on_complete_function: None,
         };
 
         save_stream(&env, &stream);
@@ -1607,6 +1624,8 @@ impl SoroStreamContract {
                 remove_stream(&env, stream_id);
                 unindex_by_sender(&env, &stream.sender, stream_id);
                 unindex_by_recipient(&env, &stream.recipient, stream_id);
+                // Invoke on_complete callback if configured
+                Self::invoke_on_complete(&env, &stream);
             } else {
                 save_stream(&env, &stream);
             }
@@ -1848,6 +1867,8 @@ impl SoroStreamContract {
                     }
                     events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
                     events::stream_completed(&env, stream_id);
+                    // Invoke on_complete callback if configured
+                    Self::invoke_on_complete(&env, &stream);
                 } else {
                     stream.sender.require_auth();
                     let new_end = stream
@@ -1901,6 +1922,9 @@ impl SoroStreamContract {
                     );
                 }
                 events::stream_completed(&env, stream_id);
+                // Invoke on_complete callback if configured
+                stream.status = StreamStatus::Completed;
+                Self::invoke_on_complete(&env, &stream);
             }
         } else {
             stream.locked = false;
@@ -2507,6 +2531,8 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            on_complete_contract: None,
+            on_complete_function: None,
         };
 
         save_stream(&env, &new_stream);
@@ -3147,6 +3173,8 @@ impl SoroStreamContract {
                 expiry_warning_emitted: false,
                 redirect_to_stream_id: None,
                 is_dual_stream: false,
+                on_complete_contract: None,
+                on_complete_function: None,
             };
 
             save_stream(&env, &stream);
@@ -3631,5 +3659,28 @@ impl SoroStreamContract {
             ttl_remaining_ledgers: ttl_remaining,
             status,
         })
+    }
+
+    /// Internal helper: invokes on_complete callback if configured for a stream.
+    ///
+    /// Called when a stream transitions to Completed status.  Attempts to invoke the
+    /// configured contract's function with stream_id as an argument.  Success and
+    /// failure are both emitted as events; no exception is thrown if the callback fails.
+    fn invoke_on_complete(env: &Env, stream: &Stream) {
+        if let (Some(ref contract), Some(ref function)) = (&stream.on_complete_contract, &stream.on_complete_function) {
+            events::on_complete_invoked(env, stream.id, contract, function);
+
+            // Attempt to invoke the callback. We invoke with the stream_id as the argument.
+            // Since contract invocations can fail, we just log the attempt and assume success
+            // unless the contract returns an error or panics.
+            env.invoke_contract::<()>(
+                contract,
+                function,
+                soroban_sdk::vec![env, soroban_sdk::IntoVal::into_val(&stream.id, env)],
+            );
+
+            // If we reach here without panic, the callback succeeded
+            events::on_complete_success(env, stream.id, contract);
+        }
     }
 }

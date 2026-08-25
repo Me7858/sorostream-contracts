@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 /// Vesting release curve applied to a payment stream.
 ///
@@ -227,6 +227,15 @@ pub struct Stream {
     pub redirect_to_stream_id: Option<u64>,
     /// Whether this stream is a dual-token stream.
     pub is_dual_stream: bool,
+
+    // ── On-complete callback (composable DeFi) ──────────────────────────────
+
+    /// Optional contract address to invoke when the stream completes.
+    /// If set, the contract's function specified by `on_complete_function` will be called.
+    pub on_complete_contract: Option<Address>,
+    /// Optional function signature to invoke on stream completion.
+    /// Only used if `on_complete_contract` is set.
+    pub on_complete_function: Option<Symbol>,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.

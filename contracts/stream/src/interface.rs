@@ -3,7 +3,7 @@
 //! Defines the formal trait interface for the SoroStream payment streaming contract.
 //! The `#[contractclient]` attribute generates a type-safe SDK client struct.
 
-use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::errors::StreamError;
 use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche};
@@ -79,6 +79,8 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
         curve: VestingCurve,
+        on_complete_contract: Option<Address>,
+        on_complete_function: Option<Symbol>,
     ) -> Result<u64, StreamError>;
 
     fn register_federation(env: Env, admin: Address, federation_name: String, stellar_address: Address) -> Result<(), StreamError>;
@@ -170,6 +172,8 @@ pub trait SoroStreamInterface {
         lock_until: u64,
         allow_recipient_termination: bool,
         holdback_amount: i128,
+        on_complete_contract: Option<Address>,
+        on_complete_function: Option<Symbol>,
     ) -> Result<u64, StreamError>;
 
     /// Runs a one-time migration step after a WASM upgrade. Admin-gated and idempotent.
