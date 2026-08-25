@@ -1,5 +1,6 @@
+#![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
-use soroban_sdk::{Address, Bytes, Env, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
 const PAUSED_KEY: &str = "paused";
@@ -742,13 +743,6 @@ pub fn get_effective_fee_tier(env: &Env, token: &Address) -> u32 {
     get_token_fee_tier(env, token).unwrap_or_else(|| get_protocol_fee(env))
 }
 
-// --- Accumulated fees per token (sweep_fees #222) ---
-
-fn fees_collected_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "fc"), token.clone())
-}
-
-/// Returns the total accumulated (unsewpt) fees for the given token.
 // --- Holdback escrow helpers ---
 
 fn holdback_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
@@ -775,6 +769,8 @@ pub fn remove_holdback(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&holdback_key(env, stream_id));
+}
+
 // ---------------------------------------------------------------------------
 // Step-vesting tranche helpers
 // ---------------------------------------------------------------------------
@@ -804,25 +800,33 @@ pub fn remove_tranches(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&tranche_key(env, stream_id));
+}
+
 // --- Rate Limiting ---
 
 const RATE_LIMIT_WINDOW_KEY: &str = "rl_win";
 const RATE_LIMIT_MAX_KEY: &str = "rl_max";
 const RATE_LIMIT_EXEMPT_KEY: &str = "rl_ex";
 
-/// Gets the rate limit window size in seconds (default: 3600).
-pub fn get_rate_limit_window(env: &Env) -> u64 {
+/// Key for the ledger-sequence-based rate limit window size.
+const RATE_LIMIT_WINDOW_LEDGERS_KEY: &str = "rl_wl";
+
+/// Default rate limit window: 720 ledgers ≈ 1 hour at ~5 s/ledger.
+pub const DEFAULT_RATE_LIMIT_WINDOW_LEDGERS: u32 = 720;
+
+/// Gets the rate limit window size in ledgers (default: 720 ≈ 1 hour).
+pub fn get_rate_limit_window(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&Symbol::new(env, RATE_LIMIT_WINDOW_KEY))
-        .unwrap_or(3600u64)
+        .get(&Symbol::new(env, RATE_LIMIT_WINDOW_LEDGERS_KEY))
+        .unwrap_or(DEFAULT_RATE_LIMIT_WINDOW_LEDGERS)
 }
 
-/// Sets the rate limit window size in seconds.
-pub fn set_rate_limit_window(env: &Env, window_seconds: u64) {
+/// Sets the rate limit window size in ledgers.
+pub fn set_rate_limit_window(env: &Env, window_ledgers: u32) {
     env.storage()
         .instance()
-        .set(&Symbol::new(env, RATE_LIMIT_WINDOW_KEY), &window_seconds);
+        .set(&Symbol::new(env, RATE_LIMIT_WINDOW_LEDGERS_KEY), &window_ledgers);
 }
 
 /// Gets the max creations per window (default: 20).
@@ -844,19 +848,49 @@ fn rate_limit_key(env: &Env, addr: &Address) -> (Symbol, Address) {
     (Symbol::new(env, "rl"), addr.clone())
 }
 
-/// Gets rate limit state: (window_start_time, count_in_current_window)
-pub fn get_rate_limit_state(env: &Env, addr: &Address) -> (u64, u32) {
+/// Gets rate-limit state: `(window_start_ledger, count_in_window)` from temporary storage.
+///
+/// Temporary storage is correct here: if the entry's TTL expires, it is equivalent
+/// to the window having fully elapsed — the next call starts a fresh window at `count = 0`.
+/// Callers should extend the TTL to `window_ledgers` on every write (see `set_rate_limit_state`).
+pub fn get_rate_limit_state(env: &Env, addr: &Address) -> (u32, u32) {
     env.storage()
-        .persistent()
+        .temporary()
         .get(&rate_limit_key(env, addr))
-        .unwrap_or((0u64, 0u32))
+        .unwrap_or((0u32, 0u32))
 }
 
-/// Sets rate limit state.
-pub fn set_rate_limit_state(env: &Env, addr: &Address, window_start: u64, count: u32) {
+/// Persists rate-limit state `(window_start_ledger, count)` in temporary storage and extends
+/// the entry's TTL to `window_ledgers` so the counter survives the full sliding window.
+pub fn set_rate_limit_state(env: &Env, addr: &Address, window_start: u32, count: u32) {
+    let key = rate_limit_key(env, addr);
     env.storage()
-        .persistent()
-        .set(&rate_limit_key(env, addr), &(window_start, count));
+        .temporary()
+        .set(&key, &(window_start, count));
+    // Keep the entry alive for at least one full window so it cannot expire mid-window.
+    let ttl = get_rate_limit_window(env).max(1);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, ttl, ttl);
+}
+
+/// Returns how many more stream creations the given sender may perform in the current window.
+///
+/// Returns `u32::MAX` if the sender is exempt from rate limiting.
+pub fn get_remaining_quota(env: &Env, addr: &Address) -> u32 {
+    if is_rate_limit_exempt(env, addr) {
+        return u32::MAX;
+    }
+    let max = get_rate_limit_max_creations(env);
+    let window = get_rate_limit_window(env);
+    let (ws, count) = get_rate_limit_state(env, addr);
+    let current_ledger = env.ledger().sequence();
+    // If the window has elapsed the counter resets, so the full quota is available.
+    if current_ledger >= ws.saturating_add(window) {
+        max
+    } else {
+        max.saturating_sub(count)
+    }
 }
 
 fn rate_limit_exempt_key(env: &Env, addr: &Address) -> (Symbol, Address) {
@@ -970,6 +1004,8 @@ pub fn drain_fees_collected(env: &Env, token: &Address) -> i128 {
             .remove(&fees_collected_key(env, token));
     }
     amount
+}
+
 /// Sets accumulated fees for a token.
 pub fn set_fees_collected(env: &Env, token: &Address, amount: i128) {
     env.storage()
@@ -1358,43 +1394,4 @@ pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
     remove_dual_stream_token2(env, stream_id);
     remove_dual_stream_deposit2(env, stream_id);
     remove_dual_stream_withdrawn2(env, stream_id);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Per-token active stream count
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Storage key for the active stream count of a specific token: ("tsc", token).
-fn token_stream_count_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "tsc"), token.clone())
-}
-
-/// Returns the number of currently active streams for the given token address.
-/// Returns 0 for unknown tokens rather than erroring.
-pub fn get_token_stream_count(env: &Env, token: &Address) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&token_stream_count_key(env, token))
-        .unwrap_or(0u64)
-}
-
-/// Increments the active stream count for a token by 1.
-///
-/// Called on every successful stream creation.
-pub fn increment_token_stream_count(env: &Env, token: &Address) {
-    let key = token_stream_count_key(env, token);
-    let current = get_token_stream_count(env, token);
-    let next = current.checked_add(1).expect("token stream count overflow");
-    env.storage().persistent().set(&key, &next);
-}
-
-/// Decrements the active stream count for a token by 1, saturating at 0.
-///
-/// Called on stream cancellation, expiry, or natural completion.
-pub fn decrement_token_stream_count(env: &Env, token: &Address) {
-    let key = token_stream_count_key(env, token);
-    let current = get_token_stream_count(env, token);
-    if current > 0 {
-        env.storage().persistent().set(&key, &(current - 1));
-    }
 }

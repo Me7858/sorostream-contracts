@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 /// Vesting release curve applied to a payment stream.
 ///
@@ -22,10 +22,7 @@ pub enum VestingCurve {
     ///
     /// A `decay_factor` of `0` degenerates to linear behaviour.
     /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
-    TimeDecay {
-        /// Decay rate in basis points per 1 000-second window (0–9 999).
-        decay_factor: u32,
-    },
+    TimeDecay(u32),
 }
 
 /// A single step-vesting tranche: tokens that unlock atomically at `unlock_time`.
@@ -56,6 +53,10 @@ pub enum StreamStatus {
     /// recipient has not yet called `approve_stream`.  No tokens accrue while
     /// in this state; the sender may cancel at zero cost.
     PendingApproval,
+    /// Stream was created with `escrow_hold = true` and the sender has not yet
+    /// called `activate_stream`. Funds are locked in escrow; no tokens accrue.
+    /// The sender may cancel at zero cost while in this state.
+    EscrowHold,
 }
 
 /// Status of a milestone.
@@ -223,6 +224,22 @@ pub struct Stream {
     /// the sender (or their delegate) returns `StreamError::StreamIsLocked`.
     /// Recipients can still `withdraw` normally; admin pause is unaffected.
     pub sender_locked: bool,
+
+    /// Whether the StreamExpiryWarning event has already been emitted.
+    pub expiry_warning_emitted: bool,
+    /// Optional redirect target stream ID.
+    pub redirect_to_stream_id: Option<u64>,
+    /// Whether this stream is a dual-token stream.
+    pub is_dual_stream: bool,
+
+    // ── On-complete callback (composable DeFi) ──────────────────────────────
+
+    /// Optional contract address to invoke when the stream completes.
+    /// If set, the contract's function specified by `on_complete_function` will be called.
+    pub on_complete_contract: Option<Address>,
+    /// Optional function signature to invoke on stream completion.
+    /// Only used if `on_complete_contract` is set.
+    pub on_complete_function: Option<Symbol>,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
@@ -255,33 +272,9 @@ pub struct StreamHealth {
     /// Stream end timestamp (Unix seconds).
     pub end_time: u64,
     /// Ledgers remaining before the stream's persistent storage entry expires.
-    /// A value of 0 means the TTL information could not be determined
-    /// (e.g. the entry has already expired or the query is not supported).
     pub ttl_remaining_ledgers: u32,
     /// Derived health classification based on `ttl_remaining_ledgers`.
     pub status: HealthStatus,
-    // ── Feature (a): StreamExpiryWarning ─────────────────────────────────────
-
-    /// Whether the `StreamExpiryWarning` event has already been emitted for this
-    /// stream in the current expiry window.  Prevents duplicate warnings when
-    /// multiple interactions occur before `end_time`.
-    pub expiry_warning_emitted: bool,
-
-    // ── Feature (c): Stream redirect ─────────────────────────────────────────
-
-    /// Optional ID of the stream that claimed tokens should be forwarded into.
-    /// When set, a `withdraw` call on this stream will top-up the target stream
-    /// instead of transferring tokens directly to the recipient.
-    /// The target stream's recipient must equal this stream's recipient.
-    pub redirect_to_stream_id: Option<u64>,
-
-    // ── Feature (d): Dual-token streams ──────────────────────────────────────
-
-    /// Whether this stream is a dual-token stream.
-    /// When `true`, a second token (`token2`) and second deposit (`deposit2`) are
-    /// stored separately in persistent storage.  The `token` and `deposit` fields
-    /// represent the primary (first) token allocation as usual.
-    pub is_dual_stream: bool,
 }
 
 /// Aggregate contract statistics.
