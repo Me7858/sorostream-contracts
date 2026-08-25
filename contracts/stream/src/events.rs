@@ -878,6 +878,25 @@ pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
 }
 
 
+/// Emitted when a sender updates the flow rate of an active stream.
+///
+/// # Event Data
+/// - `stream_id`: The stream whose rate was updated
+/// - `old_rate`: The previous tokens-per-second flow rate
+/// - `new_rate`: The new tokens-per-second flow rate
+/// - `new_end_time`: The adjusted stream end time after rate change
+/// - `remaining_deposit`: The remaining deposit after balance settlement
+pub fn stream_rate_updated(
+    env: &Env,
+    stream_id: u64,
+    old_rate: i128,
+    new_rate: i128,
+    new_end_time: u64,
+    remaining_deposit: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRateUpdated"), stream_id),
+        (old_rate, new_rate, new_end_time, remaining_deposit),
 // ─────────────────────────────────────────────────────────────────────────────
 // Split Stream Events
 // ─────────────────────────────────────────────────────────────────────────────
