@@ -913,6 +913,9 @@ impl SoroStreamContract {
         lock_until: u64,
         allow_recipient_termination: bool,
         curve: VestingCurve,
+        on_complete_contract: Option<Address>,
+        on_complete_function: Option<Symbol>,
+        escrow_hold: bool,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -1013,7 +1016,11 @@ impl SoroStreamContract {
             lock_until,
             end_time,
             last_withdraw_time: now,
-            status: StreamStatus::Active,
+            status: if escrow_hold {
+                StreamStatus::EscrowHold
+            } else {
+                StreamStatus::Active
+            },
             auto_renew,
             allow_recipient_termination,
             last_pause_time: 0,
@@ -1040,20 +1047,27 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
-            on_complete_contract: None,
-            on_complete_function: None,
+            on_complete_contract,
+            on_complete_function,
         };
 
         save_stream(&env, &stream);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
         index_global_stream(&env, stream_id);
-        increment_active_stream_count(&env);
-        increment_token_stream_count(&env, &stream.token);
+        // Only count as active if not in escrow hold
+        if !escrow_hold {
+            increment_active_stream_count(&env);
+            increment_token_stream_count(&env, &stream.token);
+        }
 
-        events::stream_created(
-            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
-        );
+        if escrow_hold {
+            events::stream_placed_in_escrow(&env, stream_id, &sender, &recipient, amount);
+        } else {
+            events::stream_created(
+                &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
+            );
+        }
 
         Ok(stream_id)
     }
@@ -1516,6 +1530,49 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Activates a stream that was created with escrow_hold = true.
+    ///
+    /// Transitions the stream from EscrowHold to Active state, enabling token flow.
+    /// Only the sender may call this. No-op if the stream is not in EscrowHold state.
+    ///
+    /// # Errors
+    /// Returns `NotSender` if the caller is not the stream sender.
+    /// Returns `StreamNotActive` if the stream is not in EscrowHold state.
+    /// Returns `StreamNotFound` if no stream with this ID exists.
+    pub fn activate_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+
+        sender.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        // Only activate if currently in EscrowHold state
+        if stream.status != StreamStatus::EscrowHold {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Transition to Active state
+        stream.status = StreamStatus::Active;
+        save_stream(&env, &stream);
+
+        // Update counts now that stream is active
+        increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &stream.token);
+
+        // Emit activation event
+        events::stream_activated(&env, stream_id, &sender, now);
+
+        Ok(())
+    }
+
     /// Allows the recipient to withdraw all tokens earned since last withdrawal.
     ///
     /// Follows checks-effects-interactions: all state is updated before any token
@@ -1532,7 +1589,7 @@ impl SoroStreamContract {
         if stream.recipient != recipient {
             return Err(StreamError::NotRecipient);
         }
-        if stream.status == StreamStatus::PendingApproval {
+        if stream.status == StreamStatus::PendingApproval || stream.status == StreamStatus::EscrowHold {
             return Err(StreamError::AwaitingApproval);
         }
         if stream.status != StreamStatus::Active {
@@ -1981,9 +2038,10 @@ impl SoroStreamContract {
             return Err(StreamError::NotAuthorized);
         }
 
-        // PendingApproval streams may be cancelled freely — the sender incurs no penalty.
+        // PendingApproval and EscrowHold streams may be cancelled freely — the sender incurs no penalty.
         // For all other statuses enforce the usual Active/Paused requirement.
         if stream.status != StreamStatus::PendingApproval
+            && stream.status != StreamStatus::EscrowHold
             && stream.status != StreamStatus::Active
             && stream.status != StreamStatus::Paused
         {
@@ -1991,9 +2049,10 @@ impl SoroStreamContract {
         }
 
         // Sender (or their delegate) cannot cancel once the stream is sender-locked.
-        // Exception: PendingApproval streams are always cancellable at zero cost.
+        // Exception: PendingApproval and EscrowHold streams are always cancellable at zero cost.
         if stream.sender_locked
             && stream.status != StreamStatus::PendingApproval
+            && stream.status != StreamStatus::EscrowHold
             && (is_sender || is_delegate)
         {
             return Err(StreamError::StreamLocked);
@@ -2005,10 +2064,10 @@ impl SoroStreamContract {
             env.ledger().timestamp()
         };
 
-        // ── PendingApproval cancellation: full refund, zero earned ────────────
-        // The recipient never approved, so no tokens have accrued. Refund the
-        // entire deposit (plus any holdback) to the sender and remove the stream.
-        if stream.status == StreamStatus::PendingApproval {
+        // ── PendingApproval / EscrowHold cancellation: full refund, zero earned ────────────
+        // The recipient never approved (PendingApproval) or funds were just placed in escrow (EscrowHold),
+        // so no tokens have accrued. Refund the entire deposit (plus any holdback) to the sender and remove the stream.
+        if stream.status == StreamStatus::PendingApproval || stream.status == StreamStatus::EscrowHold {
             let refund = stream.deposit;
             let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
                 get_holdback(&env, stream_id)
