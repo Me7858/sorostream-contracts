@@ -20,6 +20,7 @@ pub use oracle::IPriceOracle;
 
 #[cfg(test)] mod integration_tests;
 // other test modules disabled during grace-period test restore
+#[cfg(test)] mod rate_limit_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -37,7 +38,7 @@ use storage::{
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
-    get_rate_limit_state, get_rate_limit_window,
+    get_rate_limit_state, get_rate_limit_window, get_remaining_quota,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
     get_token_stream_count,
     get_treasury, get_withdrawal_cooldown, get_xlm_token,
@@ -62,6 +63,8 @@ use storage::{
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
     set_pause_expiry, set_protocol_fee,
     set_rate_limit_state, set_reentrancy_lock,
+    set_rate_limit_window, set_rate_limit_max_creations,
+    add_rate_limit_exempt, remove_rate_limit_exempt,
     set_sender_last_creation_time, set_sender_limit, set_sender_promotion_threshold,
     set_slippage_params, set_stream_creation_cooldown,
     set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
@@ -98,17 +101,31 @@ fn validate_metadata_uri(uri: &Option<String>) -> Result<(), StreamError> {
     Ok(())
 }
 
-// ── Helper: rate limiting ────────────────────────────────────────────────────
-#[allow(dead_code)]
-fn check_rate_limit(env: &Env, sender: &Address, now: u64) -> Result<(), StreamError> {
+// ── Helper: per-sender ledger-based sliding window rate limit ────────────────
+//
+// The rate limit state `(window_start_ledger, count)` lives in **temporary**
+// storage.  Temporary storage is appropriate here because:
+//
+//   1. If the entry's TTL lapses the counter is treated as zero — equivalent to
+//      the window having fully elapsed — which is correct, not dangerous.
+//   2. The entry's TTL is extended to `window_ledgers` on every write, so it
+//      cannot expire while a window is still active.
+//   3. Rate limit state is inherently ephemeral; there is no need to store it
+//      for longer than one window period.
+fn check_rate_limit(env: &Env, sender: &Address) -> Result<(), StreamError> {
     if is_rate_limit_exempt(env, sender) { return Ok(()); }
     let window = get_rate_limit_window(env);
     let max = get_rate_limit_max_creations(env);
+    let current_ledger = env.ledger().sequence();
     let (ws, count) = get_rate_limit_state(env, sender);
-    let (new_ws, new_count) = if now >= ws + window {
-        (now, 1u32)
+    let (new_ws, new_count) = if current_ledger >= ws.saturating_add(window) {
+        // Window has expired — start a fresh one at the current ledger.
+        (current_ledger, 1u32)
     } else {
-        if count >= max { events::rate_limit_exceeded(env, sender); return Err(StreamError::RateLimitExceeded); }
+        if count >= max {
+            events::rate_limit_exceeded(env, sender);
+            return Err(StreamError::RateLimitExceeded);
+        }
         (ws, count + 1)
     };
     set_rate_limit_state(env, sender, new_ws, new_count);
@@ -389,7 +406,7 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
 
         // Check rate limit (per-sender creation frequency cap)
-        check_rate_limit(&env, &sender, now)?;
+        check_rate_limit(&env, &sender)?;
 
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
@@ -710,7 +727,7 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
 
         // Check rate limit (per-sender creation frequency cap)
-        check_rate_limit(&env, &sender, now)?;
+        check_rate_limit(&env, &sender)?;
 
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
@@ -908,7 +925,7 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
 
         // Check rate limit (per-sender creation frequency cap)
-        check_rate_limit(&env, &sender, now)?;
+        check_rate_limit(&env, &sender)?;
 
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
@@ -1160,6 +1177,68 @@ impl SoroStreamContract {
     /// Resolves a federation name to its registered Stellar address.
     pub fn resolve_federation(env: Env, federation_name: String) -> Result<Address, StreamError> {
         get_federation_address(&env, &federation_name).ok_or(StreamError::StreamNotFound)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Rate limit admin management
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Sets the sliding-window size for the per-sender rate limit, in **ledgers**.
+    ///
+    /// Default: 720 ledgers (~1 hour at 5 s/ledger).
+    /// The state is stored in temporary storage keyed per sender; the entry TTL is
+    /// refreshed to `window_ledgers` on every `create_stream` call, so the window
+    /// cannot expire while a sender is actively within it.
+    /// Only the admin may call this.
+    pub fn set_rate_limit_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_rate_limit_window(&env, window_ledgers);
+        events::rate_limit_updated(&env, window_ledgers as u64, get_rate_limit_max_creations(&env));
+        Ok(())
+    }
+
+    /// Sets the maximum number of streams a single sender may create within one window.
+    ///
+    /// Default: 20. Only the admin may call this.
+    pub fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_rate_limit_max_creations(&env, max_creations);
+        events::rate_limit_updated(&env, get_rate_limit_window(&env) as u64, max_creations);
+        Ok(())
+    }
+
+    /// Exempts an address from all per-sender rate limiting.
+    ///
+    /// Exempt addresses bypass `check_rate_limit` entirely and are never throttled.
+    /// Intended for trusted integrators, relayers, or the admin itself.
+    /// Only the admin may call this.
+    pub fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        add_rate_limit_exempt(&env, &address);
+        Ok(())
+    }
+
+    /// Removes a rate-limit exemption, re-subjecting the address to the normal window cap.
+    ///
+    /// Only the admin may call this.
+    pub fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        remove_rate_limit_exempt(&env, &address);
+        Ok(())
+    }
+
+    /// Returns the number of stream creations the given sender may still perform in the
+    /// current window.
+    ///
+    /// - Returns `u32::MAX` for exempt addresses.
+    /// - Returns the full quota if the sender has no active window (never created or window lapsed).
+    /// - Returns 0 if the sender has exhausted their quota for the current window.
+    pub fn remaining_quota(env: Env, address: Address) -> u32 {
+        get_remaining_quota(&env, &address)
     }
 
     /// Enables or disables recipient whitelisting.
@@ -3100,7 +3179,7 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
 
         // Check rate limit (per-sender creation frequency cap)
-        check_rate_limit(&env, &sender, now)?;
+        check_rate_limit(&env, &sender)?;
 
         let expected_nonce = get_batch_nonce(&env, &sender);
         if nonce != expected_nonce {
