@@ -452,6 +452,38 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     );
 }
 
+/// Emitted when a recipient is added to the allowlist.
+pub fn recipient_allowlisted(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientAllowlisted"),),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when a recipient is removed from the allowlist.
+pub fn recipient_disallowlisted(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientDisallowlisted"),),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when recipient allowlist is toggled globally.
+pub fn recipient_allowlist_toggled(env: &Env, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientAllowlistToggled"),),
+        enabled,
+    );
+}
+
+/// Emitted when a stream is created with allowlist enforcement enabled.
+pub fn stream_created_with_allowlist_enforcement(env: &Env, stream_id: u64, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamCreatedWithAllowlistEnforcement"), stream_id),
+        recipient.clone(),
+    );
+}
+
 /// Emitted when a federation name is registered (Issue #238).
 pub fn federation_registered(env: &Env, federation_name: &String, stellar_address: &Address) {
     env.events().publish(
@@ -796,5 +828,55 @@ pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
     env.events().publish(
         (Symbol::new(env, "StreamSenderLocked"), stream_id),
         sender.clone(),
+    );
+}
+
+/// Emitted when a stream is created with a future start_time (scheduled stream).
+///
+/// Complements `StreamCreated` to provide specific timing information for
+/// streams that don't begin immediately.
+pub fn stream_scheduled(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    start_time: u64,
+    end_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamScheduled"), stream_id),
+        (
+            sender.clone(),
+            recipient.clone(),
+            start_time,
+            end_time,
+        ),
+    );
+}
+
+/// Emitted when a stream is split into multiple new streams.
+///
+/// # Event Data
+/// - `original_stream_id`: The stream that was cancelled
+/// - `sender`: The sender who initiated the split
+/// - `new_stream_ids`: Vector of newly created stream IDs
+/// - `recipient_amount`: Total amount earned by the original recipient (to be split)
+/// - `sender_refund`: Amount refunded to the sender
+pub fn stream_split(
+    env: &Env,
+    original_stream_id: u64,
+    sender: &Address,
+    new_stream_ids: &soroban_sdk::Vec<u64>,
+    recipient_amount: i128,
+    sender_refund: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamSplit"), original_stream_id),
+        (
+            sender.clone(),
+            new_stream_ids.clone(),
+            recipient_amount,
+            sender_refund,
+        ),
     );
 }

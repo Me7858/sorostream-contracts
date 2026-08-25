@@ -519,6 +519,44 @@ pub fn remove_from_whitelist(env: &Env, recipient: &Address) {
     env.storage().persistent().remove(&whitelist_key(env, recipient));
 }
 
+// --- Recipient allowlist (for regulated payment scenarios) ---
+
+const RECIPIENT_ALLOWLIST_ENABLED_KEY: &str = "ral_en";
+
+/// Returns whether recipient allowlisting is globally enabled.
+pub fn is_recipient_allowlist_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, RECIPIENT_ALLOWLIST_ENABLED_KEY))
+        .unwrap_or(false)
+}
+
+/// Enables or disables recipient allowlisting.
+pub fn set_recipient_allowlist_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, RECIPIENT_ALLOWLIST_ENABLED_KEY), &enabled);
+}
+
+fn recipient_allowlist_key(env: &Env, recipient: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "ral"), recipient.clone())
+}
+
+/// Returns whether a recipient is on the allowlist.
+pub fn is_recipient_allowed(env: &Env, recipient: &Address) -> bool {
+    env.storage().persistent().get(&recipient_allowlist_key(env, recipient)).unwrap_or(false)
+}
+
+/// Adds a recipient to the allowlist.
+pub fn add_to_recipient_allowlist(env: &Env, recipient: &Address) {
+    env.storage().persistent().set(&recipient_allowlist_key(env, recipient), &true);
+}
+
+/// Removes a recipient from the allowlist.
+pub fn remove_from_recipient_allowlist(env: &Env, recipient: &Address) {
+    env.storage().persistent().remove(&recipient_allowlist_key(env, recipient));
+}
+
 // --- Fee exemption list ---
 
 fn fee_exempt_key(env: &Env, addr: &Address) -> (Symbol, Address) {

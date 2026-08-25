@@ -97,4 +97,7 @@ pub enum StreamError {
     /// `cancel_stream` was called by the sender on a stream they have irrevocably
     /// locked via `lock_stream`.
     StreamIsLocked = 60,
+    /// Recipient is not on the admin-managed recipient allowlist, and the stream
+    /// requires allowlist enforcement.
+    RecipientNotAllowed = 61,
 }

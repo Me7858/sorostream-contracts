@@ -223,6 +223,19 @@ pub struct Stream {
     /// the sender (or their delegate) returns `StreamError::StreamIsLocked`.
     /// Recipients can still `withdraw` normally; admin pause is unaffected.
     pub sender_locked: bool,
+
+    // ── Recipient allowlist enforcement ──────────────────────────────────────
+
+    /// Whether this stream enforces the recipient allowlist.
+    ///
+    /// When `true`, the recipient must be on the admin-managed recipient allowlist
+    /// at stream creation time. This flag is immutable after creation and is used
+    /// for regulated payment scenarios where senders want on-chain verification that
+    /// recipients have been approved.
+    ///
+    /// Note: The allowlist check happens at creation time only; if a recipient is
+    /// removed from the allowlist later, the stream continues to function normally.
+    pub enforce_recipient_allowlist: bool,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.

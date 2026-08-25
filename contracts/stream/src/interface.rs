@@ -36,6 +36,9 @@ pub trait SoroStreamInterface {
         holdback_amount: i128,
         withdrawal_steps: Option<u32>,
         min_withdrawal_amount: Option<i128>,
+        non_transferable: bool,
+        requires_recipient_approval: bool,
+        enforce_recipient_allowlist: bool,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -92,6 +95,34 @@ pub trait SoroStreamInterface {
     fn set_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
     fn add_to_whitelist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
     fn remove_from_whitelist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
+
+    /// Sets whether the recipient allowlist is enabled globally.
+    ///
+    /// When enabled and a stream is created with `enforce_recipient_allowlist = true`,
+    /// the recipient must be on the allowlist. Admin only.
+    ///
+    /// Note: This is distinct from the stream creation whitelist (for general compliance).
+    /// The recipient allowlist is for per-stream enforcement scenarios.
+    fn set_recipient_allowlist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
+
+    /// Returns whether the recipient allowlist is currently enabled.
+    fn is_recipient_allowlist_enabled(env: Env) -> bool;
+
+    /// Adds a recipient address to the allowlist for regulated stream creation.
+    ///
+    /// Only the admin may call this. Once added, this address can receive streams
+    /// that have `enforce_recipient_allowlist = true`.
+    fn add_to_recipient_allowlist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
+
+    /// Removes a recipient address from the allowlist.
+    ///
+    /// Only the admin may call this. After removal, this address cannot receive
+    /// new streams with `enforce_recipient_allowlist = true`.
+    fn remove_from_recipient_allowlist(env: Env, admin: Address, recipient: Address) -> Result<(), StreamError>;
+
+    /// Returns whether a recipient is on the allowlist.
+    fn is_recipient_allowed(env: Env, recipient: Address) -> bool;
+
     fn update_metadata(env: Env, sender: Address, stream_id: u64, metadata: Bytes) -> Result<(), StreamError>;
     fn cancel_auto_renew(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
 
@@ -101,6 +132,53 @@ pub trait SoroStreamInterface {
     fn partial_cancel_stream(env: Env, stream_id: u64, sender: Address, cancel_amount: i128) -> Result<u64, StreamError>;
     fn top_up(env: Env, stream_id: u64, sender: Address, token: Address, amount: i128) -> Result<(), StreamError>;
     fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
+
+    /// Splits an existing stream by canceling it and atomically creating multiple new streams
+    /// with proportionally split balances and flow rates.
+    ///
+    /// The sender calls this function with:
+    /// - `stream_id`: the stream to cancel
+    /// - `recipients`: a list of new recipient addresses
+    /// - `proportions`: a list of proportion values (same length as `recipients`) that define
+    ///   how to split the remaining balance. Each proportion is relative; the actual split
+    ///   is `proportion[i] / sum(proportions)`.
+    /// - `nonce`: unique nonce to ensure deterministic stream IDs for the new streams
+    ///
+    /// Returns a vector of the newly created stream IDs (in the same order as `recipients`).
+    ///
+    /// # Behavior
+    ///
+    /// 1. Cancels the original stream, computing earned vs. refundable amounts.
+    /// 2. The sender receives their refundable portion immediately.
+    /// 3. The recipient's earned amount is split proportionally among the new recipients.
+    /// 4. Each new stream has:
+    ///    - Same token and duration as the original
+    ///    - Same cliff as the original
+    ///    - Start time of now (current ledger timestamp)
+    ///    - End time of now + original_duration
+    ///    - Same auto_renew, lock_until, allow_recipient_termination, non_transferable settings
+    ///    - A proportional deposit based on the split
+    ///    - No holdback amount or other optional features carried over
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist
+    /// - `NotSender` — caller is not the sender
+    /// - `ContractPaused` — contract is paused
+    /// - `StreamNotActive` — stream is not in an appropriate state for splitting
+    /// - `ZeroAmount` — one of the proportions is zero or the split would create zero-amount streams
+    /// - `BatchLengthMismatch` — recipients and proportions vectors have different lengths
+    /// - `InvalidDuration` — duration constraints violated for new streams
+    /// - `SenderStreamLimitExceeded` — sender would exceed their stream limit after split
+    /// - `RateLimitExceeded` — sender hits rate limit during split
+    #[allow(clippy::too_many_arguments)]
+    fn split_stream(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        recipients: Vec<Address>,
+        proportions: Vec<u128>,
+        nonce: u64,
+    ) -> Result<Vec<u64>, StreamError>;
 
     /// Approves a stream that was created with `requires_recipient_approval = true`.
     ///
