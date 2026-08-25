@@ -15,7 +15,7 @@ pub mod vesting_math;
 
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
-pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve};
+pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve, StreamQueryFilter};
 pub use oracle::IPriceOracle;
 
 #[cfg(test)] mod integration_tests;
@@ -26,6 +26,7 @@ use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
 };
 use types::VestingTranche;
+use types::{Milestone, MilestoneStatus};
 use storage::{
     accumulate_fees, add_fee_exempt, add_to_blocklist,
     append_audit_entry, check_admin, cleanup_dual_stream_storage,
@@ -36,7 +37,7 @@ use storage::{
     get_delegate, get_expiry_warning_window, get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
-    get_ids_by_sender, get_max_streams_per_token, get_new_sender_stream_cap,
+    get_ids_by_sender, get_ids_by_tag, get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
     get_rate_limit_state, get_rate_limit_window, get_remaining_quota,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
@@ -44,7 +45,7 @@ use storage::{
     get_treasury, get_withdrawal_cooldown, get_xlm_token,
     increment_active_stream_count, increment_batch_nonce,
     increment_sender_lifetime_count, increment_token_stream_count,
-    index_by_recipient, index_by_sender, index_global_stream,
+    index_by_recipient, index_by_sender, index_by_tag, index_global_stream,
     is_blocked, is_fee_exempt, is_paused_or_auto_unpause,
     is_rate_limit_exempt, is_reentrancy_locked, is_sender_promoted,
     is_token_whitelisted, is_token_whitelist_enabled, is_whitelisted,
@@ -69,7 +70,7 @@ use storage::{
     set_slippage_params, set_stream_creation_cooldown,
     set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
     set_xlm_token, stream_exists, unindex_by_recipient,
-    unindex_by_sender, unregister_federation_address, write_admin,
+    unindex_by_sender, unindex_by_tag, unregister_federation_address, write_admin,
     write_governance, write_guardian, write_max_duration,
     write_max_future_start_offset, write_min_duration, write_pending_fee_proposal,
     write_version,
@@ -372,6 +373,15 @@ impl SoroStreamContract {
 
     pub fn get_admin_log(env: Env) -> Vec<AuditEntry> { read_audit_log(&env) }
 
+    /// Helper function to remove a stream from all indices (sender, recipient, and tag if present).
+    fn unindex_stream(env: &Env, stream: &Stream, stream_id: u64) {
+        unindex_by_sender(env, &stream.sender, stream_id);
+        unindex_by_recipient(env, &stream.recipient, stream_id);
+        if let Some(ref tag) = stream.tag {
+            unindex_by_tag(env, &stream.sender, tag, stream_id);
+        }
+    }
+
     pub fn archive_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         caller.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -380,8 +390,7 @@ impl SoroStreamContract {
         let dust = stream.deposit.saturating_sub(stream.flow_rate.saturating_mul(duration as i128));
         if stream.total_withdrawn.saturating_add(dust) < stream.deposit { return Err(StreamError::StreamNotSettled); }
         remove_stream(&env, stream_id);
-        unindex_by_sender(&env, &stream.sender, stream_id);
-        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        Self::unindex_stream(&env, &stream, stream_id);
         if get_delegate(&env, stream_id).is_some() { remove_delegate(&env, stream_id); }
         if stream.is_dual_stream { cleanup_dual_stream_storage(&env, stream_id); }
         events::stream_archived(&env, stream_id, &stream.sender, &stream.recipient, stream.deposit);
@@ -411,6 +420,7 @@ impl SoroStreamContract {
         let min_withdrawal_amount: Option<i128> = None;
         let non_transferable = false;
         let requires_recipient_approval = false;
+        let tag: Option<String> = None;
         let on_complete_contract: Option<Address> = None;
         let on_complete_function: Option<Symbol> = None;
         sender.require_auth();
@@ -595,6 +605,7 @@ impl SoroStreamContract {
             locked: false,
             metadata_uri: None,
             milestones: Vec::new(&env),
+            milestone_release_mode: false,
             holdback_amount,
             holdback_claimed: false,
             is_step_vesting: false,
@@ -613,6 +624,7 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            tag: tag.clone(),
             on_complete_contract,
             on_complete_function,
         };
@@ -621,6 +633,9 @@ impl SoroStreamContract {
         extend_instance_ttl(&env);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
+        if let Some(ref t) = tag {
+            index_by_tag(&env, &sender, t, stream_id);
+        }
         index_global_stream(&env, stream_id);
         // Only count as active immediately if no approval is required.
         if !requires_recipient_approval {
@@ -888,6 +903,7 @@ impl SoroStreamContract {
             locked: false,
             metadata_uri: None,
             milestones: soroban_sdk::Vec::new(&env),
+            milestone_release_mode: false,
             holdback_amount: 0,
             holdback_claimed: false,
             is_step_vesting: true,
@@ -906,6 +922,7 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            tag: None,
             on_complete_contract: None,
             on_complete_function: None,
         };
@@ -1077,6 +1094,7 @@ impl SoroStreamContract {
             locked: false,
             metadata_uri: None,
             milestones: soroban_sdk::Vec::new(&env),
+            milestone_release_mode: false,
             holdback_amount: 0,
             holdback_claimed: false,
             is_step_vesting: false,
@@ -1095,6 +1113,7 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            tag: None,
             on_complete_contract,
             on_complete_function,
         };
@@ -1116,6 +1135,181 @@ impl SoroStreamContract {
                 &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
             );
         }
+
+        Ok(stream_id)
+    }
+
+    /// Creates a stream with timestamp-gated milestones (tranches).
+    /// Each milestone automatically unlocks at its unlock_time without requiring sender approval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_with_milestones(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        milestones_data: Vec<(i128, u64, BytesN<32>)>,  // (amount, unlock_time, description_hash)
+        nonce: u64,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+    ) -> Result<u64, StreamError> {
+        sender.require_auth();
+
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+        if nonce_used(&env, &sender, nonce) {
+            return Err(StreamError::DuplicateStream);
+        }
+        if deposit <= 0 {
+            return Err(StreamError::ZeroAmount);
+        }
+        if milestones_data.is_empty() {
+            return Err(StreamError::InvalidDuration);
+        }
+        if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
+            return Err(StreamError::RecipientNotWhitelisted);
+        }
+
+        let sender_count = get_sender_stream_count(&env, &sender);
+        let limit = effective_sender_limit(&env, &sender);
+        if sender_count >= limit {
+            return Err(StreamError::NewSenderStreamCapExceeded);
+        }
+
+        mark_nonce_used(&env, &sender, nonce);
+
+        let now = env.ledger().timestamp();
+
+        // Validate milestones and calculate end_time from the last unlock_time
+        let mut total_amount = 0i128;
+        let mut prev_unlock_time = 0u64;
+        for (amount, unlock_time, _) in milestones_data.iter() {
+            if amount <= 0 {
+                return Err(StreamError::ZeroAmount);
+            }
+            if unlock_time < now {
+                return Err(StreamError::InvalidCliff);  // Milestone in the past
+            }
+            if unlock_time < prev_unlock_time {
+                return Err(StreamError::InvalidDuration);  // Milestones not sorted
+            }
+            total_amount = total_amount.checked_add(amount).ok_or(StreamError::Overflow)?;
+            prev_unlock_time = unlock_time;
+        }
+
+        if total_amount != deposit {
+            return Err(StreamError::ZeroAmount);
+        }
+
+        let end_time = prev_unlock_time;
+        if end_time <= now {
+            return Err(StreamError::InvalidEndTime);
+        }
+
+        // Defensive stream ID collision check
+        const MAX_ID_RETRIES: u64 = 3;
+        let mut stream_id = derive_stream_id(&env, &sender, &recipient, now, nonce);
+        if stream_exists(&env, stream_id) {
+            let mut found = false;
+            for retry in 1u64..=MAX_ID_RETRIES {
+                let candidate = derive_stream_id(
+                    &env, &sender, &recipient, now, nonce ^ (retry << 32),
+                );
+                if !stream_exists(&env, candidate) {
+                    stream_id = candidate;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(StreamError::IDCollision);
+            }
+        }
+
+        let creation_fee = get_creation_fee_xlm(&env);
+        if creation_fee > 0 {
+            let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+            let xlm_token = get_xlm_token(&env).ok_or(StreamError::NotInitialized)?;
+            token::Client::new(&env, &xlm_token).transfer(
+                &sender,
+                &treasury,
+                &creation_fee,
+            );
+            events::creation_fee_collected(&env, creation_fee, &treasury);
+        }
+
+        token::Client::new(&env, &token).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &deposit,
+        );
+
+        // Build milestones vector
+        let mut milestones = Vec::new(&env);
+        for (amount, unlock_time, description_hash) in milestones_data.iter() {
+            let milestone = Milestone {
+                amount,
+                description_hash,
+                unlock_time,
+                status: MilestoneStatus::Pending,
+            };
+            milestones.push_back(milestone);
+        }
+
+        let stream = Stream {
+            id: stream_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            deposit,
+            flow_rate: 0,  // Not used for milestone-gated streams
+            start_time: now,
+            cliff_time: now,
+            lock_until,
+            end_time,
+            last_withdraw_time: now,
+            status: StreamStatus::Active,
+            auto_renew: false,
+            allow_recipient_termination,
+            last_pause_time: 0,
+            total_withdrawn: 0,
+            metadata: Bytes::new(&env),
+            locked: false,
+            metadata_uri: None,
+            milestones,
+            milestone_release_mode: true,
+            holdback_amount: 0,
+            holdback_claimed: false,
+            is_step_vesting: false,
+            tranches_claimed: 0,
+            oracle: None,
+            max_price_deviation_bps: 0,
+            creation_price: 0,
+            curve: VestingCurve::Linear,
+            withdrawal_steps: None,
+            current_step: 0,
+            min_withdrawal_amount: None,
+            non_transferable: false,
+            requires_recipient_approval: false,
+            approval_timestamp: 0,
+            sender_locked: false,
+            expiry_warning_emitted: false,
+            redirect_to_stream_id: None,
+            is_dual_stream: false,
+            tag: None,
+        };
+
+        save_stream(&env, &stream);
+        index_by_sender(&env, &sender, stream_id);
+        index_by_recipient(&env, &recipient, stream_id);
+        index_global_stream(&env, stream_id);
+        increment_active_stream_count(&env);
+        increment_token_stream_count(&env, &stream.token);
+
+        events::stream_created(
+            &env, stream_id, &sender, &recipient, deposit, 0, end_time, false,
+        );
 
         Ok(stream_id)
     }
@@ -1477,8 +1671,7 @@ impl SoroStreamContract {
         }
 
         remove_stream(&env, stream_id);
-        unindex_by_sender(&env, &stream.sender, stream_id);
-        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        Self::unindex_stream(&env, &stream, stream_id);
         decrement_token_stream_count(&env, &stream.token);
 
         events::stream_recovered(&env, stream_id, &sender, available);
@@ -1548,8 +1741,7 @@ impl SoroStreamContract {
 
             // Delete storage entries
             remove_stream(&env, stream_id);
-            unindex_by_sender(&env, &stream.sender, stream_id);
-            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            Self::unindex_stream(&env, &stream, stream_id);
             decrement_token_stream_count(&env, &stream.token);
 
             events::stream_swept(&env, stream_id, &stream.sender);
@@ -1745,6 +1937,98 @@ impl SoroStreamContract {
             return Err(StreamError::WithdrawalCooldownActive);
         }
 
+        // ── Milestone-release-mode withdrawal path ───────────────────────────
+        if stream.milestone_release_mode {
+            // Auto-unlock milestones that have reached their unlock_time
+            let mut claimable: i128 = 0;
+            let mut updated_any_milestone = false;
+            for i in 0..stream.milestones.len() {
+                let mut milestone = stream.milestones.get(i).unwrap();
+                if milestone.status == MilestoneStatus::Pending && now >= milestone.unlock_time {
+                    milestone.status = MilestoneStatus::Released;
+                    stream.milestones.set(i, milestone.clone());
+                    updated_any_milestone = true;
+                    #[allow(clippy::unnecessary_cast)]
+                    {
+                        events::milestone_released(&env, stream_id, i as u32);
+                    }
+                }
+                if milestone.status == MilestoneStatus::Released {
+                    claimable = claimable
+                        .checked_add(milestone.amount)
+                        .ok_or(StreamError::Overflow)?;
+                }
+            }
+
+            if updated_any_milestone {
+                save_stream(&env, &stream);
+            }
+
+            // Compute available amount (total unlocked - already withdrawn)
+            let available = claimable.saturating_sub(stream.total_withdrawn).max(0);
+            if available == 0 {
+                return Err(StreamError::ZeroAmount);
+            }
+
+            // Compute fee on claimable amount.
+            let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
+            let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
+                available
+                    .checked_mul(fee_bps as i128)
+                    .ok_or(StreamError::Overflow)?
+                    / 10_000
+            } else {
+                0
+            };
+            let recipient_amount = available - fee_amount;
+            let treasury_opt = get_treasury(&env);
+
+            // EFFECTS — update total_withdrawn before any token transfer.
+            stream.total_withdrawn = stream
+                .total_withdrawn
+                .checked_add(available)
+                .ok_or(StreamError::Overflow)?;
+            stream.last_withdraw_time = now;
+
+            let all_milestones_released = stream.milestones.iter()
+                .all(|m| m.status == MilestoneStatus::Released);
+            let all_milestones_withdrawn = stream.total_withdrawn >= claimable;
+
+            if all_milestones_released && all_milestones_withdrawn {
+                stream.status = StreamStatus::Completed;
+                save_stream(&env, &stream);
+                decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
+                remove_stream(&env, stream_id);
+                Self::unindex_stream(&env, &stream, stream_id);
+            } else {
+                save_stream(&env, &stream);
+            }
+
+            // INTERACTIONS
+            let token_client = token::Client::new(&env, &stream.token);
+            if recipient_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &recipient,
+                    &recipient_amount,
+                );
+            }
+            if fee_amount > 0 {
+                if let Some(ref t) = treasury_opt {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        t,
+                        &fee_amount,
+                    );
+                    events::fee_collected(&env, stream_id, fee_amount, t);
+                }
+            }
+
+            events::stream_withdrawn(&env, stream_id, &recipient, available, now, stream.total_withdrawn);
+            return Ok(());
+        }
+
         // ── Step-vesting withdrawal path ─────────────────────────────────────
         if stream.is_step_vesting {
             // Oracle check (if configured).
@@ -1813,6 +2097,7 @@ impl SoroStreamContract {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
                 remove_stream(&env, stream_id);
+                Self::unindex_stream(&env, &stream, stream_id);
                 unindex_by_sender(&env, &stream.sender, stream_id);
                 unindex_by_recipient(&env, &stream.recipient, stream_id);
                 // Invoke on_complete callback if configured
@@ -2092,8 +2377,7 @@ impl SoroStreamContract {
                 decrement_active_stream_count(&env);
                 decrement_token_stream_count(&env, &stream.token);
                 remove_stream(&env, stream_id);
-                unindex_by_sender(&env, &stream.sender, stream_id);
-                unindex_by_recipient(&env, &stream.recipient, stream_id);
+                Self::unindex_stream(&env, &stream, stream_id);
 
                 let token_client = token::Client::new(&env, &stream.token);
 
@@ -2210,8 +2494,7 @@ impl SoroStreamContract {
             };
 
             remove_stream(&env, stream_id);
-            unindex_by_sender(&env, &stream.sender, stream_id);
-            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            Self::unindex_stream(&env, &stream, stream_id);
             if holdback_refund > 0 {
                 remove_holdback(&env, stream_id);
             }
@@ -2271,8 +2554,7 @@ impl SoroStreamContract {
             // EFFECTS
             remove_tranches(&env, stream_id);
             remove_stream(&env, stream_id);
-            unindex_by_sender(&env, &stream.sender, stream_id);
-            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            Self::unindex_stream(&env, &stream, stream_id);
 
             // INTERACTIONS
             let token_client = token::Client::new(&env, &stream.token);
@@ -2294,6 +2576,56 @@ impl SoroStreamContract {
             events::tranche_stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
             events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
 
+            clear_reentrancy_lock(&env);
+            return Ok(());
+        }
+
+        // ── Milestone-release cancellation ───────────────────────────────────
+        if stream.milestone_release_mode {
+            // Calculate how much recipient has earned from released milestones
+            let mut recipient_amount: i128 = 0;
+            for milestone in stream.milestones.iter() {
+                if milestone.status == MilestoneStatus::Released || (now >= milestone.unlock_time && milestone.status == MilestoneStatus::Pending) {
+                    recipient_amount = recipient_amount
+                        .checked_add(milestone.amount)
+                        .ok_or(StreamError::Overflow)?;
+                } else if milestone.status == MilestoneStatus::Forfeited {
+                    // Forfeited milestones already go to sender (don't count for recipient)
+                }
+            }
+
+            // Recipient gets earned, sender gets forfeited + unearned
+            let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+            let recipient_amount = recipient_amount.saturating_sub(stream.total_withdrawn).max(0);
+            let refund_amount = available.saturating_sub(recipient_amount);
+
+            if stream.status == StreamStatus::Active {
+                decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
+            }
+
+            // EFFECTS
+            remove_stream(&env, stream_id);
+            Self::unindex_stream(&env, &stream, stream_id);
+
+            // INTERACTIONS
+            let token_client = token::Client::new(&env, &stream.token);
+            if recipient_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &stream.recipient,
+                    &recipient_amount,
+                );
+            }
+            if refund_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &stream.sender,
+                    &refund_amount,
+                );
+            }
+
+            events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -2333,8 +2665,7 @@ impl SoroStreamContract {
 
         // EFFECTS: remove stream before any token transfer
         remove_stream(&env, stream_id);
-        unindex_by_sender(&env, &stream.sender, stream_id);
-        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        Self::unindex_stream(&env, &stream, stream_id);
         if holdback_refund > 0 {
             remove_holdback(&env, stream_id);
         }
@@ -2416,8 +2747,7 @@ impl SoroStreamContract {
 
         // EFFECTS: remove stream before any token transfer
         remove_stream(&env, stream_id);
-        unindex_by_sender(&env, &stream.sender, stream_id);
-        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        Self::unindex_stream(&env, &stream, stream_id);
 
         // INTERACTIONS
         let token_client = token::Client::new(&env, &stream.token);
@@ -2706,6 +3036,7 @@ impl SoroStreamContract {
             locked: false,
             metadata_uri: stream.metadata_uri.clone(),
             milestones: soroban_sdk::Vec::new(&env),
+            milestone_release_mode: false,
             holdback_amount: 0,
             holdback_claimed: false,
             is_step_vesting: false,
@@ -2724,6 +3055,7 @@ impl SoroStreamContract {
             expiry_warning_emitted: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
+            tag: None,
             on_complete_contract: None,
             on_complete_function: None,
         };
@@ -3146,6 +3478,22 @@ impl SoroStreamContract {
             return Ok(0);
         }
 
+        // ── Milestone-release mode path ──────────────────────────────────────
+        if stream.milestone_release_mode {
+            let mut claimable: i128 = 0;
+            for milestone in stream.milestones.iter() {
+                if (now >= milestone.unlock_time && milestone.status == crate::types::MilestoneStatus::Pending)
+                    || milestone.status == crate::types::MilestoneStatus::Released {
+                    claimable = claimable
+                        .checked_add(milestone.amount)
+                        .ok_or(StreamError::Overflow)?;
+                }
+            }
+            // Subtract what has already been withdrawn
+            let available = claimable.saturating_sub(stream.total_withdrawn);
+            return Ok(available.max(0));
+        }
+
         // ── Step-vesting path ────────────────────────────────────────────────
         if stream.is_step_vesting {
             let tranches = load_tranches(&env, stream_id);
@@ -3242,6 +3590,44 @@ impl SoroStreamContract {
         streams
     }
 
+    /// Returns a paginated slice of streams created by a sender address with a specific tag.
+    pub fn get_streams_by_tag(env: Env, sender: Address, tag: String, start: u32, limit: u32) -> Vec<Stream> {
+        let ids = get_ids_by_tag(&env, &sender, &tag);
+        let cap = limit.min(20) as usize;
+        let mut streams = Vec::new(&env);
+        for i in (start as usize)..((start as usize).saturating_add(cap)).min(ids.len() as usize) {
+            if let Some(s) = load_stream(&env, ids.get(i as u32).unwrap()) {
+                streams.push_back(s);
+            }
+        }
+        streams
+    }
+
+    /// Sets or updates the tag for a stream. Only the sender may call this.
+    pub fn set_stream_tag(env: Env, stream_id: u64, sender: Address, tag: Option<String>) -> Result<(), StreamError> {
+        sender.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        // Remove old tag index if it existed
+        if let Some(ref old_tag) = stream.tag {
+            unindex_by_tag(&env, &sender, old_tag, stream_id);
+        }
+
+        // Set new tag and index it
+        stream.tag = tag.clone();
+        if let Some(ref new_tag) = tag {
+            index_by_tag(&env, &sender, new_tag, stream_id);
+        }
+
+        save_stream(&env, &stream);
+        Ok(())
+    }
+
     /// Returns only active streams created by a sender address.
     pub fn get_active_streams_by_sender(env: Env, sender: Address) -> Vec<Stream> {
         let ids = get_ids_by_sender(&env, &sender);
@@ -3268,6 +3654,95 @@ impl SoroStreamContract {
             }
         }
         streams
+    }
+
+    /// Queries streams with optional filters on status, asset, sender, and recipient.
+    ///
+    /// This function allows efficient on-chain filtering without iterating all stream records.
+    /// All filter fields are optional; omitted filters (None) are not applied.
+    /// Multiple filters are combined with AND logic.
+    ///
+    /// # Parameters
+    /// * `filter` - The filter criteria. Any `None` field is ignored.
+    /// * `start` - Starting index for pagination (0-based).
+    /// * `limit` - Maximum number of results to return (capped at 20).
+    ///
+    /// # Returns
+    /// A vector of streams matching all specified filter criteria.
+    ///
+    /// # Example
+    /// To find all Active USDC streams from a specific sender:
+    /// ```ignore
+    /// let filter = StreamQueryFilter {
+    ///     status: Some(StreamStatus::Active),
+    ///     asset: Some(usdc_token_address),
+    ///     sender: Some(sender_address),
+    ///     recipient: None,
+    /// };
+    /// let results = query_streams(env, filter, 0, 20);
+    /// ```
+    pub fn query_streams(
+        env: Env,
+        filter: crate::types::StreamQueryFilter,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Stream> {
+        // Get all global stream IDs
+        let global_count = get_global_stream_count(&env);
+        let mut matching_streams = Vec::new(&env);
+
+        // Iterate through all streams and apply filters
+        for i in 0..global_count {
+            if let Some(stream_id) = get_global_stream_at(&env, i) {
+                if let Some(stream) = load_stream(&env, stream_id) {
+                    // Check all filter conditions
+                    let mut matches = true;
+
+                    // Check status filter
+                    if let Some(ref status) = filter.status {
+                        if stream.status != *status {
+                            matches = false;
+                        }
+                    }
+
+                    // Check asset (token) filter
+                    if let Some(ref asset) = filter.asset {
+                        if stream.token != *asset {
+                            matches = false;
+                        }
+                    }
+
+                    // Check sender filter
+                    if let Some(ref sender) = filter.sender {
+                        if stream.sender != *sender {
+                            matches = false;
+                        }
+                    }
+
+                    // Check recipient filter
+                    if let Some(ref recipient) = filter.recipient {
+                        if stream.recipient != *recipient {
+                            matches = false;
+                        }
+                    }
+
+                    if matches {
+                        matching_streams.push_back(stream);
+                    }
+                }
+            }
+        }
+
+        // Apply pagination
+        let cap = limit.min(20) as usize;
+        let mut paginated = Vec::new(&env);
+        for i in (start as usize)..((start as usize).saturating_add(cap)).min(matching_streams.len()) {
+            if let Some(s) = matching_streams.get(i as u32) {
+                paginated.push_back(s);
+            }
+        }
+
+        paginated
     }
 
     /// Pauses an active stream.
@@ -3459,6 +3934,7 @@ impl SoroStreamContract {
                 locked: false,
                 metadata_uri: None,
                 milestones: soroban_sdk::Vec::new(&env),
+                milestone_release_mode: false,
                 holdback_amount: 0,
                 holdback_claimed: false,
                 is_step_vesting: false,
@@ -3477,6 +3953,7 @@ impl SoroStreamContract {
                 expiry_warning_emitted: false,
                 redirect_to_stream_id: None,
                 is_dual_stream: false,
+                tag: None,
                 on_complete_contract: None,
                 on_complete_function: None,
             };
