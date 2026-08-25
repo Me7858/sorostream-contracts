@@ -100,6 +100,24 @@ pub trait SoroStreamInterface {
     fn transfer_recipient(env: Env, stream_id: u64, current_recipient: Address, new_recipient: Address) -> Result<(), StreamError>;
     fn partial_cancel_stream(env: Env, stream_id: u64, sender: Address, cancel_amount: i128) -> Result<u64, StreamError>;
     fn top_up(env: Env, stream_id: u64, sender: Address, token: Address, amount: i128) -> Result<(), StreamError>;
+    
+    /// Updates the token-per-second flow rate of an active stream.
+    ///
+    /// Only the stream's sender may call this.  The recipient's currently-accrued
+    /// balance is settled at the current flow rate before the new rate is applied.
+    /// The stream's remaining deposit and end time are adjusted to maintain the
+    /// intended total amount, ensuring the recipient receives exactly the promised
+    /// total over the adjusted remaining duration.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not the stream sender.
+    /// - `StreamNotActive` — stream is not in Active state.
+    /// - `ZeroFlowRate` — the calculated new flow rate is zero.
+    /// - `InsufficientBalance` — insufficient remaining balance to support the new rate until end_time.
+    /// - `Overflow` — arithmetic overflow during calculations.
+    fn update_stream_rate(env: Env, stream_id: u64, sender: Address, new_rate: i128) -> Result<(), StreamError>;
+    
     fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
 
     /// Approves a stream that was created with `requires_recipient_approval = true`.

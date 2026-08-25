@@ -499,6 +499,9 @@ impl SoroStreamContract {
             return Err(StreamError::AddressBlocked);
         }
 
+        // Check token whitelist (Issue #221)
+        check_token_whitelist(&env, &token)?;
+
         // Check per-token stream cap (Issue #286)
         let max_per_token = get_max_streams_per_token(&env);
         if max_per_token > 0 && get_token_stream_count(&env, &token) >= max_per_token {
@@ -779,6 +782,9 @@ impl SoroStreamContract {
             return Err(StreamError::SenderStreamLimitExceeded);
         }
 
+        // Check token whitelist (Issue #221)
+        check_token_whitelist(&env, &token)?;
+
         mark_nonce_used(&env, &sender, nonce);
 
         let now = env.ledger().timestamp();
@@ -787,6 +793,15 @@ impl SoroStreamContract {
         let end_time = last_tranche.unlock_time;
         if end_time <= now {
             return Err(StreamError::InvalidEndTime);
+        }
+
+        // Validate minimum duration between start_time (now) and end_time.
+        let duration_seconds = end_time
+            .checked_sub(now)
+            .ok_or(StreamError::Overflow)?;
+        let min_dur = read_min_duration(&env);
+        if duration_seconds < min_dur {
+            return Err(StreamError::StreamDurationTooShort);
         }
 
         // ── Defensive stream ID collision check (schedule path) ─────────────
@@ -954,6 +969,9 @@ impl SoroStreamContract {
         if sender_count >= limit {
             return Err(StreamError::SenderStreamLimitExceeded);
         }
+
+        // Check token whitelist (Issue #221)
+        check_token_whitelist(&env, &token)?;
 
         mark_nonce_used(&env, &sender, nonce);
 
@@ -1236,6 +1254,30 @@ impl SoroStreamContract {
 
     pub fn get_redirect(env: Env, stream_id: u64) -> Option<u64> {
         load_stream(&env, stream_id).and_then(|s| s.redirect_to_stream_id)
+    }
+
+    /// Enables or disables the token whitelist enforcement (Issue #221).
+    /// When enabled, only whitelisted tokens can be used in streams.
+    pub fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        set_token_whitelist_enabled(&env, enabled);
+        if enabled {
+            events::token_whitelist_enabled(&env);
+        } else {
+            events::token_whitelist_disabled(&env);
+        }
+        Ok(())
+    }
+
+    /// Adds a token to the whitelist (Issue #221).
+    /// When token whitelisting is enabled, only tokens in the whitelist can be streamed.
+    pub fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        admin.require_auth();
+        add_token_to_whitelist(&env, &token);
+        events::token_whitelisted(&env, &token);
+        Ok(())
     }
 
     /// Removes a token from the whitelist (Issue #221).
@@ -2724,6 +2766,110 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Updates the token-per-second flow rate of an active stream.
+    ///
+    /// Only the sender may call this. Settles the recipient's accrued balance
+    /// at the current rate before applying the new rate. The stream's deposit
+    /// and end_time are adjusted to maintain the promised total.
+    pub fn update_stream_rate(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        new_rate: i128,
+    ) -> Result<(), StreamError> {
+        if is_paused_or_auto_unpause(&env) {
+            return Err(StreamError::ContractPaused);
+        }
+        sender.require_auth();
+
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+
+        // Only linear streams and non-step-vesting streams support rate updates
+        if stream.is_step_vesting {
+            return Err(StreamError::InvalidDuration);
+        }
+
+        if stream.status != StreamStatus::Active {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        if new_rate <= 0 {
+            return Err(StreamError::ZeroFlowRate);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // ── Settle accrued balance at current rate ──────────────────────────
+        // Compute how much the recipient has earned at the old rate
+        let claimable_at_old_rate = Self::get_claimable(&env, stream_id)
+            .unwrap_or(0)
+            .max(0);
+
+        // Update total_withdrawn to reflect the accrued balance being "settled"
+        // This ensures the next claimable calculation starts fresh
+        stream.last_withdraw_time = now;
+        
+        // Compute remaining balance: what's left after current accrual
+        let settled_withdrawn = stream
+            .total_withdrawn
+            .checked_add(claimable_at_old_rate)
+            .ok_or(StreamError::Overflow)?;
+        
+        let remaining_balance = stream
+            .deposit
+            .checked_sub(settled_withdrawn)
+            .ok_or(StreamError::Overflow)?;
+
+        if remaining_balance < 0 {
+            return Err(StreamError::InsufficientBalance);
+        }
+
+        // ── Calculate new end time ──────────────────────────────────────────
+        // Remaining duration: remaining_balance / new_rate
+        let remaining_duration_i128 = remaining_balance / new_rate;
+        let remaining_duration = u64::try_from(remaining_duration_i128)
+            .map_err(|_| StreamError::Overflow)?;
+
+        // If remaining_balance doesn't divide evenly, we might have rounding issues
+        // For now, we'll accept this and the stream might end slightly early or late
+        let new_end_time = now
+            .checked_add(remaining_duration)
+            .ok_or(StreamError::Overflow)?;
+
+        // ── Validate new end time doesn't exceed maximum allowed duration ────
+        let max_end_time = now
+            .checked_add(MAX_STREAM_DURATION_SECONDS)
+            .ok_or(StreamError::Overflow)?;
+
+        if new_end_time > max_end_time {
+            return Err(StreamError::Overflow);
+        }
+
+        // ── Update stream with new rate ──────────────────────────────────────
+        let old_rate = stream.flow_rate;
+        stream.flow_rate = new_rate;
+        stream.end_time = new_end_time;
+        stream.total_withdrawn = settled_withdrawn;
+        stream.deposit = remaining_balance;
+
+        save_stream(&env, &stream);
+
+        events::stream_rate_updated(
+            &env,
+            stream_id,
+            old_rate,
+            new_rate,
+            new_end_time,
+            remaining_balance,
+        );
+
+        Ok(())
+    }
+
     /// Delegates management of a stream to another address.
     ///
     /// Only the stream sender may call this. The delegate may subsequently
@@ -3212,6 +3358,9 @@ impl SoroStreamContract {
 
             // Validate token is a deployed SAC (Issue #243) - do this in validation phase
             validate_token_address(&env, &token)?;
+
+            // Check token whitelist (Issue #221)
+            check_token_whitelist(&env, &token)?;
 
             let stream_id = derive_stream_id(&env, &sender, &recipient, now, i as u64);
             if stream_exists(&env, stream_id) {
