@@ -317,7 +317,7 @@ mod test {
         let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
         c.initialize(&t.admin);
 
-        let new_admin = Address::generate(&t.env);
+        let _new_admin = Address::generate(&t.env);
         // The main flow is tested in test_propose_and_accept_admin
         // This test name serves as documentation for the behavior
     }

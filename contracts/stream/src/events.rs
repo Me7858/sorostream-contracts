@@ -910,3 +910,55 @@ pub fn dormant_stream_cancelled(
         (sender.clone(), refund_amount, last_withdraw_time),
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// On-Complete Callback Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when an on_complete callback is invoked when a stream reaches its end_time.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+/// - `on_complete_function`: The function name that was called
+pub fn on_complete_invoked(
+    env: &Env,
+    stream_id: u64,
+    on_complete_contract: &Address,
+    on_complete_function: &Symbol,
+) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteInvoked"), stream_id),
+        (on_complete_contract.clone(), on_complete_function.clone()),
+    );
+}
+
+/// Emitted when an on_complete callback execution succeeds.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+pub fn on_complete_success(env: &Env, stream_id: u64, on_complete_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteSuccess"), stream_id),
+        on_complete_contract.clone(),
+    );
+}
+
+/// Emitted when an on_complete callback execution fails.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+/// - `error_message`: Description of the error that occurred
+pub fn on_complete_failed(
+    env: &Env,
+    stream_id: u64,
+    on_complete_contract: &Address,
+    error_message: &String,
+) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteFailed"), stream_id),
+        (on_complete_contract.clone(), error_message.clone()),
+    );
+}
