@@ -83,6 +83,24 @@ fn checked_flow_amount(flow_rate: i128, elapsed: u64) -> Result<i128, StreamErro
 
 const MAX_STREAM_DURATION_SECONDS: u64 = 100 * 365 * 24 * 60 * 60;
 
+/// Maximum safe flow_rate that won't overflow when multiplied by any valid duration.
+/// Calculated as i128::MAX / MAX_STREAM_DURATION_SECONDS.
+/// This ensures that flow_rate * elapsed can never overflow i128 for any valid stream.
+const MAX_SAFE_FLOW_RATE: i128 = i128::MAX / (MAX_STREAM_DURATION_SECONDS as i128);
+
+/// Validates that a flow_rate is within safe bounds for arithmetic operations.
+/// Returns error if flow_rate could overflow when multiplied by any elapsed time
+/// within a valid stream duration.
+fn validate_flow_rate_bounds(flow_rate: i128) -> Result<(), StreamError> {
+    if flow_rate <= 0 {
+        return Err(StreamError::ZeroFlowRate);
+    }
+    if flow_rate > MAX_SAFE_FLOW_RATE {
+        return Err(StreamError::Overflow);
+    }
+    Ok(())
+}
+
 // ── Helper: validate metadata URI ────────────────────────────────────────────
 /// Minimum claimable amount before a withdrawal is considered meaningful.
 ///
@@ -463,6 +481,14 @@ impl SoroStreamContract {
             return Err(StreamError::StreamDurationTooShort);
         }
 
+        // Explicit zero-duration check for clarity (Issue: allow end_time = start_time vulnerability)
+        // A stream must have positive duration. Zero duration would mean start_time == end_time,
+        // which is invalid: the deposit would immediately fully accrue with flow_rate * 0 = 0,
+        // but the constraint enforcement becomes ambiguous.
+        if duration_seconds == 0 {
+            return Err(StreamError::InvalidDuration);
+        }
+
         let max_dur = read_max_duration(&env);
         if max_dur > 0 && duration_seconds > max_dur {
             return Err(StreamError::DurationExceedsMax);
@@ -476,6 +502,13 @@ impl SoroStreamContract {
         if flow_rate == 0 {
             return Err(StreamError::ZeroFlowRate);
         }
+
+        // ── Issue: Validate flow_rate bounds to prevent overflow during withdrawals ──
+        // Ensure flow_rate is within safe bounds: flow_rate * any_elapsed_time <= i128::MAX
+        // This prevents "runtime errors" where computations overflow after stream creation.
+        // By validating here, we guarantee that future withdraw operations won't encounter
+        // unexpected Overflow errors due to excessively large flow rates.
+        validate_flow_rate_bounds(flow_rate)?;
 
         // ── Validate withdrawal_steps ────────────────────────────────────────
         // Steps must be >= 1.  A value of 0 is nonsensical; callers should pass
@@ -528,6 +561,9 @@ impl SoroStreamContract {
         let end_time = now
             .checked_add(duration_seconds)
             .ok_or(StreamError::Overflow)?;
+        // Defensive check: ensure end_time > start_time (duration > 0 is already validated above)
+        // This provides defense-in-depth against timestamp overflow or logic errors that could
+        // create zero-duration streams (where end_time == start_time).
         if end_time <= now {
             return Err(StreamError::InvalidEndTime);
         }
@@ -2351,6 +2387,20 @@ impl SoroStreamContract {
                 }
             }
 
+            // EFFECTS: Update storage after token transfers succeed
+            if all_claimed {
+                stream.status = StreamStatus::Completed;
+                save_stream(&env, &stream);
+                remove_tranches(&env, stream_id);
+                decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
+                remove_stream(&env, stream_id);
+                unindex_by_sender(&env, &stream.sender, stream_id);
+                unindex_by_recipient(&env, &stream.recipient, stream_id);
+            } else {
+                save_stream(&env, &stream);
+            }
+
             if tranches_newly_claimed > 0 {
                 events::tranches_withdrawn(&env, stream_id, &recipient, tranches_newly_claimed, claimable);
             }
@@ -2606,7 +2656,8 @@ impl SoroStreamContract {
 
                 let token_client = token::Client::new(&env, &stream.token);
 
-                // INTERACTIONS
+                // INTERACTIONS: Transfer tokens BEFORE removing storage
+                // This ensures atomicity: if transfer fails, stream record persists and can be retried.
                 if recipient_amount > 0 {
                     token_client.transfer(
                         &env.current_contract_address(),
@@ -2621,6 +2672,12 @@ impl SoroStreamContract {
                         &dust,
                     );
                 }
+
+                // EFFECTS: Remove stream after token transfers succeed
+                remove_stream(&env, stream_id);
+                unindex_by_sender(&env, &stream.sender, stream_id);
+                unindex_by_recipient(&env, &stream.recipient, stream_id);
+
                 events::stream_completed(&env, stream_id);
                 // Invoke on_complete callback if configured
                 stream.status = StreamStatus::Completed;
@@ -2663,7 +2720,10 @@ impl SoroStreamContract {
     /// Cancels an active stream. The recipient receives all earned tokens so far;
     /// the sender receives the unstreamed remainder.
     ///
-    /// Follows checks-effects-interactions: stream is removed before token transfers.
+    /// Follows interactions-before-effects pattern: token transfers occur BEFORE storage
+    /// deletion. This ensures atomicity and prevents orphaned tokens: if a token transfer
+    /// fails, the stream record persists and can be retried or recovered.
+    ///
     /// A reentrancy guard blocks re-entrant calls during settlement.
     pub fn cancel_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         if is_reentrancy_locked(&env) {
@@ -2731,6 +2791,14 @@ impl SoroStreamContract {
                     &stream.sender,
                     &total_refund,
                 );
+            }
+
+            // EFFECTS: Remove stream after token transfer succeeds
+            remove_stream(&env, stream_id);
+            unindex_by_sender(&env, &stream.sender, stream_id);
+            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            if holdback_refund > 0 {
+                remove_holdback(&env, stream_id);
             }
 
             events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, 0i128);
@@ -2913,6 +2981,14 @@ impl SoroStreamContract {
             );
         }
 
+        // EFFECTS: Remove stream after token transfers succeed
+        remove_stream(&env, stream_id);
+        unindex_by_sender(&env, &stream.sender, stream_id);
+        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        if holdback_refund > 0 {
+            remove_holdback(&env, stream_id);
+        }
+
         events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, recipient_amount);
 
         clear_reentrancy_lock(&env);
@@ -2921,7 +2997,10 @@ impl SoroStreamContract {
 
     /// Allows the recipient to terminate a stream early.
     ///
-    /// Follows checks-effects-interactions: stream is removed before token transfers.
+    /// Follows interactions-before-effects pattern: token transfers occur BEFORE storage
+    /// deletion. This ensures atomicity and prevents orphaned tokens: if a token transfer
+    /// fails, the stream record persists and can be retried or recovered.
+    ///
     /// A reentrancy guard blocks re-entrant calls during settlement.
     pub fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
         if is_paused_or_auto_unpause(&env) {
@@ -2990,6 +3069,11 @@ impl SoroStreamContract {
                 &refund_amount,
             );
         }
+
+        // EFFECTS: Remove stream after token transfers succeed
+        remove_stream(&env, stream_id);
+        unindex_by_sender(&env, &stream.sender, stream_id);
+        unindex_by_recipient(&env, &stream.recipient, stream_id);
 
         events::stream_terminated_by_recipient(&env, stream_id, &recipient, recipient_amount, refund_amount);
 
@@ -4297,6 +4381,11 @@ impl SoroStreamContract {
                 return Err(StreamError::ZeroFlowRate);
             }
 
+            // ── Validate flow_rate bounds to prevent overflow during future withdrawals ──
+            // Ensure flow_rate is within safe bounds: flow_rate * any_elapsed_time <= i128::MAX
+            // This prevents "runtime errors" where computations overflow after stream creation.
+            validate_flow_rate_bounds(flow_rate)?;
+
             // Validate token is a deployed SAC (Issue #243) - do this in validation phase
             validate_token_address(&env, &token)?;
 
@@ -4315,11 +4404,48 @@ impl SoroStreamContract {
             batch_ids.push_back(stream_id);
         }
 
+        // ── Phase 1.5: Validate token balances and permissions ──────────────
+        // Before any token transfer, group by token and check that the sender
+        // has sufficient balance for all transfers to this contract.
+        // This catches balance errors early (Phase 1) before any state mutation.
+        let mut token_totals: Vec<(Address, i128)> = Vec::new(&env);
+        for i in 0..n {
+            let amount = amounts.get_unchecked(i);
+            let token = tokens.get_unchecked(i);
+
+            // Find or create entry for this token
+            let mut found = false;
+            for j in 0..token_totals.len() {
+                let (t, total) = token_totals.get_unchecked(j);
+                if t == &token {
+                    // Update existing entry
+                    let new_total = total.checked_add(amount).ok_or(StreamError::Overflow)?;
+                    let _ = token_totals.set(j, (token.clone(), new_total));
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Add new entry
+                token_totals.push_back((token.clone(), amount));
+            }
+        }
+
+        // Verify sender has sufficient balance for each token
+        for j in 0..token_totals.len() {
+            let (token, total_needed) = token_totals.get_unchecked(j);
+            let balance = token::Client::new(&env, token).balance(&sender);
+            if balance < total_needed {
+                return Err(StreamError::ZeroAmount);  // Insufficient funds
+            }
+        }
+
         // ── Phase 2: Transfer tokens and persist stream records ──────────────
         //
-        // All token transfers happen before any index mutation. If any transfer
-        // fails here the entire transaction is rolled back by the Soroban host
-        // and no orphaned index entries can be left behind.
+        // All input validation is complete. Token balances have been verified.
+        // Now perform all token transfers and stream persistence in sequence.
+        // If any transfer fails here the entire transaction is rolled back by
+        // the Soroban host and no orphaned state is left behind.
         for i in 0..n {
             let recipient = recipients.get_unchecked(i);
             let amount = amounts.get_unchecked(i);
