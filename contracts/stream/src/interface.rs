@@ -33,12 +33,6 @@ pub trait SoroStreamInterface {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
-        holdback_amount: i128,
-        withdrawal_steps: Option<u32>,
-        min_withdrawal_amount: Option<i128>,
-        non_transferable: bool,
-        requires_recipient_approval: bool,
-        enforce_recipient_allowlist: bool,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(

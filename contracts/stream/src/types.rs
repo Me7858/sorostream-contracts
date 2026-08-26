@@ -231,15 +231,10 @@ pub struct Stream {
     /// Recipients can still `withdraw` normally; admin pause is unaffected.
     pub sender_locked: bool,
 
-    /// Whether the StreamExpiryWarning event has already been emitted.
-    pub expiry_warning_emitted: bool,
     /// Optional redirect target stream ID.
     pub redirect_to_stream_id: Option<u64>,
     /// Whether this stream is a dual-token stream.
     pub is_dual_stream: bool,
-    /// Optional tag for grouping streams (e.g. project or department label).
-    /// Allows senders to categorize and query streams by tag without iterating all streams.
-    pub tag: Option<String>,
 
     // ── On-complete callback (composable DeFi) ──────────────────────────────
 

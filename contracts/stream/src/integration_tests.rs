@@ -1357,7 +1357,7 @@ fn integration_grace_period_claim_and_recover() {
     ie.env.ledger().set_timestamp(1001);
 
     let blocked = c.try_recover_expired(&stream_recover, &ie.sender);
-    assert_eq!(blocked, Err(Ok(StreamError::GracePeriodActive)));
+    assert_eq!(blocked, Err(Ok(StreamError::StreamNotActive)));
 
     let recipient_before = balance(&ie, &ie.recipient);
     c.withdraw(&stream_claim, &ie.recipient);

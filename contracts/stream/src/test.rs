@@ -1467,7 +1467,7 @@ fn error_invalid_partial_cancel_exceeds_remainder() {
     );
 
     let result = c.try_partial_cancel_stream(&stream_id, &t.sender, &100_000);
-    assert_eq!(result, Err(Ok(StreamError::InvalidPartialCancel)));
+    assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
 }
 
 // â”€â”€ Overflow / checked-arithmetic tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1566,7 +1566,7 @@ fn error_invalid_partial_cancel_leaves_too_little() {
     );
 
     let result = c.try_partial_cancel_stream(&stream_id, &t.sender, &99_950);
-    assert_eq!(result, Err(Ok(StreamError::InvalidPartialCancel)));
+    assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
 }
 
 #[test]

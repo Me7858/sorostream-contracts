@@ -9,7 +9,7 @@
 //!   Oracle:
 //!     - Oracle not set                   → behaves identically to today
 //!     - Price within threshold           → withdraw succeeds, PriceCheckPassed emitted
-//!     - Price above threshold            → withdraw reverts with PriceDeviationTooHigh
+//!     - Price above threshold            → withdraw reverts with InvalidSlippage
 
 use super::*;
 use soroban_sdk::{
