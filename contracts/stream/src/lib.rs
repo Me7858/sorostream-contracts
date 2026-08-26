@@ -15,7 +15,7 @@ pub mod vesting_math;
 
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
-pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve};
+pub use types::{AuditEntry, AssetStats, HealthStatus, ProtocolStats, StatusStats, Stream, StreamHealth, Stats, StreamStatus, VestingCurve};
 pub use oracle::IPriceOracle;
 
 #[cfg(test)] mod integration_tests;
@@ -35,7 +35,7 @@ use storage::{
     get_delegate, get_expiry_warning_window, get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
-    get_ids_by_sender, get_max_streams_per_token, get_new_sender_stream_cap,
+    get_ids_by_sender, get_max_deposit_per_token, get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
     get_rate_limit_state, get_rate_limit_window,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
@@ -58,7 +58,7 @@ use storage::{
     remove_stream, remove_token_from_whitelist, remove_tranches,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
     set_delegate, set_expiry_warning_window,
-    set_grace_period_ledgers, set_max_streams_per_sender,
+    set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
     set_pause_expiry, set_protocol_fee,
     set_rate_limit_state, set_reentrancy_lock,
@@ -371,11 +371,11 @@ impl SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
+        non_transferable: bool,
     ) -> Result<u64, StreamError> {
         let holdback_amount = 0i128;
         let withdrawal_steps: Option<u32> = None;
         let min_withdrawal_amount: Option<i128> = None;
-        let non_transferable = false;
         let requires_recipient_approval = false;
         sender.require_auth();
 
@@ -454,6 +454,12 @@ impl SoroStreamContract {
         let max_per_token = get_max_streams_per_token(&env);
         if max_per_token > 0 && get_token_stream_count(&env, &token) >= max_per_token {
             return Err(StreamError::TokenStreamCapExceeded);
+        }
+
+        // Check per-asset maximum deposit limit
+        let max_deposit = get_max_deposit_per_token(&env, &token);
+        if max_deposit > 0 && amount > max_deposit {
+            return Err(StreamError::MaxDepositExceeded);
         }
 
         mark_nonce_used(&env, &sender, nonce);
@@ -600,6 +606,7 @@ impl SoroStreamContract {
         auto_renew: bool,
         lock_until: u64,
         allow_recipient_termination: bool,
+        non_transferable: bool,
     ) -> Result<u64, StreamError> {
         let recipient = get_federation_address(&env, &federation_name)
             .ok_or(StreamError::StreamNotFound)?;
@@ -616,6 +623,7 @@ impl SoroStreamContract {
             auto_renew,
             lock_until,
             allow_recipient_termination,
+            non_transferable,
         )
     }
 
@@ -727,6 +735,12 @@ impl SoroStreamContract {
         let limit = effective_sender_limit(&env, &sender);
         if sender_count >= limit {
             return Err(StreamError::NewSenderStreamCapExceeded);
+        }
+
+        // Check per-asset maximum deposit limit
+        let max_deposit = get_max_deposit_per_token(&env, &token);
+        if max_deposit > 0 && deposit > max_deposit {
+            return Err(StreamError::MaxDepositExceeded);
         }
 
         mark_nonce_used(&env, &sender, nonce);
@@ -907,6 +921,12 @@ impl SoroStreamContract {
         let limit = effective_sender_limit(&env, &sender);
         if sender_count >= limit {
             return Err(StreamError::NewSenderStreamCapExceeded);
+        }
+
+        // Check per-asset maximum deposit limit
+        let max_deposit = get_max_deposit_per_token(&env, &token);
+        if max_deposit > 0 && amount > max_deposit {
+            return Err(StreamError::MaxDepositExceeded);
         }
 
         mark_nonce_used(&env, &sender, nonce);
@@ -1210,6 +1230,28 @@ impl SoroStreamContract {
     /// Returns the current per-token stream cap (0 = unlimited).
     pub fn get_max_streams_per_token(env: Env) -> u32 {
         get_max_streams_per_token(&env)
+    }
+
+    // ── Per-asset maximum deposit limit ──────────────────────────────────────
+
+    /// Sets the maximum deposit amount for a single stream using a specific token.
+    /// Setting to 0 disables the limit for that token. Admin only.
+    ///
+    /// This provides risk management by preventing users from locking unbounded
+    /// amounts of a particular asset in a single stream.
+    pub fn set_max_deposit_per_token(env: Env, token: Address, max_deposit: i128) -> Result<(), StreamError> {
+        check_admin(&env);
+        if max_deposit < 0 {
+            return Err(StreamError::ZeroAmount);
+        }
+        set_max_deposit_per_token(&env, &token, max_deposit);
+        Ok(())
+    }
+
+    /// Returns the maximum deposit amount for a single stream using the given token.
+    /// Returns 0 if no limit is set (unlimited).
+    pub fn get_max_deposit_per_token(env: Env, token: Address) -> i128 {
+        get_max_deposit_per_token(&env, &token)
     }
 
     // ── Issue #284: Address blocklist ───────────────────────────────────────
@@ -2120,6 +2162,240 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Stops a stream immediately at the current ledger, paying the recipient their
+    /// accrued portion and returning remaining unstreamed tokens to the sender.
+    ///
+    /// This is a simpler alternative to `cancel_stream` with clearer semantics:
+    /// - Stream is terminated completely (not continued)
+    /// - Recipient receives earned amount based on elapsed time
+    /// - Sender receives unstreamed remainder
+    ///
+    /// Callable by:
+    /// - **Sender** (or delegate): To stop stream and recover unstreamed portion
+    /// - **Recipient**: To claim earned portion and stop stream
+    ///
+    /// ## Handling of Special Cases
+    ///
+    /// **Cliff streams:** If `now < cliff_time`, recipient receives 0; sender gets full refund.
+    ///
+    /// **Step-vesting (tranches):** Recipient gets all tranches where `unlock_time <= now`.
+    /// Sender gets future (unlocked) tranches.
+    ///
+    /// **Locked streams:** If `sender_locked = true`, only the recipient can call this
+    /// (sender cannot). Admin pause/unlock could be used to override.
+    ///
+    /// **Holdback amount:** If unclaimed, included in sender refund.
+    ///
+    /// **Paused streams:** Uses `last_pause_time` instead of current timestamp.
+    ///
+    /// **PendingApproval streams:** Recipient gets 0, sender gets full refund.
+    ///
+    /// ## Event
+    ///
+    /// Emits `StreamPartialCancelled` with the earned and unstreamed amounts.
+    pub fn stop_stream(
+        env: Env,
+        stream_id: u64,
+        caller: Address,
+    ) -> Result<(), StreamError> {
+        if is_reentrancy_locked(&env) {
+            return Err(StreamError::ReentrancyDetected);
+        }
+        set_reentrancy_lock(&env);
+
+        caller.require_auth();
+
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        // Authorization: sender, recipient, or delegate can call
+        let is_sender = stream.sender == caller;
+        let is_recipient = stream.recipient == caller;
+        let is_delegate = Some(caller.clone()) == get_delegate(&env, stream_id);
+
+        if !is_sender && !is_recipient && !is_delegate {
+            clear_reentrancy_lock(&env);
+            return Err(StreamError::NotAuthorized);
+        }
+
+        // Only sender can call if stream is sender-locked; recipient always can
+        if stream.sender_locked && is_sender && !is_recipient {
+            clear_reentrancy_lock(&env);
+            return Err(StreamError::StreamLocked);
+        }
+
+        // Stream must be Active or Paused (or PendingApproval for quick refund)
+        if stream.status != StreamStatus::Active
+            && stream.status != StreamStatus::Paused
+            && stream.status != StreamStatus::PendingApproval
+        {
+            clear_reentrancy_lock(&env);
+            return Err(StreamError::StreamNotActive);
+        }
+
+        // ── PendingApproval: quick refund ────────────────────────────────────
+        if stream.status == StreamStatus::PendingApproval {
+            let refund = stream.deposit;
+            let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
+                get_holdback(&env, stream_id)
+            } else {
+                0
+            };
+
+            remove_stream(&env, stream_id);
+            unindex_by_sender(&env, &stream.sender, stream_id);
+            unindex_by_recipient(&env, &stream.recipient, stream_id);
+            if holdback_refund > 0 {
+                remove_holdback(&env, stream_id);
+            }
+
+            let total_refund = refund.saturating_add(holdback_refund);
+            if total_refund > 0 {
+                token::Client::new(&env, &stream.token).transfer(
+                    &env.current_contract_address(),
+                    &stream.sender,
+                    &total_refund,
+                );
+            }
+
+            events::stream_partial_cancelled(&env, stream_id, &stream.sender, 0i128, total_refund);
+            clear_reentrancy_lock(&env);
+            return Ok(());
+        }
+
+        let now = if stream.status == StreamStatus::Paused {
+            stream.last_pause_time
+        } else {
+            env.ledger().timestamp()
+        };
+
+        // ── Step-vesting (tranches) ──────────────────────────────────────────
+        if stream.is_step_vesting {
+            let tranches = load_tranches(&env, stream_id);
+
+            // Recipient gets all tranches whose unlock_time has passed
+            let mut recipient_amount: i128 = 0;
+            let mut new_cursor = stream.tranches_claimed;
+            while new_cursor < tranches.len() {
+                let t = tranches.get(new_cursor).unwrap();
+                if now >= t.unlock_time {
+                    recipient_amount = recipient_amount
+                        .checked_add(t.amount)
+                        .ok_or(StreamError::Overflow)?;
+                    new_cursor += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Sender gets all remaining (unclaimed, not-yet-vested) tranches
+            let mut refund_amount: i128 = 0;
+            for i in new_cursor..tranches.len() {
+                let t = tranches.get(i).unwrap();
+                refund_amount = refund_amount
+                    .checked_add(t.amount)
+                    .ok_or(StreamError::Overflow)?;
+            }
+
+            // Clamp to available deposit
+            let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+            let recipient_amount = recipient_amount.min(available);
+            let refund_amount = available.saturating_sub(recipient_amount);
+
+            if stream.status == StreamStatus::Active {
+                decrement_active_stream_count(&env);
+                decrement_token_stream_count(&env, &stream.token);
+            }
+
+            // Remove stream and tranches
+            remove_tranches(&env, stream_id);
+            remove_stream(&env, stream_id);
+            unindex_by_sender(&env, &stream.sender, stream_id);
+            unindex_by_recipient(&env, &stream.recipient, stream_id);
+
+            // Transfer balances
+            let token_client = token::Client::new(&env, &stream.token);
+            if recipient_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &stream.recipient,
+                    &recipient_amount,
+                );
+            }
+            if refund_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &stream.sender,
+                    &refund_amount,
+                );
+            }
+
+            events::stream_partial_cancelled(&env, stream_id, &stream.sender, recipient_amount, refund_amount);
+            clear_reentrancy_lock(&env);
+            return Ok(());
+        }
+
+        // ── Linear vesting (original logic) ──────────────────────────────────
+
+        // Cliff enforcement: before cliff, recipient earns nothing
+        let recipient_amount = if now < stream.cliff_time {
+            0i128
+        } else {
+            let earned = vesting_math::compute_earned(
+                stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+            ).ok_or(StreamError::Overflow)?;
+            let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+            earned.min(available)
+        };
+
+        let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+        let recipient_amount = recipient_amount.min(available);
+        let refund_amount = available.saturating_sub(recipient_amount);
+
+        // Decrement active count if stream was Active
+        if stream.status == StreamStatus::Active {
+            decrement_active_stream_count(&env);
+            decrement_token_stream_count(&env, &stream.token);
+        }
+
+        // Handle holdback
+        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
+            get_holdback(&env, stream_id)
+        } else {
+            0
+        };
+
+        // Remove stream and cleanup
+        remove_stream(&env, stream_id);
+        unindex_by_sender(&env, &stream.sender, stream_id);
+        unindex_by_recipient(&env, &stream.recipient, stream_id);
+        if holdback_refund > 0 {
+            remove_holdback(&env, stream_id);
+        }
+
+        // Transfer tokens
+        let token_client = token::Client::new(&env, &stream.token);
+        if recipient_amount > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &stream.recipient,
+                &recipient_amount,
+            );
+        }
+
+        let total_refund = refund_amount.saturating_add(holdback_refund);
+        if total_refund > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &stream.sender,
+                &total_refund,
+            );
+        }
+
+        events::stream_partial_cancelled(&env, stream_id, &stream.sender, recipient_amount, refund_amount);
+        clear_reentrancy_lock(&env);
+        Ok(())
+    }
+
     /// Allows the recipient to terminate a stream early.
     ///
     /// Follows checks-effects-interactions: stream is removed before token transfers.
@@ -2993,6 +3269,7 @@ impl SoroStreamContract {
         auto_renew: bool,
         lock_untils: Vec<u64>,
         nonce: u64,
+        non_transferable: bool,
     ) -> Result<Vec<u64>, StreamError> {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
@@ -3053,6 +3330,12 @@ impl SoroStreamContract {
 
             // Validate token is a deployed SAC (Issue #243) - do this in validation phase
             validate_token_address(&env, &token)?;
+
+            // Check per-asset maximum deposit limit
+            let max_deposit = get_max_deposit_per_token(&env, &token);
+            if max_deposit > 0 && amount > max_deposit {
+                return Err(StreamError::MaxDepositExceeded);
+            }
 
             let stream_id = derive_stream_id(&env, &sender, &recipient, now, i as u64);
             if stream_exists(&env, stream_id) {
@@ -3116,7 +3399,7 @@ impl SoroStreamContract {
                 withdrawal_steps: None,
                 current_step: 0,
                 min_withdrawal_amount: None,
-                non_transferable: false,
+                non_transferable,
                 requires_recipient_approval: false,
                 approval_timestamp: 0,
                 sender_locked: false,
@@ -3525,6 +3808,98 @@ impl SoroStreamContract {
             total_streams,
             active_streams,
             total_volume,
+        }
+    }
+
+    /// Returns enhanced protocol statistics with per-asset and per-status breakdown.
+    ///
+    /// This function aggregates statistics across all streams, providing:
+    /// - Total stream counts and volume
+    /// - Status breakdown (Active, Cancelled, Completed, Paused, Expired, PendingApproval)
+    /// - Per-asset breakdown (token, stream count, volume, active count)
+    ///
+    /// The asset breakdown is sorted by total volume in descending order.
+    pub fn get_protocol_stats(env: Env) -> types::ProtocolStats {
+        let total_streams = get_global_stream_count(&env) as u64;
+        let active_streams = get_active_stream_count(&env) as u64;
+        let count = get_global_stream_count(&env);
+
+        // Initialize status counters
+        let mut status_stats = types::StatusStats {
+            active: 0,
+            cancelled: 0,
+            completed: 0,
+            paused: 0,
+            expired: 0,
+            pending_approval: 0,
+        };
+
+        // Use a map-like structure to aggregate per-asset stats
+        // Key: token address, Value: (stream_count, total_volume, active_count)
+        let mut asset_map: Vec<(Address, u64, i128, u64)> = Vec::new();
+
+        let mut total_volume: i128 = 0;
+
+        // Iterate through all streams and aggregate statistics
+        for i in 0..count {
+            if let Some(stream_id) = get_global_stream_at(&env, i) {
+                if let Some(stream) = load_stream(&env, stream_id) {
+                    // Update status breakdown
+                    match stream.status {
+                        types::StreamStatus::Active => status_stats.active += 1,
+                        types::StreamStatus::Cancelled => status_stats.cancelled += 1,
+                        types::StreamStatus::Completed => status_stats.completed += 1,
+                        types::StreamStatus::Paused => status_stats.paused += 1,
+                        types::StreamStatus::Expired => status_stats.expired += 1,
+                        types::StreamStatus::PendingApproval => status_stats.pending_approval += 1,
+                    }
+
+                    // Update total volume
+                    total_volume = total_volume.saturating_add(stream.deposit);
+
+                    // Update per-asset stats
+                    if let Some(pos) = asset_map.iter().position(|(token, _, _, _)| token == &stream.token) {
+                        let (_, count, vol, active) = asset_map[pos];
+                        let is_active = matches!(stream.status, types::StreamStatus::Active);
+                        asset_map[pos] = (
+                            stream.token.clone(),
+                            count + 1,
+                            vol.saturating_add(stream.deposit),
+                            active + (if is_active { 1 } else { 0 }),
+                        );
+                    } else {
+                        let is_active = matches!(stream.status, types::StreamStatus::Active);
+                        asset_map.push((
+                            stream.token.clone(),
+                            1,
+                            stream.deposit,
+                            if is_active { 1 } else { 0 },
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Convert asset_map to Vec<AssetStats>, sorted by volume descending
+        let mut asset_stats: Vec<types::AssetStats> = asset_map
+            .into_iter()
+            .map(|(token, stream_count, total_vol, active_count)| types::AssetStats {
+                token,
+                stream_count,
+                total_volume: total_vol,
+                active_streams: active_count,
+            })
+            .collect();
+
+        // Sort by total volume in descending order
+        asset_stats.sort_by(|a, b| b.total_volume.cmp(&a.total_volume));
+
+        types::ProtocolStats {
+            total_streams,
+            active_streams,
+            total_volume,
+            status_breakdown: status_stats,
+            asset_breakdown: asset_stats,
         }
     }
 

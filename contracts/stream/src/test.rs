@@ -5400,3 +5400,400 @@ fn test_get_claimable_zero_dust_before_start() {
         assert_eq!(claimable, 0, "get_claimable must return 0 before cliff, not dust at t={}", t_val);
     }
 }
+
+
+// ── get_protocol_stats tests ────────────────────────────────────────────────
+
+/// Verify get_protocol_stats returns correct total metrics.
+#[test]
+fn test_get_protocol_stats_totals() {
+    let t = setup();
+    let c = client(&t);
+
+    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stats = c.get_protocol_stats();
+    
+    assert_eq!(stats.total_streams, 2);
+    assert_eq!(stats.active_streams, 2);
+    assert_eq!(stats.total_volume, 150_000);
+}
+
+/// Verify get_protocol_stats tracks status breakdown correctly.
+#[test]
+fn test_get_protocol_stats_status_breakdown() {
+    let t = setup();
+    let c = client(&t);
+
+    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let id3 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &75_000, &1000, &0, &2u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Cancel one stream
+    c.cancel_stream(&id1, &t.sender);
+    
+    // Pause another
+    c.pause_stream(&id2, &t.sender);
+
+    let stats = c.get_protocol_stats();
+    
+    // Status breakdown
+    assert_eq!(stats.status_breakdown.active, 1);
+    assert_eq!(stats.status_breakdown.cancelled, 1);
+    assert_eq!(stats.status_breakdown.paused, 1);
+    assert_eq!(stats.status_breakdown.completed, 0);
+    assert_eq!(stats.status_breakdown.expired, 0);
+    assert_eq!(stats.status_breakdown.pending_approval, 0);
+
+    // Verify totals still correct
+    assert_eq!(stats.total_streams, 3);
+    assert_eq!(stats.active_streams, 1);
+}
+
+/// Verify get_protocol_stats provides per-asset breakdown.
+#[test]
+fn test_get_protocol_stats_asset_breakdown() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create multiple streams with same token
+    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stats = c.get_protocol_stats();
+    
+    // Should have one asset entry for token_id
+    assert_eq!(stats.asset_breakdown.len(), 1);
+    
+    let asset = &stats.asset_breakdown[0];
+    assert_eq!(asset.token, t.token_id);
+    assert_eq!(asset.stream_count, 2);
+    assert_eq!(asset.total_volume, 150_000);
+    assert_eq!(asset.active_streams, 2);
+}
+
+/// Verify get_protocol_stats sorts assets by volume descending.
+#[test]
+fn test_get_protocol_stats_asset_sort_by_volume() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a second token
+    let token2 = t.env.register_stellar_asset_contract_from_address(Address::random(&t.env));
+
+    // Create stream with small amount on token1
+    let _id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &10_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Create stream with larger amount on token2
+    let _id2 = c.create_stream(&t.sender, &t.recipient, &token2, &500_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stats = c.get_protocol_stats();
+    
+    // Should have two assets, ordered by volume descending
+    assert_eq!(stats.asset_breakdown.len(), 2);
+    assert_eq!(stats.asset_breakdown[0].total_volume, 500_000);
+    assert_eq!(stats.asset_breakdown[1].total_volume, 10_000);
+}
+
+/// Verify get_protocol_stats reflects status changes.
+#[test]
+fn test_get_protocol_stats_status_changes() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Initially active
+    let stats = c.get_protocol_stats();
+    assert_eq!(stats.status_breakdown.active, 1);
+    assert_eq!(stats.status_breakdown.paused, 0);
+    assert_eq!(stats.active_streams, 1);
+
+    // Pause the stream
+    c.pause_stream(&stream_id, &t.sender);
+    let stats = c.get_protocol_stats();
+    assert_eq!(stats.status_breakdown.active, 0);
+    assert_eq!(stats.status_breakdown.paused, 1);
+    assert_eq!(stats.active_streams, 0);
+
+    // Resume the stream
+    c.resume_stream(&stream_id, &t.sender);
+    let stats = c.get_protocol_stats();
+    assert_eq!(stats.status_breakdown.active, 1);
+    assert_eq!(stats.status_breakdown.paused, 0);
+    assert_eq!(stats.active_streams, 1);
+}
+
+/// Verify get_protocol_stats per-asset active count is accurate.
+#[test]
+fn test_get_protocol_stats_asset_active_count() {
+    let t = setup();
+    let c = client(&t);
+
+    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stats = c.get_protocol_stats();
+    assert_eq!(stats.asset_breakdown[0].active_streams, 2);
+
+    // Pause one stream
+    c.pause_stream(&id1, &t.sender);
+    let stats = c.get_protocol_stats();
+    assert_eq!(stats.asset_breakdown[0].active_streams, 1);
+}
+
+
+// ── stop_stream tests ──────────────────────────────────────────────────────
+
+/// Verify stop_stream removes the stream and splits balance correctly.
+#[test]
+fn test_stop_stream_removes_and_splits() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Advance time to get some earned amount
+    t.env.ledger().set_timestamp(500); // Half-way through stream
+
+    // Sender stops the stream
+    c.stop_stream(&stream_id, &t.sender);
+
+    // Stream should no longer exist
+    let result = c.get_stream(&stream_id);
+    assert!(result.is_err());
+
+    // Active streams should have decreased
+    let stats = c.get_protocol_stats();
+    assert_eq!(stats.active_streams, 0);
+}
+
+/// Verify stop_stream pays recipient their earned amount.
+#[test]
+fn test_stop_stream_pays_recipient_earned() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Advance time to let some tokens accrue
+    t.env.ledger().set_timestamp(500); // 50 stroops should be earned (50000 flow_rate * 500 seconds / 1000)
+    let earned_at_500 = 50_000i128; // flow_rate = 100_000 / 1000 = 100 stroops/second, so 500s * 100 = 50_000
+
+    // Get recipient balance before
+    let balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.recipient);
+
+    // Stop stream
+    c.stop_stream(&stream_id, &t.sender);
+
+    // Check recipient balance increased
+    let balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.recipient);
+    
+    assert_eq!(balance_after - balance_before, earned_at_500);
+}
+
+/// Verify stop_stream returns unstreamed tokens to sender.
+#[test]
+fn test_stop_stream_returns_unstreamed_to_sender() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Advance time halfway
+    t.env.ledger().set_timestamp(500); // 50_000 earned, so 50_000 unstreamed
+
+    let balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.sender);
+
+    // Stop stream
+    c.stop_stream(&stream_id, &t.sender);
+
+    let balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.sender);
+    
+    let refunded = balance_after - balance_before;
+    assert_eq!(refunded, 50_000); // Unstreamed amount
+}
+
+/// Verify stop_stream respects cliff enforcement.
+#[test]
+fn test_stop_stream_respects_cliff() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create stream with cliff at 300 seconds
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &1000, &300, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &None::<u32>,
+    );
+
+    // Stop before cliff (at 200 seconds)
+    t.env.ledger().set_timestamp(200);
+
+    let recipient_balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.recipient);
+
+    c.stop_stream(&stream_id, &t.sender);
+
+    let recipient_balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.recipient);
+
+    // Recipient should get 0 (cliff not yet reached)
+    assert_eq!(recipient_balance_after, recipient_balance_before);
+}
+
+/// Verify recipient can call stop_stream.
+#[test]
+fn test_stop_stream_recipient_can_call() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Advance time
+    t.env.ledger().set_timestamp(500);
+
+    // Recipient calls stop_stream
+    c.stop_stream(&stream_id, &t.recipient);
+
+    // Stream should be gone
+    let result = c.get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Verify delegate can call stop_stream.
+#[test]
+fn test_stop_stream_delegate_can_call() {
+    let t = setup();
+    let c = client(&t);
+
+    let delegate = Address::random(&t.env);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Set delegate
+    c.set_delegate(&stream_id, &t.sender, &delegate);
+
+    // Advance time
+    t.env.ledger().set_timestamp(500);
+
+    // Delegate calls stop_stream
+    c.stop_stream(&stream_id, &delegate);
+
+    // Stream should be gone
+    let result = c.get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Verify stop_stream fails on locked stream if sender calls.
+#[test]
+fn test_stop_stream_fails_on_locked_if_sender() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Lock the stream
+    c.lock_stream(&stream_id, &t.sender);
+
+    // Sender tries to stop (should fail)
+    let result = c.stop_stream(&stream_id, &t.sender);
+    assert!(result.is_err());
+}
+
+/// Verify recipient can stop a locked stream.
+#[test]
+fn test_stop_stream_recipient_can_stop_locked() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Lock the stream
+    c.lock_stream(&stream_id, &t.sender);
+
+    // Recipient can still stop
+    c.stop_stream(&stream_id, &t.recipient);
+
+    // Stream should be gone
+    let result = c.get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Verify stop_stream handles PendingApproval streams (quick refund).
+#[test]
+fn test_stop_stream_pending_approval_quick_refund() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create stream requiring approval
+    let stream_id = c.create_stream_with_approval(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false, &0i128,
+    );
+
+    let sender_balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.sender);
+
+    // Stop before approval
+    c.stop_stream(&stream_id, &t.sender);
+
+    let sender_balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
+        .balance(&t.sender);
+
+    // Sender should get full deposit back (no earned since not approved)
+    assert_eq!(sender_balance_after - sender_balance_before, 100_000);
+
+    // Stream should be gone
+    let result = c.get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Verify stop_stream works on paused streams.
+#[test]
+fn test_stop_stream_on_paused_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Advance and pause
+    t.env.ledger().set_timestamp(500);
+    c.pause_stream(&stream_id, &t.sender);
+
+    // Stop while paused
+    c.stop_stream(&stream_id, &t.sender);
+
+    // Stream should be gone
+    let result = c.get_stream(&stream_id);
+    assert!(result.is_err());
+}
+
+/// Verify stop_stream fails on non-existent stream.
+#[test]
+fn test_stop_stream_fails_nonexistent() {
+    let t = setup();
+    let c = client(&t);
+
+    let result = c.stop_stream(&999_u64, &t.sender);
+    assert!(result.is_err());
+}
+
+/// Verify stop_stream fails if caller not authorized.
+#[test]
+fn test_stop_stream_fails_unauthorized() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let unauthorized = Address::random(&t.env);
+    let result = c.stop_stream(&stream_id, &unauthorized);
+    assert!(result.is_err());
+}

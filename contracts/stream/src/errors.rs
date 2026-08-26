@@ -56,4 +56,5 @@ pub enum StreamError {
     GracePeriodActive = 60,
     AwaitingApproval = 61,
     InvalidPartialCancel = 63,
+    MaxDepositExceeded = 64,
 }
