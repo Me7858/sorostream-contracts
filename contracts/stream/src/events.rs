@@ -80,6 +80,14 @@ pub fn auto_renew_failed(env: &Env, stream_id: u64, sender: &Address, required: 
     );
 }
 
+/// Emitted when a stream's renewal count limit is reached and the stream can no longer auto-renew.
+pub fn renewal_limit_reached(env: &Env, stream_id: u64, sender: &Address, renewals_used: u32) {
+    env.events().publish(
+        (Symbol::new(env, "RenewalLimitReached"), stream_id),
+        (sender.clone(), renewals_used),
+    );
+}
+
 /// Emitted when the contract is initialized with a version.
 pub fn contract_deployed(env: &Env, version: &String, admin: &Address) {
     env.events().publish(

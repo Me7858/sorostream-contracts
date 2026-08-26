@@ -430,6 +430,7 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError> {
@@ -441,6 +442,7 @@ impl SoroStreamContract {
         let tag: Option<String> = None;
         let on_complete_contract: Option<Address> = None;
         let on_complete_function: Option<Symbol> = None;
+        let enforce_recipient_allowlist = false;
         sender.require_auth();
 
         if is_paused_or_auto_unpause(&env) {
@@ -634,6 +636,8 @@ impl SoroStreamContract {
                 StreamStatus::Active
             },
             auto_renew,
+            renew_count,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -713,6 +717,7 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError> {
@@ -729,6 +734,7 @@ impl SoroStreamContract {
             cliff_seconds,
             nonce,
             auto_renew,
+            renew_count,
             lock_until,
             allow_recipient_termination,
         )
@@ -1228,6 +1234,7 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
         curve: VestingCurve,
@@ -1348,6 +1355,8 @@ impl SoroStreamContract {
                 StreamStatus::Active
             },
             auto_renew,
+            renew_count,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -2586,15 +2595,32 @@ impl SoroStreamContract {
         stream.locked = true;
 
         if stream_ended {
-            let duration = stream.end_time - stream.start_time;
-            let dust = stream.deposit.saturating_sub(
-                stream.flow_rate.saturating_mul(duration as i128),
-            );
+            // ── Issue: Rounding dust from integer division ────────────────────────
+            // When flow_rate = deposit / duration (integer division), the product
+            // flow_rate * duration may be less than deposit due to truncation.
+            // Additionally, if any intermediate withdrawals were skipped due to
+            // DUST_THRESHOLD, those amounts won't be in total_withdrawn either.
+            //
+            // Rather than compute dust as (flow_rate * duration), use the
+            // authoritative source: dust = remaining balance not yet withdrawn.
+            // This naturally accounts for:
+            //   1. Rounding discrepancies from integer division
+            //   2. Any stroops skipped by DUST_THRESHOLD logic
+            //   3. Any accumulated rounding errors
+            //
+            // Ensures perfect balance conservation: dust + total_withdrawn = deposit
+            let dust = stream.deposit.saturating_sub(stream.total_withdrawn);
 
             if stream.auto_renew {
-                let token_client = token::Client::new(&env, &stream.token);
-                let sender_balance = token_client.balance(&stream.sender);
-                if sender_balance < stream.deposit {
+                // Check if we've hit the renewal count limit
+                let can_renew = if let Some(max_renewals) = stream.renew_count {
+                    stream.renewals_used < max_renewals
+                } else {
+                    true  // No limit set, can always renew
+                };
+
+                if !can_renew {
+                    // Renewal limit reached, complete the stream
                     stream.status = StreamStatus::Completed;
                     stream.locked = false;
                     save_stream(&env, &stream);
@@ -2616,37 +2642,70 @@ impl SoroStreamContract {
                             &dust,
                         );
                     }
-                    events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
+                    events::renewal_limit_reached(&env, stream_id, &stream.sender, stream.renewals_used);
                     events::stream_completed(&env, stream_id);
                     // Invoke on_complete callback if configured
                     Self::invoke_on_complete(&env, &stream);
                 } else {
-                    stream.sender.require_auth();
-                    let new_end = stream
-                        .end_time
-                        .checked_add(duration)
-                        .ok_or(StreamError::Overflow)?;
-                    let old_end = stream.end_time;
-                    stream.start_time = old_end;
-                    stream.end_time = new_end;
-                    stream.last_withdraw_time = old_end;
-                    stream.total_withdrawn = 0;
-                    stream.locked = false;
-                    save_stream(&env, &stream);
+                    // Check sender balance for renewal
+                    let token_client = token::Client::new(&env, &stream.token);
+                    let sender_balance = token_client.balance(&stream.sender);
+                    if sender_balance < stream.deposit {
+                        stream.status = StreamStatus::Completed;
+                        stream.locked = false;
+                        save_stream(&env, &stream);
+                        decrement_active_stream_count(&env);
+                        decrement_token_stream_count(&env, &stream.token);
 
-                    // INTERACTIONS
-                    if recipient_amount > 0 {
+                        // INTERACTIONS
+                        if recipient_amount > 0 {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &recipient,
+                                &recipient_amount,
+                            );
+                        }
+                        if dust > 0 {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &stream.sender,
+                                &dust,
+                            );
+                        }
+                        events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
+                        events::stream_completed(&env, stream_id);
+                        // Invoke on_complete callback if configured
+                        Self::invoke_on_complete(&env, &stream);
+                    } else {
+                        // Proceed with renewal and increment renewals_used
+                        stream.sender.require_auth();
+                        let new_end = stream
+                            .end_time
+                            .checked_add(duration)
+                            .ok_or(StreamError::Overflow)?;
+                        let old_end = stream.end_time;
+                        stream.start_time = old_end;
+                        stream.end_time = new_end;
+                        stream.last_withdraw_time = old_end;
+                        stream.total_withdrawn = 0;
+                        stream.renewals_used = stream.renewals_used.saturating_add(1);
+                        stream.locked = false;
+                        save_stream(&env, &stream);
+
+                        // INTERACTIONS
+                        if recipient_amount > 0 {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &recipient,
+                                &recipient_amount,
+                            );
+                        }
                         token_client.transfer(
+                            &stream.sender,
                             &env.current_contract_address(),
-                            &recipient,
-                            &recipient_amount,
+                            &stream.deposit,
                         );
                     }
-                    token_client.transfer(
-                        &stream.sender,
-                        &env.current_contract_address(),
-                        &stream.deposit,
-                    );
                 }
             } else {
                 decrement_active_stream_count(&env);
@@ -4269,7 +4328,7 @@ impl SoroStreamContract {
         save_stream(&env, &stream);
         decrement_active_stream_count(&env);
 
-        events::stream_paused(&env, stream_id, &sender);
+        events::stream_paused(&env, stream.id, &sender);
         Ok(())
     }
 
@@ -4302,7 +4361,7 @@ impl SoroStreamContract {
         save_stream(&env, &stream);
         increment_active_stream_count(&env);
 
-        events::stream_resumed(&env, stream_id, &sender);
+        events::stream_resumed(&env, stream.id, &sender);
         Ok(())
     }
 
@@ -4315,6 +4374,7 @@ impl SoroStreamContract {
         tokens: Vec<Address>,
         duration_seconds: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_untils: Vec<u64>,
         nonce: u64,
     ) -> Result<Vec<u64>, StreamError> {
@@ -4473,6 +4533,8 @@ impl SoroStreamContract {
                 last_withdraw_time: now,
                 status: StreamStatus::Active,
                 auto_renew,
+                renew_count,
+                renewals_used: 0,
                 allow_recipient_termination: false,
                 last_pause_time: 0,
                 total_withdrawn: 0,
@@ -4608,31 +4670,67 @@ impl SoroStreamContract {
                 );
 
                 if stream.auto_renew {
-                    stream.sender.require_auth();
-                    let new_end = stream
-                        .end_time
-                        .checked_add(duration)
-                        .ok_or(StreamError::Overflow)?;
-                    stream.start_time = stream.end_time;
-                    stream.end_time = new_end;
-                    stream.last_withdraw_time = stream.start_time;
-                    stream.total_withdrawn = 0;
-                    save_stream(&env, &stream);
+                    // Check if we've hit the renewal count limit
+                    let can_renew = if let Some(max_renewals) = stream.renew_count {
+                        stream.renewals_used < max_renewals
+                    } else {
+                        true  // No limit set, can always renew
+                    };
 
-                    // INTERACTIONS
-                    let token_client = token::Client::new(&env, &stream.token);
-                    if recipient_amount > 0 {
+                    if !can_renew {
+                        // Renewal limit reached, mark as completed
+                        decrement_active_stream_count(&env);
+                        decrement_token_stream_count(&env, &stream.token);
+                        remove_stream(&env, stream_id);
+                        unindex_by_sender(&env, &stream.sender, stream_id);
+                        unindex_by_recipient(&env, &stream.recipient, stream_id);
+
+                        let token_client = token::Client::new(&env, &stream.token);
+                        if recipient_amount > 0 {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &recipient,
+                                &recipient_amount,
+                            );
+                        }
+                        if dust > 0 {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &stream.sender,
+                                &dust,
+                            );
+                        }
+
+                        events::renewal_limit_reached(&env, stream_id, &stream.sender, stream.renewals_used);
+                        events::stream_completed(&env, stream_id);
+                    } else {
+                        stream.sender.require_auth();
+                        let new_end = stream
+                            .end_time
+                            .checked_add(duration)
+                            .ok_or(StreamError::Overflow)?;
+                        stream.start_time = stream.end_time;
+                        stream.end_time = new_end;
+                        stream.last_withdraw_time = stream.start_time;
+                        stream.total_withdrawn = 0;
+                        stream.renewals_used = stream.renewals_used.saturating_add(1);
+                        save_stream(&env, &stream);
+
+                        // INTERACTIONS
+                        let token_client = token::Client::new(&env, &stream.token);
+                        if recipient_amount > 0 {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &recipient,
+                                &recipient_amount,
+                            );
+                        }
                         token_client.transfer(
+                            &stream.sender,
                             &env.current_contract_address(),
-                            &recipient,
-                            &recipient_amount,
+                            &stream.deposit,
                         );
                     }
-                    token_client.transfer(
-                        &stream.sender,
-                        &env.current_contract_address(),
-                        &stream.deposit,
-                    );
                 } else {
                     decrement_active_stream_count(&env);
                     decrement_token_stream_count(&env, &stream.token);

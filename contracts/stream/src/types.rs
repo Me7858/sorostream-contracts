@@ -115,6 +115,13 @@ pub struct Stream {
     pub status: StreamStatus,
     /// Whether the stream auto-renews on completion.
     pub auto_renew: bool,
+    /// Optional limit on the number of auto-renewals. When set, the stream will automatically
+    /// renew up to this many times. Once reached, the stream will complete permanently and not renew.
+    /// `None` means unlimited auto-renewals (default behaviour when auto_renew is true).
+    pub renew_count: Option<u32>,
+    /// Number of times this stream has been renewed so far. Starts at 0 and increments each time
+    /// the stream auto-renews. Only meaningful when `auto_renew` is true.
+    pub renewals_used: u32,
     /// Whether the recipient is allowed to terminate the stream early.
     pub allow_recipient_termination: bool,
     /// Ledger timestamp of when the stream was last paused (0 if never paused).
