@@ -230,6 +230,55 @@ pub fn get_ids_by_recipient(env: &Env, recipient: &Address) -> Vec<u64> {
     ids
 }
 
+// ── Tag index helpers ────────────────────────────────────────────────────────
+
+fn tag_count_key(env: &Env, tag: &String) -> (Symbol, String) {
+    (Symbol::new(env, "tc"), tag.clone())
+}
+
+fn tag_slot_key(env: &Env, tag: &String, idx: u32) -> (Symbol, String, u32) {
+    (Symbol::new(env, "t"), tag.clone(), idx)
+}
+
+pub fn index_by_tag(env: &Env, tag: &String, stream_id: u64) {
+    let cnt_key = tag_count_key(env, tag);
+    let idx: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0u32);
+    env.storage().persistent().set(&tag_slot_key(env, tag, idx), &stream_id);
+    let next = idx.checked_add(1).expect("tag index overflow");
+    env.storage().persistent().set(&cnt_key, &next);
+}
+
+pub fn unindex_by_tag(env: &Env, tag: &String, stream_id: u64) {
+    let cnt_key = tag_count_key(env, tag);
+    let cnt: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0u32);
+    for i in 0..cnt {
+        let slot_key = tag_slot_key(env, tag, i);
+        if let Some(id) = env.storage().persistent().get::<_, u64>(&slot_key) {
+            if id == stream_id {
+                let last = cnt - 1;
+                if i != last {
+                    let last_id: u64 = env.storage().persistent().get(&tag_slot_key(env, tag, last)).unwrap_or(0);
+                    env.storage().persistent().set(&slot_key, &last_id);
+                }
+                env.storage().persistent().remove(&tag_slot_key(env, tag, last));
+                env.storage().persistent().set(&cnt_key, &last);
+                return;
+            }
+        }
+    }
+}
+
+pub fn get_ids_by_tag(env: &Env, tag: &String) -> Vec<u64> {
+    let cnt: u32 = env.storage().persistent().get(&tag_count_key(env, tag)).unwrap_or(0u32);
+    let mut ids = Vec::new(env);
+    for i in 0..cnt {
+        if let Some(id) = env.storage().persistent().get::<_, u64>(&tag_slot_key(env, tag, i)) {
+            ids.push_back(id);
+        }
+    }
+    ids
+}
+
 /// Returns the current batch nonce for a sender (next expected value).
 pub fn get_batch_nonce(env: &Env, sender: &Address) -> u64 {
     let key = (Symbol::new(env, "bn"), sender.clone());
@@ -1455,4 +1504,56 @@ pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
     remove_dual_stream_token2(env, stream_id);
     remove_dual_stream_deposit2(env, stream_id);
     remove_dual_stream_withdrawn2(env, stream_id);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Expiry warning emitted flag (moved from Stream struct)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn expiry_warning_emitted_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "exp_em"), stream_id)
+}
+
+/// Returns whether the expiry warning event has already been emitted for a stream.
+pub fn get_expiry_warning_emitted(env: &Env, stream_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get(&expiry_warning_emitted_key(env, stream_id))
+        .unwrap_or(false)
+}
+
+/// Sets the expiry warning emitted flag for a stream.
+pub fn set_expiry_warning_emitted(env: &Env, stream_id: u64, val: bool) {
+    env.storage()
+        .persistent()
+        .set(&expiry_warning_emitted_key(env, stream_id), &val);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stream tag (moved from Stream struct)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn stream_tag_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "stag"), stream_id)
+}
+
+/// Returns the tag for a stream, or None if not set.
+pub fn get_stream_tag(env: &Env, stream_id: u64) -> Option<String> {
+    env.storage()
+        .persistent()
+        .get(&stream_tag_key(env, stream_id))
+}
+
+/// Sets the tag for a stream.
+pub fn set_stream_tag_storage(env: &Env, stream_id: u64, tag: &String) {
+    env.storage()
+        .persistent()
+        .set(&stream_tag_key(env, stream_id), tag);
+}
+
+/// Removes the tag for a stream.
+pub fn remove_stream_tag(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&stream_tag_key(env, stream_id));
 }

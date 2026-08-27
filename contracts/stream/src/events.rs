@@ -937,6 +937,9 @@ pub fn stream_rate_updated(
     env.events().publish(
         (Symbol::new(env, "StreamRateUpdated"), stream_id),
         (old_rate, new_rate, new_end_time, remaining_deposit),
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Split Stream Events
 // ─────────────────────────────────────────────────────────────────────────────
