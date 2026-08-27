@@ -293,7 +293,56 @@ pub struct StreamHealth {
     pub status: HealthStatus,
 }
 
+/// Statistics for streams grouped by status.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StatusStats {
+    /// Number of active streams.
+    pub active: u64,
+    /// Number of cancelled streams.
+    pub cancelled: u64,
+    /// Number of completed streams.
+    pub completed: u64,
+    /// Number of paused streams.
+    pub paused: u64,
+    /// Number of expired streams.
+    pub expired: u64,
+    /// Number of streams pending recipient approval.
+    pub pending_approval: u64,
+}
+
+/// Statistics for a single asset (token).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetStats {
+    /// Token contract address.
+    pub token: Address,
+    /// Number of streams using this token.
+    pub stream_count: u64,
+    /// Total volume locked in this token (in stroops).
+    pub total_volume: i128,
+    /// Number of active streams using this token.
+    pub active_streams: u64,
+}
+
+/// Enhanced protocol-level statistics with per-asset and per-status breakdown.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolStats {
+    /// Total number of streams ever created.
+    pub total_streams: u64,
+    /// Number of currently active streams.
+    pub active_streams: u64,
+    /// Sum of all deposits in stroops (across all tokens).
+    pub total_volume: i128,
+    /// Statistics broken down by stream status.
+    pub status_breakdown: StatusStats,
+    /// Statistics for each asset, ordered by total volume (descending).
+    pub asset_breakdown: Vec<AssetStats>,
+}
+
 /// Aggregate contract statistics.
+/// Deprecated: Use ProtocolStats instead. Kept for backwards compatibility.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Stats {
