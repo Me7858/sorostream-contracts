@@ -31,6 +31,7 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
         holdback_amount: i128,
@@ -51,6 +52,7 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError>;
@@ -79,6 +81,7 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
         curve: VestingCurve,
@@ -198,6 +201,7 @@ pub trait SoroStreamInterface {
         tokens: Vec<Address>,
         duration_seconds: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_untils: Vec<u64>,
         nonce: u64,
     ) -> Result<Vec<u64>, StreamError>;
