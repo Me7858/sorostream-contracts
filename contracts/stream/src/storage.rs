@@ -1388,6 +1388,29 @@ pub fn set_grace_period_ledgers(env: &Env, ledgers: u32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Feature (j): Per-asset maximum deposit limit
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn max_deposit_per_token_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "max_dep"), token.clone())
+}
+
+/// Gets the maximum single-stream deposit amount for a token (0 = unlimited).
+pub fn get_max_deposit_per_token(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&max_deposit_per_token_key(env, token))
+        .unwrap_or(0i128)
+}
+
+/// Sets the maximum single-stream deposit amount for a token. Setting to 0 disables the limit.
+pub fn set_max_deposit_per_token(env: &Env, token: &Address, max_deposit: i128) {
+    env.storage()
+        .persistent()
+        .set(&max_deposit_per_token_key(env, token), &max_deposit);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Feature (d): Dual-token streams
 // ═══════════════════════════════════════════════════════════════════════════
 

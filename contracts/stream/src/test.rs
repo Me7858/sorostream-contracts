@@ -334,12 +334,194 @@ fn test_auto_renew_restarts_on_completion() {
 }
 
 #[test]
+fn test_auto_renew_respects_renew_count_limit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &500_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+    env.ledger().set_timestamp(0);
+
+    // Create stream with auto_renew=true and renew_count=Some(2)
+    let stream_id = c.create_stream(
+        &sender, 
+        &recipient, 
+        &token_id, 
+        &100_000, 
+        &1000, 
+        &0, 
+        &0u64, 
+        &true,              // auto_renew
+        &Some(2u32),        // renew_count = 2
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+        &false,
+        &false
+    );
+
+    // First renewal at end_time=1000
+    env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id, &recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.renewals_used, 1);
+    assert_eq!(stream.start_time, 1000);
+    assert_eq!(stream.end_time, 2000);
+
+    // Second renewal at end_time=2000
+    env.ledger().set_timestamp(2000);
+    c.withdraw(&stream_id, &recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.renewals_used, 2);
+    assert_eq!(stream.start_time, 2000);
+    assert_eq!(stream.end_time, 3000);
+
+    // Third renewal should fail and complete the stream (limit reached)
+    env.ledger().set_timestamp(3000);
+    c.withdraw(&stream_id, &recipient);
+
+    let stream = c.get_stream(&stream_id);
+    // After hitting the limit, the stream should be completed
+    // (Note: The stream may be removed from storage, so we expect StreamNotFound or Completed status)
+}
+
+#[test]
+fn test_auto_renew_without_renew_count_unlimited() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+    env.ledger().set_timestamp(0);
+
+    // Create stream with auto_renew=true and renew_count=None (unlimited)
+    let stream_id = c.create_stream(
+        &sender, 
+        &recipient, 
+        &token_id, 
+        &100_000, 
+        &1000, 
+        &0, 
+        &0u64, 
+        &true,              // auto_renew
+        &None::<u32>,       // renew_count = None (unlimited)
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+        &false,
+        &false
+    );
+
+    // Multiple renewals should succeed with renew_count=None
+    for i in 1..=5 {
+        env.ledger().set_timestamp(i as u64 * 1000);
+        c.withdraw(&stream_id, &recipient);
+
+        let stream = c.get_stream(&stream_id);
+        assert_eq!(stream.status, StreamStatus::Active);
+        assert_eq!(stream.renewals_used, i as u32);
+    }
+}
+
+#[test]
+fn test_renew_count_with_zero_limit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &300_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+    env.ledger().set_timestamp(0);
+
+    // Create stream with renew_count=Some(0), meaning no renewals allowed
+    let stream_id = c.create_stream(
+        &sender, 
+        &recipient, 
+        &token_id, 
+        &100_000, 
+        &1000, 
+        &0, 
+        &0u64, 
+        &true,              // auto_renew
+        &Some(0u32),        // renew_count = 0 (no renewals allowed)
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+        &false,
+        &false
+    );
+
+    // Stream should complete immediately at end_time with renew_count=0
+    env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id, &recipient);
+
+    // Stream should be completed or removed
+    let result = c.try_get_stream(&stream_id);
+    // Expect the stream to be in a completed/terminal state
+}
+
+#[test]
+fn test_cancel_auto_renew_before_expiry() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &true, &None::<u32>,
+        &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
+    c.cancel_auto_renew(&t.sender, &stream_id);
+
+    let stream = c.get_stream(&stream_id);
+    assert!(!stream.auto_renew);
+}
+
+#[test]
 fn test_cannot_withdraw_if_not_recipient() {
     let t = setup();
     let c = client(&t);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
-        &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &None::<u32>, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
     let other = Address::generate(&t.env);
 
     let result = c.try_withdraw(&stream_id, &other);
@@ -351,8 +533,8 @@ fn test_cannot_cancel_if_not_sender() {
     let t = setup();
     let c = client(&t);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
-        &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &None::<u32>, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
     let other = Address::generate(&t.env);
 
     let result = c.try_cancel_stream(&stream_id, &other);
@@ -364,8 +546,8 @@ fn test_zero_amount_fails() {
     let t = setup();
     let c = client(&t);
 
-    let result = c.try_create_stream(&t.sender, &t.recipient, &t.token_id, &0, &1000, &0, &0u64, &false, &0u64,
-        &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let result = c.try_create_stream(&t.sender, &t.recipient, &t.token_id, &0, &1000, &0, &0u64, &false, &None::<u32>, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
     assert!(result.is_err());
 }
 

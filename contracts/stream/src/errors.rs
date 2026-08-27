@@ -65,4 +65,13 @@ pub enum StreamError {
     /// Recipient is not on the admin-managed recipient allowlist, and the stream
     /// requires allowlist enforcement.
     RecipientNotAllowed = 61,
+    PriceDeviationTooHigh = 56,
+    TokenStreamCapExceeded = 57,
+    AddressBlocked = 58,
+    StreamNonTransferable = 59,
+    /// The stream's end_time has passed but the grace period is still active.
+    GracePeriodActive = 60,
+    AwaitingApproval = 61,
+    InvalidPartialCancel = 63,
+    MaxDepositExceeded = 64,
 }

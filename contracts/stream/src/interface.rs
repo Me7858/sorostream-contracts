@@ -31,8 +31,16 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
+        non_transferable: bool,
+        holdback_amount: i128,
+        withdrawal_steps: Option<u32>,
+        min_withdrawal_amount: Option<i128>,
+        non_transferable: bool,
+        requires_recipient_approval: bool,
+        enforce_recipient_allowlist: bool,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -45,8 +53,10 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
+        non_transferable: bool,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_schedule(
@@ -73,6 +83,7 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
         curve: VestingCurve,
@@ -145,6 +156,7 @@ pub trait SoroStreamInterface {
 
     fn withdraw(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
     fn cancel_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
+    fn stop_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
     fn transfer_recipient(env: Env, stream_id: u64, current_recipient: Address, new_recipient: Address) -> Result<(), StreamError>;
     fn partial_cancel_stream(env: Env, stream_id: u64, sender: Address, cancel_amount: i128) -> Result<u64, StreamError>;
     fn top_up(env: Env, stream_id: u64, sender: Address, token: Address, amount: i128) -> Result<(), StreamError>;
@@ -192,8 +204,10 @@ pub trait SoroStreamInterface {
         tokens: Vec<Address>,
         duration_seconds: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_untils: Vec<u64>,
         nonce: u64,
+        non_transferable: bool,
     ) -> Result<Vec<u64>, StreamError>;
     fn get_nonce(env: Env, sender: Address) -> u64;
     fn batch_withdraw(env: Env, stream_ids: Vec<u64>, recipient: Address) -> Result<Vec<i128>, StreamError>;
@@ -205,6 +219,7 @@ pub trait SoroStreamInterface {
     fn set_treasury_address(env: Env, treasury: Address) -> Result<(), StreamError>;
     fn get_protocol_fee_info(env: Env) -> (u32, Option<Address>);
     fn get_stats(env: Env) -> Stats;
+    fn get_protocol_stats(env: Env) -> ProtocolStats;
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
 
     fn min_duration(env: Env) -> u64;
@@ -255,6 +270,16 @@ pub trait SoroStreamInterface {
 
     fn set_max_streams_per_token(env: Env, max: u32) -> Result<(), StreamError>;
     fn get_max_streams_per_token(env: Env) -> u32;
+
+    // ── Per-asset maximum deposit limit ──────────────────────────────────────
+
+    /// Sets the maximum deposit amount for a single stream using a specific token.
+    /// Setting to 0 disables the limit for that token. Admin only.
+    fn set_max_deposit_per_token(env: Env, token: Address, max_deposit: i128) -> Result<(), StreamError>;
+
+    /// Returns the maximum deposit amount for a single stream using the given token.
+    /// Returns 0 if no limit is set (unlimited).
+    fn get_max_deposit_per_token(env: Env, token: Address) -> i128;
 
     // ── Issue #284: Address blocklist ───────────────────────────────────────
 
