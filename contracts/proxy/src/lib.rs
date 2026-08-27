@@ -22,6 +22,7 @@
 use soroban_sdk::{contract, contractimpl, contracterror, Address, BytesN, Env, Symbol, String};
 
 const ADMIN_KEY: &str = "admin";
+const PENDING_ADMIN_KEY: &str = "pending_admin";
 const IMPL_HASH_KEY: &str = "impl";
 const STORAGE_VERSION_KEY: &str = "sv";
 
@@ -38,6 +39,10 @@ pub enum ProxyError {
 
 fn read_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, ADMIN_KEY))
+}
+
+fn read_pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
 }
 
 fn check_admin(env: &Env) -> Address {
@@ -96,6 +101,38 @@ impl ProxyContract {
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ProxyError> {
         check_admin(&env);
         env.storage().instance().set(&Symbol::new(&env, ADMIN_KEY), &new_admin);
+        Ok(())
+    }
+
+    /// Proposes a new admin. Only admin may call this.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ProxyError> {
+        check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"),),
+            new_admin,
+        );
+        Ok(())
+    }
+
+    /// Accepts the admin role. The pending admin must call this.
+    pub fn accept_admin(env: Env, accepted_by: Address) -> Result<(), ProxyError> {
+        accepted_by.require_auth();
+        let pending = read_pending_admin(&env)
+            .ok_or(ProxyError::NotInitialized)?;
+        if accepted_by != pending {
+            return Err(ProxyError::NotAdmin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, ADMIN_KEY), &accepted_by);
+        env.storage()
+            .instance()
+            .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 
@@ -246,5 +283,33 @@ mod test {
         let new_admin = Address::generate(&env);
         c.set_admin(&new_admin);
         assert_eq!(c.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &0u32);
+
+        let new_admin = Address::generate(&env);
+        c.propose_admin(&new_admin);
+        assert_eq!(c.get_admin(), admin.clone());
+
+        c.accept_admin(&new_admin);
+        assert_eq!(c.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_accept_admin_fails_if_wrong_address() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &0u32);
+
+        let new_admin = Address::generate(&env);
+        let wrong_admin = Address::generate(&env);
+        c.propose_admin(&new_admin);
+
+        let result = c.try_accept_admin(&wrong_admin);
+        assert!(result.is_err());
     }
 }

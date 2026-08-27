@@ -25,6 +25,8 @@ const THRESHOLD_KEY: &str = "threshold";
 const OWNER_COUNT_KEY: &str = "o_cnt";
 const INTENT_COUNT_KEY: &str = "i_cnt";
 const NONCE_KEY: &str = "nonce";
+const ADMIN_KEY: &str = "admin";
+const PENDING_ADMIN_KEY: &str = "pending_admin";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -165,6 +167,14 @@ fn mark_approved(env: &Env, intent_id: u64, owner: &Address) {
     env.storage()
         .persistent()
         .set(&approval_key(env, intent_id, owner), &true);
+}
+
+fn read_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, ADMIN_KEY))
+}
+
+fn read_pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -428,5 +438,66 @@ impl MultiSigContract {
     /// Returns whether an owner has already approved a given intent.
     pub fn has_approved(env: Env, intent_id: u64, owner: Address) -> bool {
         has_approved(&env, intent_id, &owner)
+    }
+
+    /// Returns the current admin address, if set.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        read_admin(&env)
+    }
+
+    /// Sets the admin. Only the multi-sig contract itself may call this (via propose+approve).
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), MultiSigError> {
+        env.current_contract_address().require_auth();
+        env.storage().instance().set(&Symbol::new(&env, ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminSet"),),
+            new_admin,
+        );
+        Ok(())
+    }
+
+    /// Proposes a new admin. Only an owner may propose (through propose+approve).
+    pub fn propose_transfer_admin(env: Env, new_admin: Address) -> Result<u64, MultiSigError> {
+        env.current_contract_address().require_auth();
+        let nonce = get_and_increment_nonce(&env);
+        let id = next_intent_id(&env);
+
+        let intent = Intent {
+            id,
+            nonce,
+            proposer: env.current_contract_address(),
+            target: env.current_contract_address(),
+            function: Symbol::new(&env, "accept_transfer_admin"),
+            calldata: Bytes::new(&env),
+            status: IntentStatus::Pending,
+            expiry: u64::MAX,
+            approval_count: 0,
+        };
+        save_intent(&env, &intent);
+
+        // Store the proposed admin separately
+        env.storage().instance().set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"), id),
+            new_admin,
+        );
+
+        Ok(id)
+    }
+
+    /// Accepts the admin role after proposal has been approved by the multi-sig.
+    /// Called internally by the approve process.
+    pub fn accept_transfer_admin(env: Env) -> Result<(), MultiSigError> {
+        env.current_contract_address().require_auth();
+        let pending = read_pending_admin(&env)
+            .ok_or(MultiSigError::OwnerNotFound)?;
+        env.storage().instance().set(&Symbol::new(&env, ADMIN_KEY), &pending);
+        env.storage().instance().remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            pending,
+        );
+        Ok(())
     }
 }

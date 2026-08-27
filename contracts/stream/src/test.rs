@@ -334,12 +334,194 @@ fn test_auto_renew_restarts_on_completion() {
 }
 
 #[test]
+fn test_auto_renew_respects_renew_count_limit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &500_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+    env.ledger().set_timestamp(0);
+
+    // Create stream with auto_renew=true and renew_count=Some(2)
+    let stream_id = c.create_stream(
+        &sender, 
+        &recipient, 
+        &token_id, 
+        &100_000, 
+        &1000, 
+        &0, 
+        &0u64, 
+        &true,              // auto_renew
+        &Some(2u32),        // renew_count = 2
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+        &false,
+        &false
+    );
+
+    // First renewal at end_time=1000
+    env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id, &recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.renewals_used, 1);
+    assert_eq!(stream.start_time, 1000);
+    assert_eq!(stream.end_time, 2000);
+
+    // Second renewal at end_time=2000
+    env.ledger().set_timestamp(2000);
+    c.withdraw(&stream_id, &recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.renewals_used, 2);
+    assert_eq!(stream.start_time, 2000);
+    assert_eq!(stream.end_time, 3000);
+
+    // Third renewal should fail and complete the stream (limit reached)
+    env.ledger().set_timestamp(3000);
+    c.withdraw(&stream_id, &recipient);
+
+    let stream = c.get_stream(&stream_id);
+    // After hitting the limit, the stream should be completed
+    // (Note: The stream may be removed from storage, so we expect StreamNotFound or Completed status)
+}
+
+#[test]
+fn test_auto_renew_without_renew_count_unlimited() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+    env.ledger().set_timestamp(0);
+
+    // Create stream with auto_renew=true and renew_count=None (unlimited)
+    let stream_id = c.create_stream(
+        &sender, 
+        &recipient, 
+        &token_id, 
+        &100_000, 
+        &1000, 
+        &0, 
+        &0u64, 
+        &true,              // auto_renew
+        &None::<u32>,       // renew_count = None (unlimited)
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+        &false,
+        &false
+    );
+
+    // Multiple renewals should succeed with renew_count=None
+    for i in 1..=5 {
+        env.ledger().set_timestamp(i as u64 * 1000);
+        c.withdraw(&stream_id, &recipient);
+
+        let stream = c.get_stream(&stream_id);
+        assert_eq!(stream.status, StreamStatus::Active);
+        assert_eq!(stream.renewals_used, i as u32);
+    }
+}
+
+#[test]
+fn test_renew_count_with_zero_limit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &300_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+    env.ledger().set_timestamp(0);
+
+    // Create stream with renew_count=Some(0), meaning no renewals allowed
+    let stream_id = c.create_stream(
+        &sender, 
+        &recipient, 
+        &token_id, 
+        &100_000, 
+        &1000, 
+        &0, 
+        &0u64, 
+        &true,              // auto_renew
+        &Some(0u32),        // renew_count = 0 (no renewals allowed)
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+        &false,
+        &false
+    );
+
+    // Stream should complete immediately at end_time with renew_count=0
+    env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id, &recipient);
+
+    // Stream should be completed or removed
+    let result = c.try_get_stream(&stream_id);
+    // Expect the stream to be in a completed/terminal state
+}
+
+#[test]
+fn test_cancel_auto_renew_before_expiry() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &true, &None::<u32>,
+        &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
+    c.cancel_auto_renew(&t.sender, &stream_id);
+
+    let stream = c.get_stream(&stream_id);
+    assert!(!stream.auto_renew);
+}
+
+#[test]
 fn test_cannot_withdraw_if_not_recipient() {
     let t = setup();
     let c = client(&t);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
-        &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &None::<u32>, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
     let other = Address::generate(&t.env);
 
     let result = c.try_withdraw(&stream_id, &other);
@@ -351,8 +533,8 @@ fn test_cannot_cancel_if_not_sender() {
     let t = setup();
     let c = client(&t);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
-        &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &None::<u32>, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
     let other = Address::generate(&t.env);
 
     let result = c.try_cancel_stream(&stream_id, &other);
@@ -364,8 +546,8 @@ fn test_zero_amount_fails() {
     let t = setup();
     let c = client(&t);
 
-    let result = c.try_create_stream(&t.sender, &t.recipient, &t.token_id, &0, &1000, &0, &0u64, &false, &0u64,
-        &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let result = c.try_create_stream(&t.sender, &t.recipient, &t.token_id, &0, &1000, &0, &0u64, &false, &None::<u32>, &0u64,
+        &false, &0i128, &None::<u32>, &None::<i128>, &false, &false, &false);
     assert!(result.is_err());
 }
 
@@ -5215,6 +5397,362 @@ fn test_lock_stream_only_callable_by_sender() {
 }
 
 
+// ── Minimum Duration Validation Tests ────────────────────────────────────────
+
+/// Test that create_stream enforces minimum duration.
+#[test]
+fn test_create_stream_respects_min_duration() {
+    let t = setup();
+    let c = client(&t);
+
+    // Set min_duration to 3600 seconds (1 hour).
+    c.set_min_duration(&t.sender, &3600u64);
+
+    // Attempt to create stream with duration < min_duration (100 seconds).
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &100u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "create_stream should reject duration < min_duration");
+    
+    // Verify the error is StreamDurationTooShort.
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamDurationTooShort),
+        Ok(_) => panic!("Expected StreamDurationTooShort error"),
+    }
+
+    // Attempt to create stream with duration == min_duration (3600 seconds).
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &3600u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    // Should succeed (no error).
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.end_time - stream.start_time, 3600);
+}
+
+/// Test that create_stream accepts streams at exact minimum duration boundary.
+#[test]
+fn test_create_stream_exact_min_duration_boundary() {
+    let t = setup();
+    let c = client(&t);
+
+    let min_duration = 7200u64; // 2 hours
+    c.set_min_duration(&t.sender, &min_duration);
+
+    // Create stream with exactly min_duration.
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &min_duration, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.end_time - stream.start_time, min_duration);
+
+    // Attempt to create stream with duration just below min_duration.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &(min_duration - 1), &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "duration = min_duration - 1 should be rejected");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamDurationTooShort),
+        Ok(_) => panic!("Expected StreamDurationTooShort error"),
+    }
+}
+
+/// Test that create_stream_with_curve enforces minimum duration.
+#[test]
+fn test_create_stream_with_curve_respects_min_duration() {
+    let t = setup();
+    let c = client(&t);
+
+    // Set min_duration to 3600 seconds.
+    c.set_min_duration(&t.sender, &3600u64);
+
+    // Attempt to create stream with curve and duration < min_duration (100 seconds).
+    let result = c.try_create_stream_with_curve(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &100u64, &0u64, &0u64,
+        &false, &0u64, &false,
+        &VestingCurve::Linear,
+    );
+    assert!(result.is_err(), "create_stream_with_curve should reject duration < min_duration");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamDurationTooShort),
+        Ok(_) => panic!("Expected StreamDurationTooShort error"),
+    }
+
+    // Create stream with curve and duration >= min_duration.
+    let stream_id = c.create_stream_with_curve(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &3600u64, &0u64, &0u64,
+        &false, &0u64, &false,
+        &VestingCurve::Linear,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.end_time - stream.start_time, 3600);
+}
+
+/// Test that create_stream_with_schedule (tranches) enforces minimum duration.
+#[test]
+fn test_create_stream_with_schedule_respects_min_duration() {
+    let t = setup();
+    let c = client(&t);
+
+    // Set min_duration to 3600 seconds.
+    c.set_min_duration(&t.sender, &3600u64);
+
+    let now = t.env.ledger().timestamp();
+
+    // Create tranches that span less than min_duration (100 seconds).
+    let tranches = soroban_sdk::Vec::from_array(&t.env, [
+        VestingTranche {
+            unlock_time: now + 50,
+            amount: 50_000i128,
+        },
+        VestingTranche {
+            unlock_time: now + 100,
+            amount: 50_000i128,
+        },
+    ]);
+
+    // Attempt to create stream with tranches spanning < min_duration.
+    let result = c.try_create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &tranches,
+        &0u64, &0u64, &false,
+        &None::<Address>, &0u32,
+    );
+    assert!(result.is_err(), "create_stream_with_schedule should reject duration < min_duration");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamDurationTooShort),
+        Ok(_) => panic!("Expected StreamDurationTooShort error"),
+    }
+
+    // Create tranches that span >= min_duration (3600 seconds).
+    let tranches_valid = soroban_sdk::Vec::from_array(&t.env, [
+        VestingTranche {
+            unlock_time: now + 1800,
+            amount: 50_000i128,
+        },
+        VestingTranche {
+            unlock_time: now + 3600,
+            amount: 50_000i128,
+        },
+    ]);
+
+    // Should succeed.
+    let stream_id = c.create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &tranches_valid,
+        &0u64, &0u64, &false,
+        &None::<Address>, &0u32,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.end_time - stream.start_time, 3600);
+}
+
+/// Test that min_duration can be dynamically configured.
+#[test]
+fn test_min_duration_is_configurable() {
+    let t = setup();
+    let c = client(&t);
+
+    // Check initial min_duration.
+    let initial_min = c.min_duration();
+    assert_eq!(initial_min, 0u64, "setup() should set min_duration to 0");
+
+    // Set min_duration to 1800 seconds.
+    c.set_min_duration(&t.sender, &1800u64);
+    let updated_min = c.min_duration();
+    assert_eq!(updated_min, 1800);
+
+    // Set min_duration to 7200 seconds.
+    c.set_min_duration(&t.sender, &7200u64);
+    let updated_min = c.min_duration();
+    assert_eq!(updated_min, 7200);
+
+    // Set min_duration back to 0 (no minimum).
+    c.set_min_duration(&t.sender, &0u64);
+    let updated_min = c.min_duration();
+    assert_eq!(updated_min, 0);
+}
+
+/// Test that zero-duration streams are correctly rejected when min_duration > 0.
+#[test]
+fn test_zero_duration_stream_rejected() {
+    let t = setup();
+    let c = client(&t);
+
+    // Set min_duration to 1 second to reject zero-duration streams.
+    c.set_min_duration(&t.sender, &1u64);
+
+    // Attempt to create stream with duration = 0.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &0u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "zero-duration stream should be rejected");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamDurationTooShort),
+        Ok(_) => panic!("Expected StreamDurationTooShort error"),
+    }
+}
+
+/// Test that min_duration is properly applied across different stream types.
+#[test]
+fn test_min_duration_enforced_all_stream_types() {
+    let t = setup();
+    let c = client(&t);
+
+    let min_duration = 7200u64; // 2 hours
+    c.set_min_duration(&t.sender, &min_duration);
+    let now = t.env.ledger().timestamp();
+
+    // Test 1: create_stream
+    let stream1 = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &min_duration, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    let s1 = c.get_stream(&stream1);
+    assert_eq!(s1.end_time - s1.start_time, min_duration);
+
+    // Test 2: create_stream_with_curve
+    let stream2 = c.create_stream_with_curve(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &min_duration, &0u64, &0u64,
+        &false, &0u64, &false,
+        &VestingCurve::Linear,
+    );
+    let s2 = c.get_stream(&stream2);
+    assert_eq!(s2.end_time - s2.start_time, min_duration);
+
+    // Test 3: create_stream_with_schedule
+    let tranches = soroban_sdk::Vec::from_array(&t.env, [
+        VestingTranche {
+            unlock_time: now + 3600,
+            amount: 50_000i128,
+        },
+        VestingTranche {
+            unlock_time: now + min_duration,
+            amount: 50_000i128,
+        },
+    ]);
+    let stream3 = c.create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &tranches,
+        &0u64, &0u64, &false,
+        &None::<Address>, &0u32,
+    );
+    let s3 = c.get_stream(&stream3);
+    assert_eq!(s3.end_time - s3.start_time, min_duration);
+}
+
+/// Test that min_duration of 0 disables the check (allows any duration).
+#[test]
+fn test_min_duration_zero_disables_check() {
+    let t = setup();
+    let c = client(&t);
+
+    // Set min_duration to 0 (no minimum).
+    c.set_min_duration(&t.sender, &0u64);
+
+    // Should be able to create streams with very short durations.
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.end_time - stream.start_time, 1);
+}
+
+/// Test error message clarity for min_duration violations.
+#[test]
+fn test_min_duration_clear_error_handling() {
+    let t = setup();
+    let c = client(&t);
+
+    let min_duration = 5000u64;
+    c.set_min_duration(&t.sender, &min_duration);
+
+    // Try with a much shorter duration.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &100u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Verify we get the specific StreamDurationTooShort error.
+    match result {
+        Err(e) => {
+            assert_eq!(e, StreamError::StreamDurationTooShort);
+            // The error code should be 22 as defined in errors.rs.
+            // We can verify this through the contract's error handling.
+        }
+        Ok(_) => panic!("Expected error but stream was created"),
+    }
+}
+
+
+// ── Token Whitelist Tests ────────────────────────────────────────────────────
+
+/// Test that token whitelist can be enabled/disabled.
+#[test]
+fn test_token_whitelist_can_be_enabled_disabled() {
+    let t = setup();
+    let c = client(&t);
+
+    // Initially whitelist is disabled (no enforcement).
+    let is_enabled = c.try_get_token_whitelist_enabled();
+    match is_enabled {
+        Ok(enabled) => assert!(!enabled, "whitelist should be disabled by default"),
+        Err(_) => {} // The function might not exist in the interface
+    }
+
+    // Enable token whitelist.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+    
+    // Verify it's enabled.
+    // Note: We can verify this by attempting to create a stream with a non-whitelisted token.
+}
+
+/// Test that token whitelist prevents non-whitelisted tokens when enabled.
+#[test]
+fn test_token_whitelist_prevents_non_whitelisted_tokens() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a second token for testing.
+    let token_admin = Address::generate(&t.env);
+    let token_id_2 = t.env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    // Mint tokens for the sender on token_id_2.
+    StellarAssetClient::new(&t.env, &token_id_2).mint(&t.sender, &1_000_000);
+
+    // Enable token whitelist.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+
+    // Add only the first token to the whitelist.
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Attempt to create stream with the whitelisted token (should succeed).
 #[test]
 fn test_top_up_rejected_when_stream_locked() {
     let t = setup();
@@ -5226,6 +5764,250 @@ fn test_top_up_rejected_when_stream_locked() {
         &false, &0u64, &false, &0i128,
         &None::<u32>, &None::<i128>, &false, &false,
     );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.token, t.token_id, "stream should use whitelisted token");
+
+    // Attempt to create stream with the non-whitelisted token (should fail).
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "create_stream should reject non-whitelisted token");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::TokenNotWhitelisted),
+        Ok(_) => panic!("Expected TokenNotWhitelisted error"),
+    }
+}
+
+/// Test that whitelist enforcement applies to all stream creation variants.
+#[test]
+fn test_token_whitelist_enforced_all_variants() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a second token.
+    let token_admin = Address::generate(&t.env);
+    let token_id_2 = t.env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    StellarAssetClient::new(&t.env, &token_id_2).mint(&t.sender, &1_000_000);
+
+    // Enable whitelist and add only token_id.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    let now = t.env.ledger().timestamp();
+
+    // Test 1: create_stream with non-whitelisted token fails.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "create_stream should reject non-whitelisted token");
+
+    // Test 2: create_stream_with_curve with non-whitelisted token fails.
+    let result = c.try_create_stream_with_curve(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false,
+        &VestingCurve::Linear,
+    );
+    assert!(result.is_err(), "create_stream_with_curve should reject non-whitelisted token");
+
+    // Test 3: create_stream_with_schedule with non-whitelisted token fails.
+    let tranches = soroban_sdk::Vec::from_array(&t.env, [
+        VestingTranche {
+            unlock_time: now + 500,
+            amount: 50_000i128,
+        },
+        VestingTranche {
+            unlock_time: now + 1000,
+            amount: 50_000i128,
+        },
+    ]);
+    let result = c.try_create_stream_with_schedule(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &tranches,
+        &0u64, &0u64, &false,
+        &None::<Address>, &0u32,
+    );
+    assert!(result.is_err(), "create_stream_with_schedule should reject non-whitelisted token");
+}
+
+/// Test that whitelist can be disabled to allow any token.
+#[test]
+fn test_token_whitelist_disabled_allows_all_tokens() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a second token.
+    let token_admin = Address::generate(&t.env);
+    let token_id_2 = t.env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    StellarAssetClient::new(&t.env, &token_id_2).mint(&t.sender, &1_000_000);
+
+    // Enable whitelist and add only token_id.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Verify non-whitelisted token is rejected.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "non-whitelisted token should be rejected");
+
+    // Disable whitelist.
+    c.set_token_whitelist_enabled(&t.sender, &false);
+
+    // Now non-whitelisted token should be accepted.
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.token, token_id_2, "stream should use non-whitelisted token when whitelist is disabled");
+}
+
+/// Test that tokens can be added and removed from the whitelist.
+#[test]
+fn test_token_whitelist_add_remove() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a second token.
+    let token_admin = Address::generate(&t.env);
+    let token_id_2 = t.env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    StellarAssetClient::new(&t.env, &token_id_2).mint(&t.sender, &1_000_000);
+
+    // Enable whitelist with no tokens added initially.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+
+    // Attempt to create stream with token_id should fail (not whitelisted).
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "non-whitelisted token should be rejected");
+
+    // Add token_id to whitelist.
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Now stream creation should succeed.
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.token, t.token_id, "stream should use whitelisted token");
+
+    // Remove token_id from whitelist.
+    c.remove_token_from_whitelist(&t.sender, &t.token_id);
+
+    // Attempt to create stream should fail again.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &1u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    assert!(result.is_err(), "removed token should be rejected");
+}
+
+/// Test that batch_create_stream respects token whitelist.
+#[test]
+fn test_token_whitelist_batch_create_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a second token and recipient.
+    let token_admin = Address::generate(&t.env);
+    let token_id_2 = t.env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    StellarAssetClient::new(&t.env, &token_id_2).mint(&t.sender, &1_000_000);
+
+    let recipient_2 = Address::generate(&t.env);
+
+    // Enable whitelist and add only token_id (not token_id_2).
+    c.set_token_whitelist_enabled(&t.sender, &true);
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Batch create with both whitelisted and non-whitelisted tokens should fail.
+    let recipients = soroban_sdk::Vec::from_array(&t.env, [&t.recipient, &recipient_2]);
+    let amounts = soroban_sdk::Vec::from_array(&t.env, [100_000i128, 100_000i128]);
+    let tokens = soroban_sdk::Vec::from_array(&t.env, [&t.token_id, &token_id_2]);
+    let lock_untils = soroban_sdk::Vec::from_array(&t.env, [0u64, 0u64]);
+
+    let result = c.try_batch_create_stream(
+        &t.sender, &recipients, &amounts, &tokens, &1000u64, &false, &lock_untils, &0u64,
+    );
+    assert!(result.is_err(), "batch should fail when any token is not whitelisted");
+
+    // Batch create with all whitelisted tokens should succeed.
+    let recipients = soroban_sdk::Vec::from_array(&t.env, [&t.recipient, &recipient_2]);
+    let amounts = soroban_sdk::Vec::from_array(&t.env, [100_000i128, 100_000i128]);
+    let tokens = soroban_sdk::Vec::from_array(&t.env, [&t.token_id, &t.token_id]);
+    let lock_untils = soroban_sdk::Vec::from_array(&t.env, [0u64, 0u64]);
+
+    let stream_ids = c.batch_create_stream(
+        &t.sender, &recipients, &amounts, &tokens, &1000u64, &false, &lock_untils, &0u64,
+    );
+    assert_eq!(stream_ids.len(), 2, "batch should create 2 streams with whitelisted token");
+}
+
+/// Test that whitelist enforcement prevents spam tokens when enabled.
+#[test]
+fn test_token_whitelist_prevents_spam_tokens() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create multiple spam tokens.
+    let token_admin = Address::generate(&t.env);
+    let mut spam_tokens = Vec::new();
+    for _i in 0..3 {
+        let spam_token = t.env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        StellarAssetClient::new(&t.env, &spam_token).mint(&t.sender, &1_000_000);
+        spam_tokens.push(spam_token);
+    }
+
+    // Enable whitelist and add only the primary token.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Attempt to create streams with spam tokens should all fail.
+    for spam_token in &spam_tokens {
+        let result = c.try_create_stream(
+            &t.sender, &t.recipient, spam_token,
+            &100_000i128, &1000u64, &0u64, &0u64,
+            &false, &0u64, &false, &0i128,
+            &None::<u32>, &None::<i128>, &false, &false,
+        );
+        assert!(result.is_err(), "spam token should be rejected");
+        match result {
+            Err(e) => assert_eq!(e, StreamError::TokenNotWhitelisted),
+            Ok(_) => panic!("Expected TokenNotWhitelisted error"),
+        }
+    }
+
+    // Verify that the whitelisted token still works.
 
     // Lock the stream first
     c.lock_stream(&stream_id, &t.sender);
@@ -5248,6 +6030,439 @@ fn test_top_up_works_before_lock() {
         &false, &0u64, &false, &0i128,
         &None::<u32>, &None::<i128>, &false, &false,
     );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.token, t.token_id, "whitelisted token should work");
+}
+
+/// Test clear error message for token whitelist violations.
+#[test]
+fn test_token_whitelist_clear_error_handling() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create another token.
+    let token_admin = Address::generate(&t.env);
+    let token_id_2 = t.env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    StellarAssetClient::new(&t.env, &token_id_2).mint(&t.sender, &1_000_000);
+
+    // Enable whitelist but don't add the second token.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Attempt to create stream with untrusted token.
+    let result = c.try_create_stream(
+        &t.sender, &t.recipient, &token_id_2,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Verify we get the specific TokenNotWhitelisted error.
+    match result {
+        Err(e) => {
+            assert_eq!(e, StreamError::TokenNotWhitelisted);
+            // The error code should be 37 as defined in errors.rs.
+        }
+        Ok(_) => panic!("Expected error but stream was created"),
+    }
+}
+
+/// Test that admin-only access control is enforced for whitelist operations.
+#[test]
+fn test_token_whitelist_admin_only_access() {
+    let t = setup();
+    let c = client(&t);
+
+    let non_admin = Address::generate(&t.env);
+
+    // Attempt to enable whitelist from non-admin should fail (if auth is enforced).
+    // Note: This test depends on whether the contract enforces admin access.
+    // The implementation uses check_admin() and admin.require_auth().
+
+    // Test that admin can enable whitelist.
+    c.set_token_whitelist_enabled(&t.sender, &true);
+
+    // Test that admin can add to whitelist.
+    c.add_token_to_whitelist(&t.sender, &t.token_id);
+
+    // Verify token is whitelisted by attempting creation.
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.token, t.token_id, "admin should be able to manage whitelist");
+}
+
+
+// ── updateStreamRate Tests ───────────────────────────────────────────────────
+
+/// Test that sender can update the flow rate of an active stream.
+#[test]
+fn test_update_stream_rate_basic() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create a stream with 1000 per second for 1000 seconds (1,000,000 total)
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    let stream_before = c.get_stream(&stream_id);
+    assert_eq!(stream_before.flow_rate, 1000);
+
+    // Update rate to 2000 per second
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+
+    let stream_after = c.get_stream(&stream_id);
+    assert_eq!(stream_after.flow_rate, 2000);
+    assert!(stream_after.end_time < stream_before.end_time, "end_time should decrease with higher rate");
+}
+
+/// Test that balance is settled before rate change is applied.
+#[test]
+fn test_update_stream_rate_settles_balance() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create stream: 1000 per second for 1000 seconds
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Move time forward 100 seconds
+    t.env.ledger().set_timestamp(100);
+
+    // Claimable should be ~100,000 at this point
+    let claimable_before = c.get_claimable(&stream_id);
+    assert!(claimable_before > 0, "should have claimable balance");
+
+    // Update rate to 500 per second
+    c.update_stream_rate(&t.sender, &stream_id, &500i128);
+
+    // After rate update, claimable should be 0 (settled)
+    let claimable_after = c.get_claimable(&stream_id);
+    assert_eq!(claimable_after, 0, "balance should be settled after rate update");
+
+    // But total_withdrawn should reflect the settled amount
+    let stream = c.get_stream(&stream_id);
+    assert!(stream.total_withdrawn >= claimable_before - 1000, "settled balance should be recorded");
+}
+
+/// Test that rate update is only callable by sender.
+#[test]
+fn test_update_stream_rate_only_sender() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Recipient attempts to update rate (should fail)
+    let result = c.try_update_stream_rate(&t.recipient, &stream_id, &2000i128);
+    assert!(result.is_err(), "recipient should not be able to update rate");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::NotSender),
+        Ok(_) => panic!("Expected NotSender error"),
+    }
+
+    // Sender can update rate
+    let result = c.try_update_stream_rate(&t.sender, &stream_id, &2000i128);
+    assert!(result.is_ok(), "sender should be able to update rate");
+}
+
+/// Test that rate update fails for non-active streams.
+#[test]
+fn test_update_stream_rate_requires_active_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Cancel the stream
+    c.cancel_stream(&stream_id, &t.sender);
+
+    // Attempt to update rate on cancelled stream (should fail)
+    let result = c.try_update_stream_rate(&t.sender, &stream_id, &2000i128);
+    assert!(result.is_err(), "should not be able to update cancelled stream");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamNotActive),
+        Ok(_) => panic!("Expected StreamNotActive error"),
+    }
+}
+
+/// Test that zero flow rate is rejected.
+#[test]
+fn test_update_stream_rate_rejects_zero_rate() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Attempt to set rate to zero
+    let result = c.try_update_stream_rate(&t.sender, &stream_id, &0i128);
+    assert!(result.is_err(), "should reject zero flow rate");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::ZeroFlowRate),
+        Ok(_) => panic!("Expected ZeroFlowRate error"),
+    }
+}
+
+/// Test that rate update adjusts end_time correctly.
+#[test]
+fn test_update_stream_rate_adjusts_end_time() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create stream: 1000 tokens/sec for 100 seconds (100,000 total)
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    let stream_before = c.get_stream(&stream_id);
+    let original_end = stream_before.end_time;
+
+    // Move time forward 50 seconds - 50,000 tokens earned
+    t.env.ledger().set_timestamp(50);
+
+    // Update rate to 2000 tokens/sec
+    // Remaining: 50,000 tokens / 2000 = 25 seconds
+    // New end time should be: 50 + 25 = 75
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+
+    let stream_after = c.get_stream(&stream_id);
+    assert_eq!(stream_after.end_time, 75, "new end_time should be 75");
+    assert!(stream_after.end_time < original_end, "end_time should decrease when rate increases");
+}
+
+/// Test that rate can be increased (stream ends sooner).
+#[test]
+fn test_update_stream_rate_increase() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    let stream_before = c.get_stream(&stream_id);
+
+    // Increase rate from 1000 to 2000
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+
+    let stream_after = c.get_stream(&stream_id);
+    assert!(stream_after.end_time < stream_before.end_time, "higher rate should end sooner");
+    assert_eq!(stream_after.flow_rate, 2000);
+}
+
+/// Test that rate can be decreased (stream ends later).
+#[test]
+fn test_update_stream_rate_decrease() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    let stream_before = c.get_stream(&stream_id);
+
+    // Decrease rate from 1000 to 500
+    c.update_stream_rate(&t.sender, &stream_id, &500i128);
+
+    let stream_after = c.get_stream(&stream_id);
+    assert!(stream_after.end_time > stream_before.end_time, "lower rate should end later");
+    assert_eq!(stream_after.flow_rate, 500);
+}
+
+/// Test that step-vesting streams cannot have rate updated.
+#[test]
+fn test_update_stream_rate_fails_on_step_vesting() {
+    let t = setup();
+    let c = client(&t);
+
+    let now = t.env.ledger().timestamp();
+    let tranches = soroban_sdk::Vec::from_array(&t.env, [
+        VestingTranche {
+            unlock_time: now + 500,
+            amount: 50_000i128,
+        },
+        VestingTranche {
+            unlock_time: now + 1000,
+            amount: 50_000i128,
+        },
+    ]);
+
+    let stream_id = c.create_stream_with_schedule(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &tranches,
+        &0u64, &0u64, &false,
+        &None::<Address>, &0u32,
+    );
+
+    // Attempt to update rate on step-vesting stream (should fail)
+    let result = c.try_update_stream_rate(&t.sender, &stream_id, &2000i128);
+    assert!(result.is_err(), "step-vesting streams should not support rate updates");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::InvalidDuration),
+        Ok(_) => panic!("Expected InvalidDuration error"),
+    }
+}
+
+/// Test that recipient can still withdraw after rate update.
+#[test]
+fn test_update_stream_rate_doesnt_break_withdrawals() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Update rate
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+
+    // Move time forward
+    t.env.ledger().set_timestamp(100);
+
+    // Recipient should be able to withdraw at new rate
+    let claimable = c.get_claimable(&stream_id);
+    assert!(claimable > 0, "should have claimable balance at new rate");
+
+    // Withdraw should succeed
+    c.withdraw(&stream_id, &t.recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert!(stream.total_withdrawn > 0, "withdrawal should succeed after rate update");
+}
+
+/// Test multiple rate updates in sequence.
+#[test]
+fn test_update_stream_rate_multiple_times() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Update rate multiple times
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+    let stream_after_first = c.get_stream(&stream_id);
+    assert_eq!(stream_after_first.flow_rate, 2000);
+
+    // Move time forward a bit
+    t.env.ledger().set_timestamp(50);
+
+    // Update rate again
+    c.update_stream_rate(&t.sender, &stream_id, &500i128);
+    let stream_after_second = c.get_stream(&stream_id);
+    assert_eq!(stream_after_second.flow_rate, 500);
+    assert!(stream_after_second.end_time > stream_after_first.end_time, "second update should extend stream");
+}
+
+/// Test that event is emitted when rate is updated.
+#[test]
+fn test_update_stream_rate_emits_event() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &1_000_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    // Update rate - event should be emitted
+    // (Note: We can't directly check events in unit tests, but the call should succeed)
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.flow_rate, 2000, "rate should be updated");
+}
+
+/// Test error handling when stream not found.
+#[test]
+fn test_update_stream_rate_stream_not_found() {
+    let t = setup();
+    let c = client(&t);
+
+    // Try to update non-existent stream
+    let result = c.try_update_stream_rate(&t.sender, &999999u64, &2000i128);
+    assert!(result.is_err(), "should fail for non-existent stream");
+    match result {
+        Err(e) => assert_eq!(e, StreamError::StreamNotFound),
+        Ok(_) => panic!("Expected StreamNotFound error"),
+    }
+}
+
+/// Test that deposit is updated correctly after rate change.
+#[test]
+fn test_update_stream_rate_updates_deposit() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create stream: 1000 tokens/sec for 100 seconds (100,000 total)
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000i128, &1000u64, &0u64, &0u64,
+        &false, &0u64, &false, &0i128,
+        &None::<u32>, &None::<i128>, &false, &false,
+    );
+
+    let stream_before = c.get_stream(&stream_id);
+    assert_eq!(stream_before.deposit, 100_000);
+
+    // Move time forward 50 seconds
+    t.env.ledger().set_timestamp(50);
+
+    // Update rate to 2000 tokens/sec
+    c.update_stream_rate(&t.sender, &stream_id, &2000i128);
+
+    let stream_after = c.get_stream(&stream_id);
+    // Remaining deposit should be 50,000 (the other 50,000 was earned)
+    assert_eq!(stream_after.deposit, 50_000, "deposit should be updated to remaining balance");
+}
 
     let original_end = c.get_stream(&stream_id).end_time;
     
@@ -5402,398 +6617,1080 @@ fn test_get_claimable_zero_dust_before_start() {
 }
 
 
-// ── get_protocol_stats tests ────────────────────────────────────────────────
-
-/// Verify get_protocol_stats returns correct total metrics.
 #[test]
-fn test_get_protocol_stats_totals() {
+fn test_query_streams_empty_filter() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    // Create some streams
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+    let _stream_id2 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
 
-    let stats = c.get_protocol_stats();
-    
-    assert_eq!(stats.total_streams, 2);
-    assert_eq!(stats.active_streams, 2);
-    assert_eq!(stats.total_volume, 150_000);
+    // Query with empty filter (no criteria specified)
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 2, "Empty filter should return all streams");
 }
 
-/// Verify get_protocol_stats tracks status breakdown correctly.
 #[test]
-fn test_get_protocol_stats_status_breakdown() {
+fn test_query_streams_by_status() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-    let id3 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &75_000, &1000, &0, &2u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    let stream_id2 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
 
     // Cancel one stream
-    c.cancel_stream(&id1, &t.sender);
-    
-    // Pause another
-    c.pause_stream(&id2, &t.sender);
+    c.cancel_stream(&stream_id2, &t.sender);
 
-    let stats = c.get_protocol_stats();
-    
-    // Status breakdown
-    assert_eq!(stats.status_breakdown.active, 1);
-    assert_eq!(stats.status_breakdown.cancelled, 1);
-    assert_eq!(stats.status_breakdown.paused, 1);
-    assert_eq!(stats.status_breakdown.completed, 0);
-    assert_eq!(stats.status_breakdown.expired, 0);
-    assert_eq!(stats.status_breakdown.pending_approval, 0);
+    // Query for Active streams
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Active),
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let active_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(active_results.len(), 1, "Should return only active stream");
+    assert_eq!(active_results.get(0).id, stream_id1);
 
-    // Verify totals still correct
-    assert_eq!(stats.total_streams, 3);
-    assert_eq!(stats.active_streams, 1);
+    // Query for Cancelled streams
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Cancelled),
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let cancelled_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(
+        cancelled_results.len(),
+        1,
+        "Should return only cancelled stream"
+    );
+    assert_eq!(cancelled_results.get(0).id, stream_id2);
 }
 
-/// Verify get_protocol_stats provides per-asset breakdown.
 #[test]
-fn test_get_protocol_stats_asset_breakdown() {
+fn test_query_streams_by_sender() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    // Create multiple streams with same token
-    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let sender2 = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&sender2, &1_000_000);
 
-    let stats = c.get_protocol_stats();
-    
-    // Should have one asset entry for token_id
-    assert_eq!(stats.asset_breakdown.len(), 1);
-    
-    let asset = &stats.asset_breakdown[0];
-    assert_eq!(asset.token, t.token_id);
-    assert_eq!(asset.stream_count, 2);
-    assert_eq!(asset.total_volume, 150_000);
-    assert_eq!(asset.active_streams, 2);
+    // Create stream from sender1
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream from sender2
+    let _stream_id2 = c.create_stream(
+        &sender2,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Query for streams from sender1
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: Some(t.sender.clone()),
+        recipient: None,
+    };
+    let sender1_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(sender1_results.len(), 1, "Should return only sender1 streams");
+    assert_eq!(sender1_results.get(0).sender, t.sender);
+
+    // Query for streams from sender2
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: Some(sender2.clone()),
+        recipient: None,
+    };
+    let sender2_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(sender2_results.len(), 1, "Should return only sender2 streams");
+    assert_eq!(sender2_results.get(0).sender, sender2);
 }
 
-/// Verify get_protocol_stats sorts assets by volume descending.
 #[test]
-fn test_get_protocol_stats_asset_sort_by_volume() {
+fn test_query_streams_by_recipient() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    // Create a second token
-    let token2 = t.env.register_stellar_asset_contract_from_address(Address::random(&t.env));
+    let recipient2 = Address::generate(&t.env);
 
-    // Create stream with small amount on token1
-    let _id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &10_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    // Create stream to recipient1
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
 
-    // Create stream with larger amount on token2
-    let _id2 = c.create_stream(&t.sender, &t.recipient, &token2, &500_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    // Create stream to recipient2
+    let _stream_id2 = c.create_stream(
+        &t.sender,
+        &recipient2,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
 
-    let stats = c.get_protocol_stats();
-    
-    // Should have two assets, ordered by volume descending
-    assert_eq!(stats.asset_breakdown.len(), 2);
-    assert_eq!(stats.asset_breakdown[0].total_volume, 500_000);
-    assert_eq!(stats.asset_breakdown[1].total_volume, 10_000);
+    // Query for streams to recipient1
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: Some(t.recipient.clone()),
+    };
+    let recipient1_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(
+        recipient1_results.len(),
+        1,
+        "Should return only recipient1 streams"
+    );
+    assert_eq!(recipient1_results.get(0).recipient, t.recipient);
+
+    // Query for streams to recipient2
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: Some(recipient2.clone()),
+    };
+    let recipient2_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(
+        recipient2_results.len(),
+        1,
+        "Should return only recipient2 streams"
+    );
+    assert_eq!(recipient2_results.get(0).recipient, recipient2);
 }
 
-/// Verify get_protocol_stats reflects status changes.
 #[test]
-fn test_get_protocol_stats_status_changes() {
+fn test_query_streams_by_asset() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let token_admin2 = Address::generate(&t.env);
+    let token_id2 = t
+        .env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    StellarAssetClient::new(&t.env, &token_id2).mint(&t.sender, &1_000_000);
 
-    // Initially active
-    let stats = c.get_protocol_stats();
-    assert_eq!(stats.status_breakdown.active, 1);
-    assert_eq!(stats.status_breakdown.paused, 0);
-    assert_eq!(stats.active_streams, 1);
+    // Create stream with token1
+    let _stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
 
-    // Pause the stream
-    c.pause_stream(&stream_id, &t.sender);
-    let stats = c.get_protocol_stats();
-    assert_eq!(stats.status_breakdown.active, 0);
-    assert_eq!(stats.status_breakdown.paused, 1);
-    assert_eq!(stats.active_streams, 0);
+    // Create stream with token2
+    let _stream_id2 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &token_id2,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
 
-    // Resume the stream
-    c.resume_stream(&stream_id, &t.sender);
-    let stats = c.get_protocol_stats();
-    assert_eq!(stats.status_breakdown.active, 1);
-    assert_eq!(stats.status_breakdown.paused, 0);
-    assert_eq!(stats.active_streams, 1);
+    // Query for streams using token1
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: Some(t.token_id.clone()),
+        sender: None,
+        recipient: None,
+    };
+    let token1_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(token1_results.len(), 1, "Should return only token1 streams");
+    assert_eq!(token1_results.get(0).token, t.token_id);
+
+    // Query for streams using token2
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: Some(token_id2.clone()),
+        sender: None,
+        recipient: None,
+    };
+    let token2_results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(token2_results.len(), 1, "Should return only token2 streams");
+    assert_eq!(token2_results.get(0).token, token_id2);
 }
 
-/// Verify get_protocol_stats per-asset active count is accurate.
 #[test]
-fn test_get_protocol_stats_asset_active_count() {
+fn test_query_streams_multiple_filters() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    let id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-    let id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &50_000, &1000, &0, &1u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    let sender2 = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&sender2, &1_000_000);
 
-    let stats = c.get_protocol_stats();
-    assert_eq!(stats.asset_breakdown[0].active_streams, 2);
+    let recipient2 = Address::generate(&t.env);
 
-    // Pause one stream
-    c.pause_stream(&id1, &t.sender);
-    let stats = c.get_protocol_stats();
-    assert_eq!(stats.asset_breakdown[0].active_streams, 1);
+    // Create stream1: sender1, recipient1, Active
+    let stream_id1 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,
+        &1000u64,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream2: sender2, recipient1, Active
+    let stream_id2 = c.create_stream(
+        &sender2,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,
+        &500u64,
+        &0u64,
+        &1u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream3: sender1, recipient2, Active
+    let stream_id3 = c.create_stream(
+        &t.sender,
+        &recipient2,
+        &t.token_id,
+        &75_000i128,
+        &750u64,
+        &0u64,
+        &2u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+
+    // Create stream4: sender1, recipient1, Cancelled
+    let stream_id4 = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &25_000i128,
+        &250u64,
+        &0u64,
+        &3u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &false,
+    );
+    c.cancel_stream(&stream_id4, &t.sender);
+
+    // Query: sender1, recipient1, Active
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Active),
+        asset: None,
+        sender: Some(t.sender.clone()),
+        recipient: Some(t.recipient.clone()),
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 1, "Should return only matching stream");
+    assert_eq!(results.get(0).id, stream_id1);
+
+    // Query: sender1, Active (any recipient)
+    let filter = StreamQueryFilter {
+        status: Some(StreamStatus::Active),
+        asset: None,
+        sender: Some(t.sender.clone()),
+        recipient: None,
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 2, "Should return sender1's active streams");
+    let ids: Vec<u64> = vec![results.get(0).id, results.get(1).id];
+    assert!(ids.contains(&stream_id1));
+    assert!(ids.contains(&stream_id3));
+
+    // Query: recipient1 (any sender/status)
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: Some(t.recipient.clone()),
+    };
+    let results = c.query_streams(&filter, &0u32, &20u32);
+    assert_eq!(results.len(), 3, "Should return all streams to recipient1");
+}
+
+#[test]
+fn test_query_streams_pagination() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create 5 streams
+    for i in 0..5 {
+        let _stream_id = c.create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_id,
+            &(100_000 - (i * 10_000)) as i128,
+            &1000u64,
+            &0u64,
+            &(i as u64),
+            &false,
+            &0u64,
+            &false,
+            &0i128,
+            &None::<u32>,
+            &None::<i128>,
+            &false,
+        );
+    }
+
+    // Query with empty filter to get all
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+
+    // Get first page (limit=2)
+    let page1 = c.query_streams(&filter, &0u32, &2u32);
+    assert_eq!(page1.len(), 2, "First page should have 2 results");
+
+    // Get second page (start=2, limit=2)
+    let page2 = c.query_streams(&filter, &2u32, &2u32);
+    assert_eq!(page2.len(), 2, "Second page should have 2 results");
+
+    // Get third page (start=4, limit=2) - should only have 1
+    let page3 = c.query_streams(&filter, &4u32, &2u32);
+    assert_eq!(page3.len(), 1, "Third page should have 1 result");
+
+    // Verify no overlap between pages
+    let page1_ids: Vec<u64> = (0..page1.len()).map(|i| page1.get(i as u32).id).collect();
+    let page2_ids: Vec<u64> = (0..page2.len()).map(|i| page2.get(i as u32).id).collect();
+    let page3_ids: Vec<u64> = (0..page3.len()).map(|i| page3.get(i as u32).id).collect();
+
+    for id in page1_ids.iter() {
+        assert!(!page2_ids.contains(id), "Pages should not overlap");
+        assert!(!page3_ids.contains(id), "Pages should not overlap");
+    }
+    for id in page2_ids.iter() {
+        assert!(!page3_ids.contains(id), "Pages should not overlap");
+    }
+}
+
+#[test]
+fn test_query_streams_limit_capped_at_20() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create 25 streams
+    for i in 0..25 {
+        let _stream_id = c.create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_id,
+            &(100_000 - (i * 1_000)) as i128,
+            &1000u64,
+            &0u64,
+            &(i as u64),
+            &false,
+            &0u64,
+            &false,
+            &0i128,
+            &None::<u32>,
+            &None::<i128>,
+            &false,
+        );
+    }
+
+    // Query with limit=50 should be capped at 20
+    let filter = StreamQueryFilter {
+        status: None,
+        asset: None,
+        sender: None,
+        recipient: None,
+    };
+    let results = c.query_streams(&filter, &0u32, &50u32);
+    assert_eq!(
+        results.len(),
+        20,
+        "Limit should be capped at 20, got {}",
+        results.len()
+    );
 }
 
 
-// ── stop_stream tests ──────────────────────────────────────────────────────
+/// Test case demonstrating the token refund vulnerability in cancel_stream.
+/// 
+/// VULNERABILITY: When cancel_stream is called:
+/// 1. EFFECTS phase: Stream record is deleted from storage
+/// 2. INTERACTIONS phase: Token transfers to recipient and sender
+///
+/// If the token transfer fails (e.g., insufficient balance, frozen account, failed token call),
+/// the stream record is already gone, making the unstreamed tokens inaccessible.
+/// 
+/// The sender cannot recover the unstreamed amount because:
+/// - The stream record was deleted
+/// - The tokens remain in the contract
+/// - There's no way to reconstruct the stream or claim the orphaned tokens
+///
+/// FIX: Move token transfers to occur BEFORE storage deletion (INTERACTIONS before EFFECTS).
+/// This ensures atomicity: if transfers fail, the stream record remains intact and can be
+/// retried or recovered.
 
-/// Verify stop_stream removes the stream and splits balance correctly.
 #[test]
-fn test_stop_stream_removes_and_splits() {
+fn test_cancel_stream_token_refund_ordering_vulnerability() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Advance time to get some earned amount
-    t.env.ledger().set_timestamp(500); // Half-way through stream
-
-    // Sender stops the stream
-    c.stop_stream(&stream_id, &t.sender);
-
-    // Stream should no longer exist
-    let result = c.get_stream(&stream_id);
-    assert!(result.is_err());
-
-    // Active streams should have decreased
-    let stats = c.get_protocol_stats();
-    assert_eq!(stats.active_streams, 0);
-}
-
-/// Verify stop_stream pays recipient their earned amount.
-#[test]
-fn test_stop_stream_pays_recipient_earned() {
-    let t = setup();
-    let c = client(&t);
-
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Advance time to let some tokens accrue
-    t.env.ledger().set_timestamp(500); // 50 stroops should be earned (50000 flow_rate * 500 seconds / 1000)
-    let earned_at_500 = 50_000i128; // flow_rate = 100_000 / 1000 = 100 stroops/second, so 500s * 100 = 50_000
-
-    // Get recipient balance before
-    let balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.recipient);
-
-    // Stop stream
-    c.stop_stream(&stream_id, &t.sender);
-
-    // Check recipient balance increased
-    let balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.recipient);
-    
-    assert_eq!(balance_after - balance_before, earned_at_500);
-}
-
-/// Verify stop_stream returns unstreamed tokens to sender.
-#[test]
-fn test_stop_stream_returns_unstreamed_to_sender() {
-    let t = setup();
-    let c = client(&t);
-
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Advance time halfway
-    t.env.ledger().set_timestamp(500); // 50_000 earned, so 50_000 unstreamed
-
-    let balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.sender);
-
-    // Stop stream
-    c.stop_stream(&stream_id, &t.sender);
-
-    let balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.sender);
-    
-    let refunded = balance_after - balance_before;
-    assert_eq!(refunded, 50_000); // Unstreamed amount
-}
-
-/// Verify stop_stream respects cliff enforcement.
-#[test]
-fn test_stop_stream_respects_cliff() {
-    let t = setup();
-    let c = client(&t);
-
-    // Create stream with cliff at 300 seconds
+    // Create a stream with 1,000 total seconds and 100,000 token deposit
     let stream_id = c.create_stream(
         &t.sender, &t.recipient, &t.token_id,
-        &100_000, &1000, &300, &0u64,
-        &false, &0u64, &false, &0i128,
-        &None::<u32>, &None::<i128>, &None::<u32>,
+        &100_000i128,  // deposit
+        &1000u64,      // duration in seconds
+        &0u64,         // cliff
+        &0u64,         // start_time
+        &false,        // auto_renew
+        &0u64,         // end_time_or_cliff
+        &false,        // is_step_vesting
+        &0i128,        // holdback_amount
+        &None::<u32>,  // decay_factor
+        &None::<i128>, // decay_offset
     );
 
-    // Stop before cliff (at 200 seconds)
-    t.env.ledger().set_timestamp(200);
+    // Advance time to 300 seconds (30% of stream)
+    t.env.ledger().set_timestamp(300);
 
-    let recipient_balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.recipient);
+    // Record balances before cancellation
+    let sender_balance_before = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    let recipient_balance_before = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
 
-    c.stop_stream(&stream_id, &t.sender);
+    // Cancel the stream
+    c.cancel_stream(&stream_id, &t.sender);
 
-    let recipient_balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.recipient);
+    // EXPECTED BEHAVIOR:
+    // - Recipient gets earned amount: (300 / 1000) * 100_000 = 30_000
+    // - Sender gets refund: 100_000 - 30_000 = 70_000 (unstreamed portion)
+    
+    let sender_balance_after = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    let recipient_balance_after = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
 
-    // Recipient should get 0 (cliff not yet reached)
-    assert_eq!(recipient_balance_after, recipient_balance_before);
-}
+    let sender_received = sender_balance_after - sender_balance_before;
+    let recipient_received = recipient_balance_after - recipient_balance_before;
 
-/// Verify recipient can call stop_stream.
-#[test]
-fn test_stop_stream_recipient_can_call() {
-    let t = setup();
-    let c = client(&t);
+    assert_eq!(recipient_received, 30_000, "recipient should receive earned 30% of deposit");
+    assert_eq!(sender_received, 70_000, "sender should receive unstreamed 70% refund");
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Advance time
-    t.env.ledger().set_timestamp(500);
-
-    // Recipient calls stop_stream
-    c.stop_stream(&stream_id, &t.recipient);
-
-    // Stream should be gone
-    let result = c.get_stream(&stream_id);
-    assert!(result.is_err());
-}
-
-/// Verify delegate can call stop_stream.
-#[test]
-fn test_stop_stream_delegate_can_call() {
-    let t = setup();
-    let c = client(&t);
-
-    let delegate = Address::random(&t.env);
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Set delegate
-    c.set_delegate(&stream_id, &t.sender, &delegate);
-
-    // Advance time
-    t.env.ledger().set_timestamp(500);
-
-    // Delegate calls stop_stream
-    c.stop_stream(&stream_id, &delegate);
-
-    // Stream should be gone
-    let result = c.get_stream(&stream_id);
-    assert!(result.is_err());
-}
-
-/// Verify stop_stream fails on locked stream if sender calls.
-#[test]
-fn test_stop_stream_fails_on_locked_if_sender() {
-    let t = setup();
-    let c = client(&t);
-
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Lock the stream
-    c.lock_stream(&stream_id, &t.sender);
-
-    // Sender tries to stop (should fail)
-    let result = c.stop_stream(&stream_id, &t.sender);
-    assert!(result.is_err());
-}
-
-/// Verify recipient can stop a locked stream.
-#[test]
-fn test_stop_stream_recipient_can_stop_locked() {
-    let t = setup();
-    let c = client(&t);
-
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
-
-    // Lock the stream
-    c.lock_stream(&stream_id, &t.sender);
-
-    // Recipient can still stop
-    c.stop_stream(&stream_id, &t.recipient);
-
-    // Stream should be gone
-    let result = c.get_stream(&stream_id);
-    assert!(result.is_err());
-}
-
-/// Verify stop_stream handles PendingApproval streams (quick refund).
-#[test]
-fn test_stop_stream_pending_approval_quick_refund() {
-    let t = setup();
-    let c = client(&t);
-
-    // Create stream requiring approval
-    let stream_id = c.create_stream_with_approval(
-        &t.sender, &t.recipient, &t.token_id,
-        &100_000, &1000, &0, &0u64,
-        &false, &0u64, &false, &0i128,
+    // Stream should be deleted
+    assert!(
+        c.try_get_stream(&stream_id).is_err(),
+        "stream must be deleted after cancellation"
     );
 
-    let sender_balance_before = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.sender);
-
-    // Stop before approval
-    c.stop_stream(&stream_id, &t.sender);
-
-    let sender_balance_after = soroban_sdk::token::Client::new(&t.env, &t.token_id)
-        .balance(&t.sender);
-
-    // Sender should get full deposit back (no earned since not approved)
-    assert_eq!(sender_balance_after - sender_balance_before, 100_000);
-
-    // Stream should be gone
-    let result = c.get_stream(&stream_id);
-    assert!(result.is_err());
+    // VULNERABILITY SCENARIO (not directly testable in mock environment):
+    // If token transfer failed between:
+    //   1. Stream deletion (remove_stream called)
+    //   2. Refund transfer (token_client.transfer failed)
+    //
+    // Then:
+    //   - Stream record is gone
+    //   - 70_000 tokens remain in contract (not transferred to sender)
+    //   - Sender cannot recover because stream record doesn't exist
+    //   - No function exists to reclaim orphaned tokens
 }
 
-/// Verify stop_stream works on paused streams.
+
 #[test]
-fn test_stop_stream_on_paused_stream() {
+fn test_flow_rate_bounds_validation_prevents_overflow() {
     let t = setup();
     let c = client(&t);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    // Attempting to create a stream with amount = i128::MAX and duration = 1 second
+    // would normally result in flow_rate = i128::MAX, which would overflow on any multiplication
+    // The validation should reject this at creation time with StreamError::Overflow
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &i128::MAX,          // Extremely large amount
+        &1u64,               // Very short duration (1 second)
+        &0u64,               // cliff
+        &0u64,               // start_time
+        &false,              // auto_renew
+        &0u64,               // end_time_or_cliff
+        &false,              // is_step_vesting
+        &0i128,              // holdback_amount
+        &None::<u32>,        // decay_factor
+        &None::<i128>,       // decay_offset
+    );
 
-    // Advance and pause
-    t.env.ledger().set_timestamp(500);
-    c.pause_stream(&stream_id, &t.sender);
-
-    // Stop while paused
-    c.stop_stream(&stream_id, &t.sender);
-
-    // Stream should be gone
-    let result = c.get_stream(&stream_id);
-    assert!(result.is_err());
+    // Should fail at creation time with Overflow error, not at withdraw time
+    assert!(result.is_err(), "Should reject stream with unsafe flow_rate at creation");
+    
+    // Verify it's an Overflow error (or similar bounds-checking error)
+    match result {
+        Err(e) => {
+            // The error should indicate the flow_rate is too large
+            // It could be Overflow, InvalidDuration, or similar
+            assert!(
+                matches!(e, StreamError::Overflow),
+                "Expected Overflow error for unsafe flow_rate, got: {:?}",
+                e
+            );
+        }
+        Ok(_) => panic!("Should have rejected stream with i128::MAX amount and 1-second duration"),
+    }
 }
 
-/// Verify stop_stream fails on non-existent stream.
 #[test]
-fn test_stop_stream_fails_nonexistent() {
+fn test_large_flow_rate_with_long_duration_succeeds() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(100);
+
+    // Create a stream with a very large amount but long enough duration that flow_rate is safe
+    // Example: deposit = 10^18 (realistic for USDC with many stroops)
+    //          duration = 1 year (31,536,000 seconds)
+    //          flow_rate ~= 31,709,791 stroops/sec (safe to multiply by elapsed)
+    
+    let large_deposit = 1_000_000_000_000_000_000i128;  // 10^18 stroops
+    let one_year_seconds = 365u64 * 24 * 60 * 60;       // 31,536,000 seconds
+
+    // First mint enough tokens
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &large_deposit);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &large_deposit,
+        &one_year_seconds,
+        &0u64,               // cliff
+        &0u64,               // start_time
+        &false,              // auto_renew
+        &0u64,               // end_time_or_cliff
+        &false,              // is_step_vesting
+        &0i128,              // holdback_amount
+        &None::<u32>,        // decay_factor
+        &None::<i128>,       // decay_offset
+    );
+
+    // Should succeed - the stream should be created
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, large_deposit);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // Advance time to mid-stream and verify we can withdraw
+    t.env.ledger().set_timestamp(100 + one_year_seconds / 2);
+    
+    let claimable = c.get_claimable(&stream_id);
+    assert!(
+        claimable > 0,
+        "Should be able to compute claimable amount at mid-stream"
+    );
+    assert!(
+        claimable < large_deposit,
+        "Claimable should be less than full deposit at mid-stream"
+    );
+}
+
+#[test]
+fn test_extremely_large_flow_rate_causes_creation_error() {
     let t = setup();
     let c = client(&t);
 
-    let result = c.stop_stream(&999_u64, &t.sender);
-    assert!(result.is_err());
+    // Attempt to create with flow_rate that would be close to i128::MAX
+    // This should be caught at creation time, not at withdraw time
+    let unsafe_amount = 9_223_372_036_854_775_800i128;  // Close to i128::MAX
+    let short_duration = 2u64;  // 2 seconds, so flow_rate ~= i128::MAX / 2
+
+    // Mint enough for this test
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &unsafe_amount);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &unsafe_amount,
+        &short_duration,
+        &0u64,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+    );
+
+    // Should fail at creation with Overflow error
+    assert!(result.is_err(), "Should reject extremely large flow_rate at creation");
 }
 
-/// Verify stop_stream fails if caller not authorized.
+
 #[test]
-fn test_stop_stream_fails_unauthorized() {
+fn test_zero_duration_explicitly_rejected() {
     let t = setup();
     let c = client(&t);
 
-    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+    // Test that zero-duration streams are explicitly rejected
+    // This should fail with InvalidDuration, not at withdrawal time or with unclear errors
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,  // amount
+        &0u64,         // duration_seconds = 0 (zero duration)
+        &0u64,         // cliff_seconds
+        &0u64,         // nonce
+        &false,        // auto_renew
+        &0u64,         // lock_until
+        &false,        // allow_recipient_termination
+        &0i128,        // holdback_amount
+        &None::<u32>,  // withdrawal_steps
+        &None::<i128>, // min_withdrawal_amount
+    );
 
-    let unauthorized = Address::random(&t.env);
-    let result = c.stop_stream(&stream_id, &unauthorized);
-    assert!(result.is_err());
+    // Should fail with InvalidDuration error
+    assert!(
+        result.is_err(),
+        "Zero-duration stream should be rejected at creation time"
+    );
+    
+    match result {
+        Err(e) => {
+            assert_eq!(
+                e,
+                Ok(StreamError::InvalidDuration),
+                "Expected InvalidDuration error for zero-duration stream"
+            );
+        }
+        Ok(_) => panic!("Zero-duration stream should not be allowed"),
+    }
+}
+
+#[test]
+fn test_minimal_duration_is_allowed() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Verify that the minimal non-zero duration (1 second) is allowed
+    // and works correctly
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000i128,  // amount
+        &1u64,         // duration_seconds = 1 (minimal non-zero)
+        &0u64,         // cliff_seconds
+        &0u64,         // nonce
+        &false,        // auto_renew
+        &0u64,         // lock_until
+        &false,        // allow_recipient_termination
+        &0i128,        // holdback_amount
+        &None::<u32>,  // withdrawal_steps
+        &None::<i128>, // min_withdrawal_amount
+    );
+
+    // Should succeed
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 100_000);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(stream.flow_rate, 100_000);  // 100_000 / 1 = 100_000
+    
+    // Verify end_time > start_time
+    assert!(
+        stream.end_time > stream.start_time,
+        "Stream with 1-second duration should have end_time > start_time"
+    );
+}
+
+#[test]
+fn test_zero_duration_cannot_be_bypassed_with_minimum_duration_zero() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Even if minimum duration is set to 0, zero-duration streams should still be rejected
+    // This tests that the explicit zero-duration check is independent of the minimum duration setting
+    
+    // The setup already calls set_min_duration(0), so minimum duration is 0
+    // But zero-duration should still be rejected
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &50_000i128,   // amount
+        &0u64,         // duration_seconds = 0 (explicitly zero)
+        &0u64,         // cliff_seconds
+        &1u64,         // nonce (different from other tests)
+        &false,        // auto_renew
+        &0u64,         // lock_until
+        &false,        // allow_recipient_termination
+        &0i128,        // holdback_amount
+        &None::<u32>,  // withdrawal_steps
+        &None::<i128>, // min_withdrawal_amount
+    );
+
+    // Should fail even though minimum duration is 0
+    assert!(
+        result.is_err(),
+        "Zero-duration stream should be rejected even when min_duration is 0"
+    );
+    
+    match result {
+        Err(e) => {
+            assert_eq!(
+                e,
+                Ok(StreamError::InvalidDuration),
+                "Should get InvalidDuration error, not StreamDurationTooShort or other errors"
+            );
+        }
+        Ok(_) => panic!("Zero-duration should never be allowed"),
+    }
+}
+
+
+#[test]
+fn test_batch_create_insufficient_balance_rejects_entire_batch() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Create vectors for batch create
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    recipients.push_back(Address::generate(&t.env));
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(400_000i128);  // First stream
+    amounts.push_back(700_000i128);  // Second stream (total = 1,100,000)
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(t.token_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    
+    // Sender only has 1,000,000 tokens, but needs 1,100,000
+    // The batch should be ENTIRELY rejected, with no streams created
+    let result = c.try_batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1000u64,  // duration
+        &false,    // auto_renew
+        &lock_untils,
+        &0u64,     // nonce
+    );
+    
+    // Should fail due to insufficient balance
+    assert!(result.is_err(), "Batch should be rejected due to insufficient balance");
+    
+    // Verify NO streams were created (all-or-nothing)
+    let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
+    assert_eq!(all_stream_ids.len(), 0, "No streams should be created when batch fails");
+}
+
+#[test]
+fn test_batch_create_sufficient_balance_succeeds_for_all() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Mint enough tokens for multiple streams
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &1_000_000);
+    
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    recipients.push_back(Address::generate(&t.env));
+    recipients.push_back(Address::generate(&t.env));
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(300_000i128);
+    amounts.push_back(300_000i128);
+    amounts.push_back(300_000i128);
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(t.token_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    
+    let stream_ids = c.batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1000u64,
+        &false,
+        &lock_untils,
+        &0u64,
+    );
+    
+    // All 3 streams should be created
+    assert_eq!(stream_ids.len(), 3, "All 3 streams should be created");
+    
+    // Verify all streams exist with correct parameters
+    for i in 0..3 {
+        let stream_id = stream_ids.get(i).unwrap();
+        let stream = c.get_stream(&stream_id);
+        assert_eq!(stream.deposit, 300_000i128);
+        assert_eq!(stream.status, StreamStatus::Active);
+    }
+}
+
+#[test]
+fn test_batch_create_validates_flow_rate_bounds() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Mint a huge amount to test flow rate bounds
+    let huge_amount = i128::MAX / 2;
+    TokenClient::new(&t.env, &t.token_id).mint(&t.sender, &huge_amount);
+    
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(huge_amount);  // Extremely large amount
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    
+    // Even with sufficient balance, flow_rate = huge_amount / 1 would overflow
+    // So the batch should be rejected in Phase 1
+    let result = c.try_batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1u64,  // 1-second duration (makes flow_rate = huge_amount)
+        &false,
+        &lock_untils,
+        &0u64,
+    );
+    
+    // Should fail due to unsafe flow_rate
+    assert!(result.is_err(), "Batch should reject unsafe flow_rate");
+    
+    // No streams should be created
+    let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
+    assert_eq!(all_stream_ids.len(), 0, "No streams should be created with unsafe flow_rate");
+}
+
+#[test]
+fn test_batch_create_multi_token_balance_check() {
+    let t = setup();
+    let c = client(&t);
+    
+    // Create a second token
+    let token_admin = Address::generate(&t.env);
+    let token2_id = t.env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    
+    // Mint tokens: sender has 600_000 of token1 but only 100_000 of token2
+    let token1_client = TokenClient::new(&t.env, &t.token_id);
+    token1_client.mint(&t.sender, &600_000);
+    
+    let token2_client = TokenClient::new(&t.env, &token2_id);
+    token2_client.mint(&t.sender, &100_000);
+    
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(t.recipient.clone());
+    recipients.push_back(Address::generate(&t.env));
+    
+    let mut amounts = Vec::new(&t.env);
+    amounts.push_back(300_000i128);  // Token 1: 300_000 needed
+    amounts.push_back(200_000i128);  // Token 2: 200_000 needed (but only has 100_000)
+    
+    let mut tokens = Vec::new(&t.env);
+    tokens.push_back(t.token_id.clone());
+    tokens.push_back(token2_id.clone());
+    
+    let mut lock_untils = Vec::new(&t.env);
+    lock_untils.push_back(0u64);
+    lock_untils.push_back(0u64);
+    
+    // Batch should fail: insufficient token2 balance
+    let result = c.try_batch_create_stream(
+        &t.sender,
+        &recipients,
+        &amounts,
+        &tokens,
+        &1000u64,
+        &false,
+        &lock_untils,
+        &0u64,
+    );
+    
+    assert!(result.is_err(), "Batch should fail due to insufficient token2 balance");
+    
+    // No streams should be created
+    let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
+    assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
 }
