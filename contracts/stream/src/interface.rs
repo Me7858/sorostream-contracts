@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche};
+use crate::types::{AuditEntry, CreateStreamArgs, Stats, Stream, StreamHealth, VestingCurve, VestingTranche};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -30,12 +30,7 @@ pub trait SoroStreamInterface {
         duration_seconds: u64,
         cliff_seconds: u64,
         nonce: u64,
-        auto_renew: bool,
-        lock_until: u64,
-        allow_recipient_termination: bool,
-        holdback_amount: i128,
-        withdrawal_steps: Option<u32>,
-        min_withdrawal_amount: Option<i128>,
+        args: CreateStreamArgs,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -47,9 +42,7 @@ pub trait SoroStreamInterface {
         duration_seconds: u64,
         cliff_seconds: u64,
         nonce: u64,
-        auto_renew: bool,
-        lock_until: u64,
-        allow_recipient_termination: bool,
+        args: CreateStreamArgs,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_schedule(
@@ -60,8 +53,7 @@ pub trait SoroStreamInterface {
         deposit: i128,
         tranches: Vec<VestingTranche>,
         nonce: u64,
-        lock_until: u64,
-        allow_recipient_termination: bool,
+        args: CreateStreamArgs,
         oracle: Option<Address>,
         max_price_deviation_bps: u32,
     ) -> Result<u64, StreamError>;
@@ -75,9 +67,7 @@ pub trait SoroStreamInterface {
         duration_seconds: u64,
         cliff_seconds: u64,
         nonce: u64,
-        auto_renew: bool,
-        lock_until: u64,
-        allow_recipient_termination: bool,
+        args: CreateStreamArgs,
         curve: VestingCurve,
     ) -> Result<u64, StreamError>;
 
@@ -97,36 +87,10 @@ pub trait SoroStreamInterface {
 
     fn withdraw(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
     fn cancel_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
-    fn transfer_recipient(env: Env, stream_id: u64, current_recipient: Address, new_recipient: Address) -> Result<(), StreamError>;
+    fn transfer_recipient(env: Env, stream_id: u64, sender: Address, new_recipient: Address) -> Result<(), StreamError>;
     fn partial_cancel_stream(env: Env, stream_id: u64, sender: Address, cancel_amount: i128) -> Result<u64, StreamError>;
     fn top_up(env: Env, stream_id: u64, sender: Address, token: Address, amount: i128) -> Result<(), StreamError>;
     fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
-
-    /// Approves a stream that was created with `requires_recipient_approval = true`.
-    ///
-    /// Only the stream's recipient may call this.  Transitions the stream from
-    /// `PendingApproval` to `Active` and records the approval timestamp.
-    /// All claimable-balance calculations use this timestamp as the effective
-    /// start so no tokens accrue during the pending window.
-    ///
-    /// # Errors
-    /// - `StreamNotFound` — stream does not exist.
-    /// - `NotRecipient` — caller is not the stream recipient.
-    /// - `StreamNotActive` — stream is not in `PendingApproval` state.
-    fn approve_stream(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
-
-    /// Irrevocably locks a stream, preventing the sender from calling `cancel_stream`.
-    ///
-    /// Only the stream's sender may call this while the stream is `Active`.
-    /// Once locked, any `cancel_stream` call from the sender returns
-    /// `StreamError::StreamIsLocked`.  Recipients can still withdraw normally.
-    ///
-    /// # Errors
-    /// - `StreamNotFound` — stream does not exist.
-    /// - `NotSender` — caller is not the stream sender.
-    /// - `StreamNotActive` — stream is not currently `Active`.
-    /// - `StreamIsLocked` — stream is already locked.
-    fn lock_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError>;
 
     fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError>;
     fn get_all_stream_ids(env: Env, start: u32, limit: u32) -> Vec<u64>;
@@ -164,12 +128,6 @@ pub trait SoroStreamInterface {
     fn get_stats(env: Env) -> Stats;
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
 
-    /// Returns the number of currently active streams for the given SAC token address.
-    ///
-    /// Returns `0` for unknown/never-used token addresses rather than erroring.
-    /// Read-only, no auth required.
-    fn get_stream_count_by_token(env: Env, token: Address) -> u64;
-
     fn min_duration(env: Env) -> u64;
     fn set_min_duration(env: Env, admin: Address, seconds: u64);
     fn max_duration(env: Env) -> u64;
@@ -187,7 +145,6 @@ pub trait SoroStreamInterface {
     /// `start_time` must satisfy `now <= start_time <= now + max_future_start_offset`.
     /// Returns [`StreamError::InvalidStartTime`] for past timestamps and
     /// [`StreamError::StartTimeTooFar`] when the offset limit is exceeded.
-    #[allow(clippy::too_many_arguments)]
     fn create_stream_scheduled(
         env: Env,
         sender: Address,
@@ -198,10 +155,7 @@ pub trait SoroStreamInterface {
         start_time: u64,
         cliff_seconds: u64,
         nonce: u64,
-        auto_renew: bool,
-        lock_until: u64,
-        allow_recipient_termination: bool,
-        holdback_amount: i128,
+        args: CreateStreamArgs,
     ) -> Result<u64, StreamError>;
 
     /// Runs a one-time migration step after a WASM upgrade. Admin-gated and idempotent.
@@ -345,10 +299,16 @@ pub trait SoroStreamInterface {
     fn create_dual_stream(
         env: Env,
         sender: Address,
-        stream_id: u64,
-        reference_price: i128,
-        max_slippage_bps: u32,
-    ) -> Result<(), StreamError>;
+        recipient: Address,
+        token1: Address,
+        amount1: i128,
+        token2: Address,
+        amount2: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        args: CreateStreamArgs,
+    ) -> Result<u64, StreamError>;
 
     /// Returns a health snapshot for the given stream's on-chain storage entry.
     ///
@@ -373,15 +333,16 @@ pub trait SoroStreamInterface {
     /// # Errors
     /// Returns `StreamError::StreamNotFound` if no stream with this ID exists.
     fn get_stream_health(env: Env, stream_id: u64) -> Result<StreamHealth, StreamError>;
-        recipient: Address,
-        token1: Address,
-        amount1: i128,
-        token2: Address,
-        amount2: i128,
-        duration_seconds: u64,
-        cliff_seconds: u64,
-        nonce: u64,
-        lock_until: u64,
-        allow_recipient_termination: bool,
-    ) -> Result<u64, StreamError>;
+
+    // ── Issue #395: Recipient delegate withdrawal ─────────────────────────
+
+    /// Allows the recipient to authorise a third-party address to call `withdraw`
+    /// on their behalf, enabling automated withdrawal agents.
+    fn grant_delegate(env: Env, stream_id: u64, recipient: Address, delegate: Address) -> Result<(), StreamError>;
+
+    /// Revokes a previously granted withdrawal delegate.
+    fn revoke_recipient_delegate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
+
+    /// Returns the withdrawal delegate for a stream, if any.
+    fn get_recipient_delegate(env: Env, stream_id: u64) -> Option<Address>;
 }

@@ -12,7 +12,7 @@ pub enum VestingCurve {
     Linear,
     /// Discretised exponential decay.
     ///
-    /// `decay_factor` is expressed in **basis points per 1 000 seconds**
+    /// The `decay_factor` is expressed in **basis points per 1 000 seconds**
     /// (i.e. the per-mille decay rate per 1 ks window):
     ///
     /// ```text
@@ -22,10 +22,7 @@ pub enum VestingCurve {
     ///
     /// A `decay_factor` of `0` degenerates to linear behaviour.
     /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
-    TimeDecay {
-        /// Decay rate in basis points per 1 000-second window (0–9 999).
-        decay_factor: u32,
-    },
+    TimeDecay(u32),
 }
 
 /// A single step-vesting tranche: tokens that unlock atomically at `unlock_time`.
@@ -52,10 +49,6 @@ pub enum StreamStatus {
     Paused,
     /// Stream has passed its end_time and been explicitly marked as expired.
     Expired,
-    /// Stream was created with `requires_recipient_approval = true` and the
-    /// recipient has not yet called `approve_stream`.  No tokens accrue while
-    /// in this state; the sender may cancel at zero cost.
-    PendingApproval,
 }
 
 /// Status of a milestone.
@@ -184,45 +177,14 @@ pub struct Stream {
     /// `None` means no minimum (default behaviour).
     pub min_withdrawal_amount: Option<i128>,
 
-    // ── Non-transferable flag ─────────────────────────────────────────────────
+    /// Whether the expiry warning event has been emitted for this stream.
+    pub expiry_warning_emitted: bool,
 
-    /// Whether the stream's recipient rights are locked to the original recipient.
-    ///
-    /// When `true`, any call to `transfer_recipient` on this stream will return
-    /// `StreamError::StreamNonTransferable`.  Useful for identity-linked grants
-    /// and personal vesting schedules where the sender needs on-chain enforcement
-    /// of non-transferability.  Set at creation time and immutable thereafter.
-    pub non_transferable: bool,
+    /// Optional ID of the stream that claimed tokens should be forwarded into.
+    pub redirect_to_stream_id: Option<u64>,
 
-    // ── Recipient approval ────────────────────────────────────────────────────
-
-    /// Whether this stream requires explicit recipient approval before tokens
-    /// begin to accrue.
-    ///
-    /// When `true`, the stream is created in `StreamStatus::PendingApproval`.
-    /// The recipient must call `approve_stream` to transition it to `Active`.
-    /// While pending, `withdraw` returns `StreamError::AwaitingApproval` and the
-    /// sender may cancel at zero cost (full deposit refunded).
-    /// Set at creation time and immutable thereafter.
-    pub requires_recipient_approval: bool,
-
-    /// Ledger timestamp at which the recipient approved the stream.
-    ///
-    /// `0` while the stream is in `PendingApproval` state.
-    /// Set by `approve_stream` and used as the effective `start_time` for all
-    /// claimable-balance calculations so that no tokens accrue during the
-    /// pending window.
-    pub approval_timestamp: u64,
-
-    // ── Sender-initiated irrevocable lock ─────────────────────────────────────
-
-    /// Whether the sender has voluntarily renounced their right to cancel.
-    ///
-    /// Starts `false`.  Once `lock_stream` is called, transitions to `true`
-    /// and cannot be reversed.  While `true`, any `cancel_stream` call from
-    /// the sender (or their delegate) returns `StreamError::StreamIsLocked`.
-    /// Recipients can still `withdraw` normally; admin pause is unaffected.
-    pub sender_locked: bool,
+    /// Whether this is a dual-asset stream.
+    pub is_dual_stream: bool,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
@@ -294,6 +256,27 @@ pub struct Stats {
     pub active_streams: u64,
     /// Sum of all deposits in stroops.
     pub total_volume: i128,
+}
+
+/// Parameters for optional/advanced stream configuration.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreateStreamArgs {
+    /// If set, tokens may only be withdrawn after this ledger timestamp.
+    pub lock_until: u64,
+    /// Holdback amount kept in escrow (in stroops). Must be < amount.
+    pub holdback_amount: i128,
+    /// Optional evenly-spaced withdrawal step count.
+    pub withdrawal_steps: Option<u32>,
+    /// Optional minimum claimable amount before a withdrawal is accepted.
+    pub min_withdrawal_amount: Option<i128>,
+    /// Bit 0: auto_renew, Bit 1: allow_recipient_termination.
+    pub flags: u32,
+}
+
+impl CreateStreamArgs {
+    pub fn auto_renew(&self) -> bool { self.flags & 1 != 0 }
+    pub fn allow_recipient_termination(&self) -> bool { self.flags & 2 != 0 }
 }
 
 /// A single admin audit log entry.
