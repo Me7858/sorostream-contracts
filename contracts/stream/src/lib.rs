@@ -34,6 +34,7 @@ use storage::{
     decrement_token_stream_count, derive_stream_id,
     drain_fees_collected, effective_sender_limit, extend_instance_ttl,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm,
+    get_creation_tax_bps, get_creation_tax_flat,
     get_delegate, get_expiry_warning_emitted, get_expiry_warning_window,
     get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
@@ -61,6 +62,7 @@ use storage::{
     remove_holdback,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
+    set_creation_tax_bps, set_creation_tax_flat,
     set_delegate, set_expiry_warning_window,
     set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
@@ -503,6 +505,21 @@ impl SoroStreamContract {
         let streaming_amount = amount
             .checked_sub(holdback_amount)
             .ok_or(StreamError::Overflow)?;
+        let tax_flat = get_creation_tax_flat(&env);
+        let tax_bps = get_creation_tax_bps(&env);
+        let tax_percentage = amount
+            .checked_mul(tax_bps as i128)
+            .ok_or(StreamError::Overflow)?
+            / 10_000;
+        let creation_tax = tax_flat
+            .checked_add(tax_percentage)
+            .ok_or(StreamError::Overflow)?;
+        let streaming_amount = streaming_amount
+            .checked_sub(creation_tax)
+            .ok_or(StreamError::ZeroAmount)?;
+        if streaming_amount <= 0 {
+            return Err(StreamError::ZeroAmount);
+        }
         let flow_rate = streaming_amount / duration_seconds as i128;
         if flow_rate == 0 {
             return Err(StreamError::ZeroFlowRate);
@@ -620,11 +637,17 @@ impl SoroStreamContract {
             events::creation_fee_collected(&env, creation_fee, &treasury);
         }
 
+        if creation_tax > 0 {
+            let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+            token::Client::new(&env, &token).transfer(&sender, &treasury, &creation_tax);
+            events::creation_tax_collected(&env, &token, creation_tax, &treasury);
+        }
+
         // Transfer total amount (streaming + holdback) from sender into contract escrow.
         token::Client::new(&env, &token).transfer(
             &sender,
             &env.current_contract_address(),
-            &amount,
+            &streaming_amount,
         );
 
         let stream = Stream {
@@ -695,7 +718,7 @@ impl SoroStreamContract {
         set_sender_last_creation_time(&env, &sender, now);
 
         events::stream_created(
-            &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, non_transferable,
+            &env, stream_id, &sender, &recipient, streaming_amount, flow_rate, end_time, non_transferable,
         );
 
         // Emit supplemental config event when non-default options are set so
@@ -2147,6 +2170,24 @@ impl SoroStreamContract {
         set_creation_fee_xlm(&env, fee);
         set_xlm_token(&env, &xlm_token);
         Ok(())
+    }
+
+    /// Sets the creation tax in the stream's deposit token. Exactly one mode may
+    /// be active: a flat amount or a basis-point rate. Set both values to zero
+    /// to disable the tax.
+    pub fn set_creation_tax(env: Env, flat_amount: i128, fee_bps: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        if flat_amount < 0 || fee_bps > 10_000 || (flat_amount > 0 && fee_bps > 0) {
+            return Err(StreamError::InvalidDuration);
+        }
+        set_creation_tax_flat(&env, flat_amount);
+        set_creation_tax_bps(&env, fee_bps);
+        Ok(())
+    }
+
+    /// Returns the configured creation tax as (flat amount, basis points).
+    pub fn get_creation_tax(env: Env) -> (i128, u32) {
+        (get_creation_tax_flat(&env), get_creation_tax_bps(&env))
     }
 
     /// Activates a stream that was created with escrow_hold = true.

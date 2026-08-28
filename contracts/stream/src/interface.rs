@@ -310,6 +310,8 @@ pub trait SoroStreamInterface {
 
     fn set_creation_fee(env: Env, fee: i128, xlm_token: Address) -> Result<(), StreamError>;
     fn get_creation_fee(env: Env) -> i128;
+    fn set_creation_tax(env: Env, flat_amount: i128, fee_bps: u32) -> Result<(), StreamError>;
+    fn get_creation_tax(env: Env) -> (i128, u32);
 
     fn set_token_fee_tier(env: Env, admin: Address, token: Address, fee_bps: u32) -> Result<(), StreamError>;
     fn remove_token_fee_tier(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
