@@ -38,7 +38,6 @@ pub enum StreamError {
     RateLimitExceeded = 41,
     InvalidSlippage = 43,
     DurationExceedsMax = 44,
-    InvalidTokenAddress = 45,
     StartTimeTooFar = 46,
     IDCollision = 47,
     NextStepNotReached = 48,
@@ -50,8 +49,6 @@ pub enum StreamError {
     RedirectRecipientMismatch = 54,
     /// Dual stream requires both token addresses to be distinct.
     DuplicateTokenInDualStream = 55,
-    /// Operation requires a dual-token stream but the stream only has one token.
-    NotDualStream = 56,
     /// Operation requires a single-token stream but the stream is dual-token.
     IsDualStream = 57,
     /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
@@ -65,13 +62,8 @@ pub enum StreamError {
     /// Recipient is not on the admin-managed recipient allowlist, and the stream
     /// requires allowlist enforcement.
     RecipientNotAllowed = 61,
-    PriceDeviationTooHigh = 56,
-    TokenStreamCapExceeded = 57,
-    AddressBlocked = 58,
-    StreamNonTransferable = 59,
-    /// The stream's end_time has passed but the grace period is still active.
-    GracePeriodActive = 60,
-    AwaitingApproval = 61,
-    InvalidPartialCancel = 63,
+    /// The stream deposit exceeds the maximum allowed per-token limit.
     MaxDepositExceeded = 64,
+    /// The comment attached to a stream exceeds the 256-byte limit.
+    CommentTooLong = 65,
 }
