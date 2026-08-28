@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use soroban_sdk::{Address, Bytes, Env, String, Symbol};
 
 /// Emitted when a new stream is created.
@@ -9,6 +10,7 @@ pub fn stream_created(
     amount: i128,
     flow_rate: i128,
     end_time: u64,
+    non_transferable: bool,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
@@ -18,6 +20,7 @@ pub fn stream_created(
             amount,
             flow_rate,
             end_time,
+            non_transferable,
         ),
     );
 }
@@ -74,6 +77,14 @@ pub fn auto_renew_failed(env: &Env, stream_id: u64, sender: &Address, required: 
     env.events().publish(
         (Symbol::new(env, "AutoRenewFailed"), stream_id),
         (sender.clone(), required),
+    );
+}
+
+/// Emitted when a stream's renewal count limit is reached and the stream can no longer auto-renew.
+pub fn renewal_limit_reached(env: &Env, stream_id: u64, sender: &Address, renewals_used: u32) {
+    env.events().publish(
+        (Symbol::new(env, "RenewalLimitReached"), stream_id),
+        (sender.clone(), renewals_used),
     );
 }
 
@@ -231,7 +242,7 @@ pub fn metadata_uri_updated(env: &Env, stream_id: u64, metadata_uri: &Option<Str
     let uri_str = if let Some(uri) = metadata_uri {
         uri.clone()
     } else {
-        String::from_slice(env, "")
+        String::from_str(env, "")
     };
     env.events().publish(
         (Symbol::new(env, "MetadataUriUpdated"), stream_id),
@@ -277,6 +288,43 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     env.events().publish(
         (Symbol::new(env, "CreationFeeCollected"),),
         (fee_amount, treasury.clone()),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Escrow Hold Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a stream is created with escrow_hold = true.
+///
+/// # Event Data
+/// - `stream_id`: The stream placed in escrow
+/// - `sender`: The stream creator (who must activate it)
+/// - `recipient`: The stream recipient
+/// - `amount`: The amount locked in escrow
+pub fn stream_placed_in_escrow(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamPlacedInEscrow"), stream_id),
+        (sender.clone(), recipient.clone(), amount),
+    );
+}
+
+/// Emitted when a stream is activated after being in escrow_hold state.
+///
+/// # Event Data
+/// - `stream_id`: The activated stream
+/// - `sender`: The sender who activated it
+/// - `activation_timestamp`: Ledger timestamp of activation
+pub fn stream_activated(env: &Env, stream_id: u64, sender: &Address, activation_timestamp: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamActivated"), stream_id),
+        (sender.clone(), activation_timestamp),
     );
 }
 
@@ -386,22 +434,6 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, sender: &Address) {
         sender.clone(),
     );
 }
-
-/// Emitted when a recipient grants a withdrawal delegate (Issue #395).
-pub fn delegate_granted(env: &Env, stream_id: u64, recipient: &Address, delegate: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "DelegateGranted"), stream_id),
-        (recipient.clone(), delegate.clone()),
-    );
-}
-
-/// Emitted when a recipient revokes a withdrawal delegate (Issue #395).
-pub fn recipient_delegate_revoked(env: &Env, stream_id: u64, recipient: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "RecipientDelegateRevoked"), stream_id),
-        recipient.clone(),
-    );
-}
 /// Emitted when fees are swept from the contract.
 pub fn fee_swept(env: &Env, token: &Address, amount: i128, destination: &Address) {
     env.events().publish(
@@ -463,6 +495,38 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     env.events().publish(
         (Symbol::new(env, "TokenWhitelistToggled"),),
         enabled,
+    );
+}
+
+/// Emitted when a recipient is added to the allowlist.
+pub fn recipient_allowlisted(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientAllowlisted"),),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when a recipient is removed from the allowlist.
+pub fn recipient_disallowlisted(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientDisallowlisted"),),
+        recipient.clone(),
+    );
+}
+
+/// Emitted when recipient allowlist is toggled globally.
+pub fn recipient_allowlist_toggled(env: &Env, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientAllowlistToggled"),),
+        enabled,
+    );
+}
+
+/// Emitted when a stream is created with allowlist enforcement enabled.
+pub fn stream_created_with_allowlist_enforcement(env: &Env, stream_id: u64, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamCreatedWithAllowlistEnforcement"), stream_id),
+        recipient.clone(),
     );
 }
 
@@ -780,5 +844,220 @@ pub fn dual_stream_cancelled(
             refund_amount2,
             recipient_amount2,
         ),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recipient approval & sender lock events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when a recipient approves a stream that required explicit approval.
+///
+/// # Event Data
+/// - `stream_id`: The approved stream
+/// - `recipient`: The recipient who approved
+/// - `approval_timestamp`: Ledger timestamp at which approval was recorded;
+///   tokens begin accruing from this point
+pub fn stream_approved(env: &Env, stream_id: u64, recipient: &Address, approval_timestamp: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamApproved"), stream_id),
+        (recipient.clone(), approval_timestamp),
+    );
+}
+
+// ── Issue #357: Stream inheritance ───────────────────────────────────────────
+
+/// Emitted when stream inheritance triggers a new stream for the inherit recipient.
+///
+/// # Event Data
+/// - `original_stream_id`: The completed or ended stream that triggered inheritance
+/// - `new_stream_id`: The newly created stream for the inherit recipient
+/// - `inherit_recipient`: The address that received the new stream
+/// - `amount`: The amount forwarded to the inherit recipient
+pub fn inheritance_triggered(
+    env: &Env,
+    original_stream_id: u64,
+    new_stream_id: u64,
+    inherit_recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "InheritanceTriggered"), original_stream_id),
+        (new_stream_id, inherit_recipient.clone(), amount),
+    );
+}
+
+// ── Issue #359: Fee exemption events ─────────────────────────────────────────
+
+/// Emitted when an address is added to the fee exemption list.
+pub fn fee_exemption_added(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeExemptionAdded"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+/// Emitted when an address is removed from the fee exemption list.
+pub fn fee_exemption_removed(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeExemptionRemoved"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+/// Emitted when a sender irrevocably locks a stream, renouncing their right to cancel.
+///
+/// # Event Data
+/// - `stream_id`: The locked stream
+/// - `sender`: The sender who initiated the lock
+pub fn stream_sender_locked(env: &Env, stream_id: u64, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "StreamSenderLocked"), stream_id),
+        sender.clone(),
+    );
+}
+
+
+/// Emitted when a sender updates the flow rate of an active stream.
+///
+/// # Event Data
+/// - `stream_id`: The stream whose rate was updated
+/// - `old_rate`: The previous tokens-per-second flow rate
+/// - `new_rate`: The new tokens-per-second flow rate
+/// - `new_end_time`: The adjusted stream end time after rate change
+/// - `remaining_deposit`: The remaining deposit after balance settlement
+pub fn stream_rate_updated(
+    env: &Env,
+    stream_id: u64,
+    old_rate: i128,
+    new_rate: i128,
+    new_end_time: u64,
+    remaining_deposit: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "StreamRateUpdated"), stream_id),
+        (old_rate, new_rate, new_end_time, remaining_deposit),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Split Stream Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+use soroban_sdk::Vec;
+
+/// Emitted when a split stream is created with multiple recipients.
+///
+/// A split stream distributes a single deposit across N sub-streams, each
+/// with a proportional allocation based on basis points.
+///
+/// # Event Data
+/// - `split_stream_id`: Unique identifier for the split stream
+/// - `sender`: The split stream creator / payer
+/// - `total_deposit`: Total amount distributed across all recipients
+/// - `stream_ids`: Vector of sub-stream IDs (one per recipient, in order)
+/// - `recipients`: Vector of recipient addresses (parallel to stream_ids)
+/// - `weights_bps`: Vector of weights in basis points (parallel to recipients)
+/// - `token`: Token address used for all sub-streams
+/// - `duration_seconds`: Duration in seconds for each sub-stream
+pub fn split_stream_created(
+    env: &Env,
+    split_stream_id: u64,
+    sender: &Address,
+    total_deposit: i128,
+    stream_ids: &Vec<u64>,
+    recipients: &Vec<Address>,
+    weights_bps: &Vec<u16>,
+    token: &Address,
+    duration_seconds: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "SplitStreamCreated"), split_stream_id),
+        (
+            sender.clone(),
+            total_deposit,
+            stream_ids.clone(),
+            recipients.clone(),
+            weights_bps.clone(),
+            token.clone(),
+            duration_seconds,
+        ),
+    );
+}
+
+
+/// Emitted when an admin sweeps a dormant stream.
+///
+/// A dormant stream is one that has not received withdrawals for longer than
+/// the configured dormancy threshold. Admin can sweep these to reclaim capital
+/// and storage.
+///
+/// # Event Data
+/// - `stream_id`: The swept stream
+/// - `sender`: The stream creator (who receives the refund)
+/// - `refund_amount`: Amount refunded to sender (remaining deposit)
+/// - `last_withdraw_time`: Last time tokens were withdrawn from this stream
+pub fn dormant_stream_cancelled(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    refund_amount: i128,
+    last_withdraw_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "DormantStreamCancelled"), stream_id),
+        (sender.clone(), refund_amount, last_withdraw_time),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// On-Complete Callback Events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when an on_complete callback is invoked when a stream reaches its end_time.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+/// - `on_complete_function`: The function name that was called
+pub fn on_complete_invoked(
+    env: &Env,
+    stream_id: u64,
+    on_complete_contract: &Address,
+    on_complete_function: &Symbol,
+) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteInvoked"), stream_id),
+        (on_complete_contract.clone(), on_complete_function.clone()),
+    );
+}
+
+/// Emitted when an on_complete callback execution succeeds.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+pub fn on_complete_success(env: &Env, stream_id: u64, on_complete_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteSuccess"), stream_id),
+        on_complete_contract.clone(),
+    );
+}
+
+/// Emitted when an on_complete callback execution fails.
+///
+/// # Event Data
+/// - `stream_id`: The stream that completed
+/// - `on_complete_contract`: The contract address that was invoked
+/// - `error_message`: Description of the error that occurred
+pub fn on_complete_failed(
+    env: &Env,
+    stream_id: u64,
+    on_complete_contract: &Address,
+    error_message: &String,
+) {
+    env.events().publish(
+        (Symbol::new(env, "OnCompleteFailed"), stream_id),
+        (on_complete_contract.clone(), error_message.clone()),
     );
 }

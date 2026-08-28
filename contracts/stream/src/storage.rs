@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
 use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
 
@@ -229,6 +230,55 @@ pub fn get_ids_by_recipient(env: &Env, recipient: &Address) -> Vec<u64> {
     ids
 }
 
+// ── Tag index helpers ────────────────────────────────────────────────────────
+
+fn tag_count_key(env: &Env, tag: &String) -> (Symbol, String) {
+    (Symbol::new(env, "tc"), tag.clone())
+}
+
+fn tag_slot_key(env: &Env, tag: &String, idx: u32) -> (Symbol, String, u32) {
+    (Symbol::new(env, "t"), tag.clone(), idx)
+}
+
+pub fn index_by_tag(env: &Env, tag: &String, stream_id: u64) {
+    let cnt_key = tag_count_key(env, tag);
+    let idx: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0u32);
+    env.storage().persistent().set(&tag_slot_key(env, tag, idx), &stream_id);
+    let next = idx.checked_add(1).expect("tag index overflow");
+    env.storage().persistent().set(&cnt_key, &next);
+}
+
+pub fn unindex_by_tag(env: &Env, tag: &String, stream_id: u64) {
+    let cnt_key = tag_count_key(env, tag);
+    let cnt: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0u32);
+    for i in 0..cnt {
+        let slot_key = tag_slot_key(env, tag, i);
+        if let Some(id) = env.storage().persistent().get::<_, u64>(&slot_key) {
+            if id == stream_id {
+                let last = cnt - 1;
+                if i != last {
+                    let last_id: u64 = env.storage().persistent().get(&tag_slot_key(env, tag, last)).unwrap_or(0);
+                    env.storage().persistent().set(&slot_key, &last_id);
+                }
+                env.storage().persistent().remove(&tag_slot_key(env, tag, last));
+                env.storage().persistent().set(&cnt_key, &last);
+                return;
+            }
+        }
+    }
+}
+
+pub fn get_ids_by_tag(env: &Env, tag: &String) -> Vec<u64> {
+    let cnt: u32 = env.storage().persistent().get(&tag_count_key(env, tag)).unwrap_or(0u32);
+    let mut ids = Vec::new(env);
+    for i in 0..cnt {
+        if let Some(id) = env.storage().persistent().get::<_, u64>(&tag_slot_key(env, tag, i)) {
+            ids.push_back(id);
+        }
+    }
+    ids
+}
+
 /// Returns the current batch nonce for a sender (next expected value).
 pub fn get_batch_nonce(env: &Env, sender: &Address) -> u64 {
     let key = (Symbol::new(env, "bn"), sender.clone());
@@ -437,27 +487,6 @@ pub fn remove_delegate(env: &Env, stream_id: u64) {
     env.storage().persistent().remove(&delegate_key(env, stream_id));
 }
 
-// --- Recipient delegate helpers (Issue #395) ---
-
-fn recipient_delegate_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "rdel"), stream_id)
-}
-
-/// Gets the recipient-authorized withdrawal delegate for a stream.
-pub fn get_recipient_delegate(env: &Env, stream_id: u64) -> Option<Address> {
-    env.storage().persistent().get(&recipient_delegate_key(env, stream_id))
-}
-
-/// Sets the recipient-authorized withdrawal delegate for a stream.
-pub fn set_recipient_delegate(env: &Env, stream_id: u64, delegate: &Address) {
-    env.storage().persistent().set(&recipient_delegate_key(env, stream_id), delegate);
-}
-
-/// Removes the recipient-authorized withdrawal delegate for a stream.
-pub fn remove_recipient_delegate(env: &Env, stream_id: u64) {
-    env.storage().persistent().remove(&recipient_delegate_key(env, stream_id));
-}
-
 // --- Version tracking ---
 
 /// Stores the contract version string.
@@ -538,6 +567,44 @@ pub fn add_to_whitelist(env: &Env, recipient: &Address) {
 /// Removes a recipient from the whitelist.
 pub fn remove_from_whitelist(env: &Env, recipient: &Address) {
     env.storage().persistent().remove(&whitelist_key(env, recipient));
+}
+
+// --- Recipient allowlist (for regulated payment scenarios) ---
+
+const RECIPIENT_ALLOWLIST_ENABLED_KEY: &str = "ral_en";
+
+/// Returns whether recipient allowlisting is globally enabled.
+pub fn is_recipient_allowlist_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, RECIPIENT_ALLOWLIST_ENABLED_KEY))
+        .unwrap_or(false)
+}
+
+/// Enables or disables recipient allowlisting.
+pub fn set_recipient_allowlist_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, RECIPIENT_ALLOWLIST_ENABLED_KEY), &enabled);
+}
+
+fn recipient_allowlist_key(env: &Env, recipient: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "ral"), recipient.clone())
+}
+
+/// Returns whether a recipient is on the allowlist.
+pub fn is_recipient_allowed(env: &Env, recipient: &Address) -> bool {
+    env.storage().persistent().get(&recipient_allowlist_key(env, recipient)).unwrap_or(false)
+}
+
+/// Adds a recipient to the allowlist.
+pub fn add_to_recipient_allowlist(env: &Env, recipient: &Address) {
+    env.storage().persistent().set(&recipient_allowlist_key(env, recipient), &true);
+}
+
+/// Removes a recipient from the allowlist.
+pub fn remove_from_recipient_allowlist(env: &Env, recipient: &Address) {
+    env.storage().persistent().remove(&recipient_allowlist_key(env, recipient));
 }
 
 // --- Fee exemption list ---
@@ -828,19 +895,25 @@ const RATE_LIMIT_WINDOW_KEY: &str = "rl_win";
 const RATE_LIMIT_MAX_KEY: &str = "rl_max";
 const RATE_LIMIT_EXEMPT_KEY: &str = "rl_ex";
 
-/// Gets the rate limit window size in seconds (default: 3600).
-pub fn get_rate_limit_window(env: &Env) -> u64 {
+/// Key for the ledger-sequence-based rate limit window size.
+const RATE_LIMIT_WINDOW_LEDGERS_KEY: &str = "rl_wl";
+
+/// Default rate limit window: 720 ledgers ≈ 1 hour at ~5 s/ledger.
+pub const DEFAULT_RATE_LIMIT_WINDOW_LEDGERS: u32 = 720;
+
+/// Gets the rate limit window size in ledgers (default: 720 ≈ 1 hour).
+pub fn get_rate_limit_window(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&Symbol::new(env, RATE_LIMIT_WINDOW_KEY))
-        .unwrap_or(3600u64)
+        .get(&Symbol::new(env, RATE_LIMIT_WINDOW_LEDGERS_KEY))
+        .unwrap_or(DEFAULT_RATE_LIMIT_WINDOW_LEDGERS)
 }
 
-/// Sets the rate limit window size in seconds.
-pub fn set_rate_limit_window(env: &Env, window_seconds: u64) {
+/// Sets the rate limit window size in ledgers.
+pub fn set_rate_limit_window(env: &Env, window_ledgers: u32) {
     env.storage()
         .instance()
-        .set(&Symbol::new(env, RATE_LIMIT_WINDOW_KEY), &window_seconds);
+        .set(&Symbol::new(env, RATE_LIMIT_WINDOW_LEDGERS_KEY), &window_ledgers);
 }
 
 /// Gets the max creations per window (default: 20).
@@ -862,19 +935,49 @@ fn rate_limit_key(env: &Env, addr: &Address) -> (Symbol, Address) {
     (Symbol::new(env, "rl"), addr.clone())
 }
 
-/// Gets rate limit state: (window_start_time, count_in_current_window)
-pub fn get_rate_limit_state(env: &Env, addr: &Address) -> (u64, u32) {
+/// Gets rate-limit state: `(window_start_ledger, count_in_window)` from temporary storage.
+///
+/// Temporary storage is correct here: if the entry's TTL expires, it is equivalent
+/// to the window having fully elapsed — the next call starts a fresh window at `count = 0`.
+/// Callers should extend the TTL to `window_ledgers` on every write (see `set_rate_limit_state`).
+pub fn get_rate_limit_state(env: &Env, addr: &Address) -> (u32, u32) {
     env.storage()
-        .persistent()
+        .temporary()
         .get(&rate_limit_key(env, addr))
-        .unwrap_or((0u64, 0u32))
+        .unwrap_or((0u32, 0u32))
 }
 
-/// Sets rate limit state.
-pub fn set_rate_limit_state(env: &Env, addr: &Address, window_start: u64, count: u32) {
+/// Persists rate-limit state `(window_start_ledger, count)` in temporary storage and extends
+/// the entry's TTL to `window_ledgers` so the counter survives the full sliding window.
+pub fn set_rate_limit_state(env: &Env, addr: &Address, window_start: u32, count: u32) {
+    let key = rate_limit_key(env, addr);
     env.storage()
-        .persistent()
-        .set(&rate_limit_key(env, addr), &(window_start, count));
+        .temporary()
+        .set(&key, &(window_start, count));
+    // Keep the entry alive for at least one full window so it cannot expire mid-window.
+    let ttl = get_rate_limit_window(env).max(1);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, ttl, ttl);
+}
+
+/// Returns how many more stream creations the given sender may perform in the current window.
+///
+/// Returns `u32::MAX` if the sender is exempt from rate limiting.
+pub fn get_remaining_quota(env: &Env, addr: &Address) -> u32 {
+    if is_rate_limit_exempt(env, addr) {
+        return u32::MAX;
+    }
+    let max = get_rate_limit_max_creations(env);
+    let window = get_rate_limit_window(env);
+    let (ws, count) = get_rate_limit_state(env, addr);
+    let current_ledger = env.ledger().sequence();
+    // If the window has elapsed the counter resets, so the full quota is available.
+    if current_ledger >= ws.saturating_add(window) {
+        max
+    } else {
+        max.saturating_sub(count)
+    }
 }
 
 fn rate_limit_exempt_key(env: &Env, addr: &Address) -> (Symbol, Address) {
@@ -1285,6 +1388,29 @@ pub fn set_grace_period_ledgers(env: &Env, ledgers: u32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Feature (j): Per-asset maximum deposit limit
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn max_deposit_per_token_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "max_dep"), token.clone())
+}
+
+/// Gets the maximum single-stream deposit amount for a token (0 = unlimited).
+pub fn get_max_deposit_per_token(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&max_deposit_per_token_key(env, token))
+        .unwrap_or(0i128)
+}
+
+/// Sets the maximum single-stream deposit amount for a token. Setting to 0 disables the limit.
+pub fn set_max_deposit_per_token(env: &Env, token: &Address, max_deposit: i128) {
+    env.storage()
+        .persistent()
+        .set(&max_deposit_per_token_key(env, token), &max_deposit);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Feature (d): Dual-token streams
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1378,4 +1504,56 @@ pub fn cleanup_dual_stream_storage(env: &Env, stream_id: u64) {
     remove_dual_stream_token2(env, stream_id);
     remove_dual_stream_deposit2(env, stream_id);
     remove_dual_stream_withdrawn2(env, stream_id);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Expiry warning emitted flag (moved from Stream struct)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn expiry_warning_emitted_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "exp_em"), stream_id)
+}
+
+/// Returns whether the expiry warning event has already been emitted for a stream.
+pub fn get_expiry_warning_emitted(env: &Env, stream_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get(&expiry_warning_emitted_key(env, stream_id))
+        .unwrap_or(false)
+}
+
+/// Sets the expiry warning emitted flag for a stream.
+pub fn set_expiry_warning_emitted(env: &Env, stream_id: u64, val: bool) {
+    env.storage()
+        .persistent()
+        .set(&expiry_warning_emitted_key(env, stream_id), &val);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stream tag (moved from Stream struct)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn stream_tag_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "stag"), stream_id)
+}
+
+/// Returns the tag for a stream, or None if not set.
+pub fn get_stream_tag(env: &Env, stream_id: u64) -> Option<String> {
+    env.storage()
+        .persistent()
+        .get(&stream_tag_key(env, stream_id))
+}
+
+/// Sets the tag for a stream.
+pub fn set_stream_tag_storage(env: &Env, stream_id: u64, tag: &String) {
+    env.storage()
+        .persistent()
+        .set(&stream_tag_key(env, stream_id), tag);
+}
+
+/// Removes the tag for a stream.
+pub fn remove_stream_tag(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&stream_tag_key(env, stream_id));
 }

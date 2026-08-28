@@ -1,6 +1,6 @@
 use soroban_sdk::contracterror;
 
-/// Custom errors for the SoroStream contract.
+/// Custom errors for the SoroStream contract (≤50 variants for Soroban XDR).
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -11,13 +11,10 @@ pub enum StreamError {
     StreamNotActive = 4,
     ZeroAmount = 5,
     InvalidDuration = 6,
-    InsufficientBalance = 7,
     InvalidCliff = 8,
     AlreadyInitialized = 9,
     NotInitialized = 10,
     DuplicateStream = 11,
-    InvalidStartTime = 12,
-    InvalidPartialCancel = 13,
     ContractPaused = 14,
     Overflow = 15,
     ZeroFlowRate = 16,
@@ -27,26 +24,18 @@ pub enum StreamError {
     NotAuthorized = 20,
     StreamNotPaused = 21,
     StreamDurationTooShort = 22,
-    StreamIdConflict = 23,
-    SenderStreamLimitExceeded = 24,
     InvalidNonce = 25,
     MigrationAlreadyApplied = 26,
     StreamNotSettled = 27,
     WithdrawalCooldownActive = 28,
     RecipientNotWhitelisted = 29,
-    MetadataTooLong = 30,
     InvalidEndTime = 31,
-    InsufficientXlmForFee = 32,
-    DuplicateStreamId = 33,
     ReentrancyDetected = 34,
     InvalidMetadataUri = 35,
     StreamNotComplete = 36,
     TokenNotWhitelisted = 37,
     InvalidTranches = 38,
-    PriceDeviationTooHigh = 39,
-    OracleError = 40,
     RateLimitExceeded = 41,
-    SlippageExceeded = 42,
     InvalidSlippage = 43,
     DurationExceedsMax = 44,
     InvalidTokenAddress = 45,
@@ -55,4 +44,34 @@ pub enum StreamError {
     NextStepNotReached = 48,
     AmountBelowMinimum = 49,
     InvalidExpiryWindow = 50,
+    NewSenderStreamCapExceeded = 51,
+    InvalidRedirectTarget = 52,
+    CircularRedirect = 53,
+    RedirectRecipientMismatch = 54,
+    /// Dual stream requires both token addresses to be distinct.
+    DuplicateTokenInDualStream = 55,
+    /// Operation requires a dual-token stream but the stream only has one token.
+    NotDualStream = 56,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 57,
+    /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
+    StreamNonTransferable = 58,
+    /// `withdraw` was called on a stream still in `PendingApproval` state.
+    /// The recipient must call `approve_stream` first.
+    AwaitingApproval = 59,
+    /// `cancel_stream` was called by the sender on a stream they have irrevocably
+    /// locked via `lock_stream`.
+    StreamIsLocked = 60,
+    /// Recipient is not on the admin-managed recipient allowlist, and the stream
+    /// requires allowlist enforcement.
+    RecipientNotAllowed = 61,
+    PriceDeviationTooHigh = 56,
+    TokenStreamCapExceeded = 57,
+    AddressBlocked = 58,
+    StreamNonTransferable = 59,
+    /// The stream's end_time has passed but the grace period is still active.
+    GracePeriodActive = 60,
+    AwaitingApproval = 61,
+    InvalidPartialCancel = 63,
+    MaxDepositExceeded = 64,
 }
