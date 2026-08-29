@@ -7850,3 +7850,27 @@ fn test_admin_override_checks_timelock() {
     let result = c.try_execute_admin_override(&request_id);
     assert!(result.is_ok(), "execute_admin_override should succeed after timelock elapsed");
 }
+
+// Issue #492: Invalid stream ID returns StreamNotFound error, not generic ContractError
+#[test]
+fn test_invalid_stream_id_returns_stream_not_found_error() {
+    let t = setup();
+    let c = client(&t);
+
+    // Try to get a stream that doesn't exist
+    let result = c.try_get_stream(&999999u64);
+
+    // Should return an error (StreamError::StreamNotFound)
+    assert!(result.is_err(), "Should error for invalid stream ID");
+
+    // Verify the error is specifically StreamNotFound
+    // The error code 1 corresponds to StreamError::StreamNotFound
+    match result {
+        Err(e) => {
+            // Check that the error code is 1 (StreamNotFound)
+            let error_code = e.code;
+            assert_eq!(error_code, 1, "Error should be StreamNotFound (code 1), not a generic ContractError");
+        }
+        Ok(_) => panic!("Should have returned an error for invalid stream ID"),
+    }
+}
