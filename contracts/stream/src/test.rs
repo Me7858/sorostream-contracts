@@ -7687,10 +7687,70 @@ fn test_batch_create_multi_token_balance_check() {
         &lock_untils,
         &0u64,
     );
-    
+
     assert!(result.is_err(), "Batch should fail due to insufficient token2 balance");
-    
+
     // No streams should be created
     let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
     assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
+}
+
+// Issue #489: splitStream closes parent stream and distributes deposit to children
+#[test]
+fn test_split_stream_closes_parent_stream() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1,000,000 stroops deposit
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Verify parent stream exists and is Active
+    let parent_stream = c.get_stream(&stream_id);
+    assert_eq!(parent_stream.status, StreamStatus::Active);
+    assert_eq!(parent_stream.deposit, 1_000_000);
+
+    // Create recipients for split
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(recipient1.clone());
+    recipients.push_back(recipient2.clone());
+
+    let mut proportions = Vec::new(&t.env);
+    proportions.push_back(1u128); // 50%
+    proportions.push_back(1u128); // 50%
+
+    // Split the stream
+    let child_stream_ids = c.split_stream(&stream_id, &t.sender, &recipients, &proportions, &0u64);
+    assert_eq!(child_stream_ids.len(), 2);
+
+    // Verify parent stream is closed (should not exist in storage)
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err(), "Parent stream should be closed after split");
+
+    // Verify child streams exist and have correct deposits
+    let child_stream1 = c.get_stream(&child_stream_ids.get(0).unwrap());
+    let child_stream2 = c.get_stream(&child_stream_ids.get(1).unwrap());
+
+    assert_eq!(child_stream1.status, StreamStatus::Active);
+    assert_eq!(child_stream2.status, StreamStatus::Active);
+    assert_eq!(child_stream1.deposit, 500_000);
+    assert_eq!(child_stream2.deposit, 500_000);
 }
