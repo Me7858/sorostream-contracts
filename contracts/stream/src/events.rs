@@ -1061,3 +1061,57 @@ pub fn on_complete_failed(
         (on_complete_contract.clone(), error_message.clone()),
     );
 }
+
+// ── Issue #465: Configurable fee recipient ────────────────────────────────
+
+/// Emitted when the admin sets a new protocol fee recipient.
+pub fn fee_recipient_set(env: &Env, recipient: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "FeeRecipientSet"),),
+        recipient.clone(),
+    );
+}
+
+// ── Issue #462: Per-stream fee override ────────────────────────────────────
+
+/// Emitted when the admin sets (or clears, `fee_bps = None`) a per-stream fee override.
+pub fn stream_fee_override_set(env: &Env, stream_id: u64, fee_bps: Option<u32>) {
+    env.events().publish(
+        (Symbol::new(env, "StreamFeeOverrideSet"), stream_id),
+        fee_bps,
+    );
+}
+
+// ── Issue #464: Referral tracking ───────────────────────────────────────────
+
+/// Emitted when a referral address is attributed to a stream.
+pub fn referral_attributed(env: &Env, stream_id: u64, referral: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "ReferralAttributed"), stream_id),
+        referral.clone(),
+    );
+}
+
+/// Emitted when a referral's share of a collected protocol fee is paid out.
+pub fn referral_reward_paid(env: &Env, stream_id: u64, referral: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "ReferralRewardPaid"), stream_id),
+        (referral.clone(), amount),
+    );
+}
+
+// ── Issue #463: Insurance pool ──────────────────────────────────────────────
+
+/// Emitted when the admin sets the insurance contribution rate.
+pub fn insurance_bps_set(env: &Env, bps: u32) {
+    env.events().publish((Symbol::new(env, "InsuranceBpsSet"),), bps);
+}
+
+/// Emitted when an insurance claim is paid out to a stream's recipient to
+/// cover the shortfall from a contract-verified failed-stream cancellation.
+pub fn insurance_claim_paid(env: &Env, stream_id: u64, recipient: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "InsuranceClaimPaid"), stream_id),
+        (recipient.clone(), amount),
+    );
+}

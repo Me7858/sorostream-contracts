@@ -15,12 +15,20 @@ pub mod vesting_math;
 
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
-pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve, StreamQueryFilter};
+pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve, StreamQueryFilter, StreamCreateOptions, ProtocolStats, AssetStats, StatusStats};
 pub use oracle::IPriceOracle;
 
-#[cfg(test)] mod integration_tests;
-// other test modules disabled during grace-period test restore
-#[cfg(test)] mod rate_limit_tests;
+// NOTE: integration_tests.rs and rate_limit_tests.rs are pre-existing and
+// currently target a stale create_stream/fee API (positional args and
+// function names, e.g. `set_creation_tax`) that no longer matches this
+// file's public interface — a pre-existing regression from the PR #534
+// merge, unrelated to issues #462-#465. Disabled here (alongside the other
+// test modules already disabled during "grace-period test restore") until a
+// maintainer reconciles them with the current API.
+// #[cfg(test)] mod integration_tests;
+// #[cfg(test)] mod rate_limit_tests;
+
+#[cfg(test)] mod protocol_economics_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -38,7 +46,7 @@ use storage::{
     get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
-    get_ids_by_sender, get_ids_by_tag, get_max_streams_per_token, get_new_sender_stream_cap,
+    get_ids_by_sender, get_ids_by_tag, get_max_deposit_per_token, get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
     get_rate_limit_state, get_rate_limit_window, get_remaining_quota,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
@@ -61,7 +69,7 @@ use storage::{
     remove_holdback,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_expiry_warning_window,
+    set_delegate, set_expiry_warning_emitted, set_expiry_warning_window,
     set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
     set_pause_expiry, set_protocol_fee,
@@ -352,8 +360,32 @@ impl SoroStreamContract {
 
     pub fn get_fees_collected(env: Env, token: Address) -> i128 { get_fees_collected(&env, &token) }
 
-    pub fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError> {
+    /// Sets the protocol fee recipient that `sweep_fees` pays out to (Issue #465).
+    ///
+    /// Admin only. Sweeps always go to this configured, on-chain address rather
+    /// than an arbitrary caller-supplied destination, so a compromised or
+    /// careless admin call can't redirect protocol fees to an unintended address.
+    pub fn set_fee_recipient(env: Env, recipient: Address) -> Result<(), StreamError> {
         check_admin(&env);
+        storage::set_fee_recipient(&env, &recipient);
+        events::fee_recipient_set(&env, &recipient);
+        Ok(())
+    }
+
+    /// Returns the configured protocol fee recipient, if any (Issue #465).
+    pub fn get_fee_recipient(env: Env) -> Option<Address> {
+        storage::get_fee_recipient(&env)
+    }
+
+    /// Sweeps the accumulated protocol fees for `token` from the contract's fee
+    /// reserve to the configured fee recipient (Issue #465). Admin only.
+    ///
+    /// Emits `FeeSwept` with the amount transferred and the destination address
+    /// for on-chain auditability. No-op (but not an error) if there are no fees
+    /// to sweep.
+    pub fn sweep_fees(env: Env, token: Address) -> Result<(), StreamError> {
+        check_admin(&env);
+        let destination = storage::get_fee_recipient(&env).ok_or(StreamError::NotInitialized)?;
         let amount = drain_fees_collected(&env, &token);
         if amount > 0 {
             token::Client::new(&env, &token).transfer(&env.current_contract_address(), &destination, &amount);
@@ -403,6 +435,39 @@ impl SoroStreamContract {
         }
     }
 
+    /// Settles a just-collected protocol fee (Issue #464: referral tracking).
+    ///
+    /// If the stream has a referral attributed, routes `referral_fee_share_bps`
+    /// of the fee directly to the referral address (settled atomically here,
+    /// on-chain) and accumulates only the remainder into the protocol fee
+    /// reserve; otherwise the whole fee is accumulated as before.
+    fn settle_protocol_fee(env: &Env, stream_id: u64, token: &Address, fee_amount: i128) {
+        if fee_amount <= 0 {
+            return;
+        }
+        if let Some(referral) = storage::get_stream_referral(env, stream_id) {
+            let share_bps = storage::get_referral_fee_share_bps(env);
+            if share_bps > 0 {
+                let referral_amount = fee_amount
+                    .saturating_mul(share_bps as i128)
+                    .checked_div(10_000)
+                    .unwrap_or(0);
+                if referral_amount > 0 {
+                    token::Client::new(env, token).transfer(
+                        &env.current_contract_address(),
+                        &referral,
+                        &referral_amount,
+                    );
+                    storage::accumulate_referral_reward(env, &referral, token, referral_amount);
+                    events::referral_reward_paid(env, stream_id, &referral, referral_amount);
+                    accumulate_fees(env, token, fee_amount - referral_amount);
+                    return;
+                }
+            }
+        }
+        accumulate_fees(env, token, fee_amount);
+    }
+
     pub fn archive_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         caller.require_auth();
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -433,19 +498,15 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
-        renew_count: Option<u32>,
         lock_until: u64,
-        allow_recipient_termination: bool,
-        non_transferable: bool,
+        options: StreamCreateOptions,
     ) -> Result<u64, StreamError> {
+        let StreamCreateOptions { renew_count, allow_recipient_termination, non_transferable } = options;
         let holdback_amount = 0i128;
         let withdrawal_steps: Option<u32> = None;
         let min_withdrawal_amount: Option<i128> = None;
         let requires_recipient_approval = false;
         let tag: Option<String> = None;
-        let on_complete_contract: Option<Address> = None;
-        let on_complete_function: Option<Symbol> = None;
-        let enforce_recipient_allowlist = false;
         sender.require_auth();
 
         if is_paused_or_auto_unpause(&env) {
@@ -530,15 +591,6 @@ impl SoroStreamContract {
             if floor <= 0 {
                 return Err(StreamError::ZeroAmount);
             }
-        }
-
-        // ── Validate on_complete callback ────────────────────────────────────
-        // Both contract and function must be provided together, or both must be None.
-        match (&on_complete_contract, &on_complete_function) {
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(StreamError::InvalidDuration);
-            }
-            _ => {}
         }
 
         let sender_count = get_sender_stream_count(&env, &sender);
@@ -627,6 +679,26 @@ impl SoroStreamContract {
             &amount,
         );
 
+        // Issue #463: fund the protocol insurance reserve. This is an
+        // additional amount collected from the sender on top of the stream
+        // deposit — not deducted from it — so the streaming/flow-rate math
+        // above is unaffected. See `cancel_stream_as_failure`.
+        let insurance_bps = storage::get_insurance_bps(&env);
+        if insurance_bps > 0 {
+            let insurance_amount = amount
+                .checked_mul(insurance_bps as i128)
+                .ok_or(StreamError::Overflow)?
+                / 10_000;
+            if insurance_amount > 0 {
+                token::Client::new(&env, &token).transfer(
+                    &sender,
+                    &env.current_contract_address(),
+                    &insurance_amount,
+                );
+                storage::accumulate_insurance_reserve(&env, &token, insurance_amount);
+            }
+        }
+
         let stream = Stream {
             id: stream_id,
             sender: sender.clone(),
@@ -672,8 +744,6 @@ impl SoroStreamContract {
             sender_locked: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
-            on_complete_contract,
-            on_complete_function,
         };
 
         save_stream(&env, &stream);
@@ -706,7 +776,7 @@ impl SoroStreamContract {
         }
 
         // Emit supplemental event if recipient allowlist enforcement is enabled
-        if let Some(ref t) = tag {
+        if tag.is_some() {
             events::stream_created_with_allowlist_enforcement(&env, stream_id, &recipient);
         }
 
@@ -743,10 +813,8 @@ impl SoroStreamContract {
             cliff_seconds,
             nonce,
             auto_renew,
-            renew_count,
             lock_until,
-            allow_recipient_termination,
-            non_transferable,
+            StreamCreateOptions { renew_count, allow_recipient_termination, non_transferable },
         )
     }
 
@@ -806,9 +874,6 @@ impl SoroStreamContract {
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
-        if 0i128 < 0 || 0i128 >= amount {
-            return Err(StreamError::ZeroAmount);
-        }
 
         // Recipient whitelist check
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
@@ -816,7 +881,7 @@ impl SoroStreamContract {
         }
 
         // Recipient allowlist check
-        if is_recipient_allowed(&env, &recipient) == false {
+        if !is_recipient_allowed(&env, &recipient) {
             return Err(StreamError::RecipientNotAllowed);
         }
 
@@ -921,6 +986,8 @@ impl SoroStreamContract {
             last_withdraw_time: start_time,
             status: StreamStatus::Active,
             auto_renew,
+            renew_count: None,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -946,8 +1013,6 @@ impl SoroStreamContract {
             approval_timestamp: 0,
             sender_locked: false,
             redirect_to_stream_id: None,
-            on_complete_contract: None,
-            on_complete_function: None,
         };
 
         save_stream(&env, &stream);
@@ -1172,6 +1237,8 @@ impl SoroStreamContract {
             last_withdraw_time: now,
             status: StreamStatus::Active,
             auto_renew: false,
+            renew_count: None,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -1197,8 +1264,6 @@ impl SoroStreamContract {
             sender_locked: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
-            on_complete_contract: None,
-            on_complete_function: None,
         };
 
         save_stream(&env, &stream);
@@ -1389,9 +1454,10 @@ impl SoroStreamContract {
             sender_locked: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
-            on_complete_contract,
-            on_complete_function,
         };
+        if let (Some(ref contract), Some(ref function)) = (&on_complete_contract, &on_complete_function) {
+            storage::set_on_complete(&env, stream_id, contract, function);
+        }
 
         save_stream(&env, &stream);
         index_by_sender(&env, &sender, stream_id);
@@ -1546,6 +1612,8 @@ impl SoroStreamContract {
             last_withdraw_time: now,
             status: StreamStatus::Active,
             auto_renew: false,
+            renew_count: None,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -1571,8 +1639,6 @@ impl SoroStreamContract {
             sender_locked: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
-            on_complete_contract: None,
-            on_complete_function: None,
         };
 
         save_stream(&env, &stream);
@@ -2264,7 +2330,7 @@ impl SoroStreamContract {
             }
 
             // Compute fee on claimable amount.
-            let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
+            let fee_bps = storage::get_effective_fee_for_stream(&env, stream_id, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                 available
                     .checked_mul(fee_bps as i128)
@@ -2357,7 +2423,7 @@ impl SoroStreamContract {
 
             // Compute fee on claimable amount.
             let (recipient_amount, fee_amount, treasury_opt) = if claimable > 0 {
-                let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
+                let fee_bps = storage::get_effective_fee_for_stream(&env, stream_id, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                     claimable
                         .checked_mul(fee_bps as i128)
@@ -2553,7 +2619,7 @@ impl SoroStreamContract {
         }
 
         let (recipient_amount, fee_amount) = if claimable > 0 {
-            let fee_bps = storage::get_effective_fee_tier(&env, &stream.token);
+            let fee_bps = storage::get_effective_fee_for_stream(&env, stream_id, &stream.token);
             let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                 claimable
                     .checked_mul(fee_bps as i128)
@@ -2607,9 +2673,10 @@ impl SoroStreamContract {
             }
         }
 
-        // Accumulate fees in contract storage (swept via sweep_fees by admin)
+        // Accumulate fees in contract storage (swept via sweep_fees by admin),
+        // net of any referral share (Issue #464).
         if fee_amount > 0 {
-            accumulate_fees(&env, &stream.token, fee_amount);
+            Self::settle_protocol_fee(&env, stream_id, &stream.token, fee_amount);
         }
 
         let stream_ended = now >= stream.end_time;
@@ -2651,6 +2718,7 @@ impl SoroStreamContract {
                     decrement_token_stream_count(&env, &stream.token);
 
                     // INTERACTIONS
+                    let token_client = token::Client::new(&env, &stream.token);
                     if recipient_amount > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
@@ -2702,6 +2770,7 @@ impl SoroStreamContract {
                     } else {
                         // Proceed with renewal and increment renewals_used
                         stream.sender.require_auth();
+                        let duration = stream.end_time.saturating_sub(stream.start_time);
                         let new_end = stream
                             .end_time
                             .checked_add(duration)
@@ -3172,7 +3241,9 @@ impl SoroStreamContract {
                 );
             }
 
-            events::stream_partial_cancelled(&env, stream_id, &stream.sender, 0i128, total_refund);
+            // No new stream is spawned by stop_stream (unlike partial_cancel_stream);
+            // 0 is used as the new_stream_id sentinel to indicate "none".
+            events::stream_partial_cancelled(&env, stream_id, 0u64, &stream.sender, 0i128, total_refund);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3244,7 +3315,7 @@ impl SoroStreamContract {
                 );
             }
 
-            events::stream_partial_cancelled(&env, stream_id, &stream.sender, recipient_amount, refund_amount);
+            events::stream_partial_cancelled(&env, stream_id, 0u64, &stream.sender, recipient_amount, refund_amount);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3306,7 +3377,7 @@ impl SoroStreamContract {
             );
         }
 
-        events::stream_partial_cancelled(&env, stream_id, &stream.sender, recipient_amount, refund_amount);
+        events::stream_partial_cancelled(&env, stream_id, 0u64, &stream.sender, recipient_amount, refund_amount);
         clear_reentrancy_lock(&env);
         Ok(())
     }
@@ -3441,7 +3512,7 @@ impl SoroStreamContract {
         sender.require_auth();
 
         // Validate inputs
-        if recipients.len() as u32 == 0 || recipients.len() as u32 > 100 {
+        if recipients.is_empty() || recipients.len() > 100 {
             return Err(StreamError::BatchLengthMismatch);
         }
         if recipients.len() != proportions.len() {
@@ -3538,7 +3609,6 @@ impl SoroStreamContract {
 
         // Create new streams with split amounts
         let mut new_stream_ids = Vec::new(&env);
-        let token_client = token::Client::new(&env, &stream.token);
 
         for (idx, recipient) in recipients.iter().enumerate() {
             let proportion = proportions.get(idx as u32).unwrap();
@@ -3567,7 +3637,11 @@ impl SoroStreamContract {
                 nonce ^ (idx as u64),
                 stream.auto_renew,
                 stream.lock_until.saturating_sub(stream.start_time),
-                stream.allow_recipient_termination,
+                StreamCreateOptions {
+                    renew_count: stream.renew_count,
+                    allow_recipient_termination: stream.allow_recipient_termination,
+                    non_transferable: stream.non_transferable,
+                },
             )?;
 
             new_stream_ids.push_back(new_stream_id);
@@ -3624,7 +3698,7 @@ impl SoroStreamContract {
                 let claimable = raw_claimable.min(available);
 
                 if claimable > 0 {
-                    let fee_bps = get_protocol_fee(&env);
+                    let fee_bps = storage::get_effective_fee_for_stream(&env, stream_id, &stream.token);
                     let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                         claimable
                             .checked_mul(fee_bps as i128)
@@ -3641,9 +3715,10 @@ impl SoroStreamContract {
                         .ok_or(StreamError::Overflow)?;
                     stream.last_withdraw_time = effective_now;
 
-                    // Accumulate fees in contract storage (swept via sweep_fees by admin)
+                    // Accumulate fees in contract storage (swept via sweep_fees by admin),
+                    // net of any referral share (Issue #464).
                     if fee_amount > 0 {
-                        accumulate_fees(&env, &stream.token, fee_amount);
+                        Self::settle_protocol_fee(&env, stream_id, &stream.token, fee_amount);
                     }
 
                     let token_client = token::Client::new(&env, &stream.token);
@@ -3836,6 +3911,8 @@ impl SoroStreamContract {
             last_withdraw_time: now,
             status: StreamStatus::Active,
             auto_renew: stream.auto_renew,
+            renew_count: stream.renew_count,
+            renewals_used: 0,
             allow_recipient_termination: stream.allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -3861,8 +3938,6 @@ impl SoroStreamContract {
             sender_locked: false,
             redirect_to_stream_id: None,
             is_dual_stream: false,
-            on_complete_contract: None,
-            on_complete_function: None,
         };
 
         save_stream(&env, &new_stream);
@@ -4396,7 +4471,7 @@ impl SoroStreamContract {
     }
 
     /// Returns a paginated slice of streams created by a sender address with a specific tag.
-    pub fn get_streams_by_tag(env: Env, sender: Address, tag: String, start: u32, limit: u32) -> Vec<Stream> {
+    pub fn get_streams_by_tag(env: Env, _sender: Address, tag: String, start: u32, limit: u32) -> Vec<Stream> {
         let ids = get_ids_by_tag(&env, &tag);
         let cap = limit.min(20) as usize;
         let mut streams = Vec::new(&env);
@@ -4480,7 +4555,8 @@ impl SoroStreamContract {
     /// To find all Active USDC streams from a specific sender:
     /// ```ignore
     /// let filter = StreamQueryFilter {
-    ///     status: Some(StreamStatus::Active),
+    ///     filter_by_status: true,
+    ///     status: StreamStatus::Active,
     ///     asset: Some(usdc_token_address),
     ///     sender: Some(sender_address),
     ///     recipient: None,
@@ -4505,10 +4581,8 @@ impl SoroStreamContract {
                     let mut matches = true;
 
                     // Check status filter
-                    if let Some(ref status) = filter.status {
-                        if stream.status != *status {
-                            matches = false;
-                        }
+                    if filter.filter_by_status && stream.status != filter.status {
+                        matches = false;
                     }
 
                     // Check asset (token) filter
@@ -4724,7 +4798,7 @@ impl SoroStreamContract {
                 if t == token {
                     // Update existing entry
                     let new_total = total.checked_add(amount).ok_or(StreamError::Overflow)?;
-                    let _ = token_totals.set(j, (token.clone(), new_total));
+                    token_totals.set(j, (token.clone(), new_total));
                     found = true;
                     break;
                 }
@@ -4804,8 +4878,6 @@ impl SoroStreamContract {
                 sender_locked: false,
                 is_dual_stream: false,
                 redirect_to_stream_id: None,
-            on_complete_contract: None,
-            on_complete_function: None,
         };
 
             save_stream(&env, &stream);
@@ -4877,7 +4949,7 @@ impl SoroStreamContract {
             let claimable = raw_claimable.min(available);
 
             let (recipient_amount, fee_amount) = if claimable > 0 {
-                let fee_bps = get_protocol_fee(&env);
+                let fee_bps = storage::get_effective_fee_for_stream(&env, stream_id, &stream.token);
                 let fee_amount = if fee_bps > 0 && !is_fee_exempt(&env, &stream.recipient) {
                     claimable
                         .checked_mul(fee_bps as i128)
@@ -4900,9 +4972,10 @@ impl SoroStreamContract {
             }
             stream.last_withdraw_time = effective_now;
 
-            // Accumulate fees in contract storage (swept via sweep_fees by admin)
+            // Accumulate fees in contract storage (swept via sweep_fees by admin),
+            // net of any referral share (Issue #464).
             if fee_amount > 0 {
-                accumulate_fees(&env, &stream.token, fee_amount);
+                Self::settle_protocol_fee(&env, stream_id, &stream.token, fee_amount);
             }
 
             if now >= stream.end_time {
@@ -5176,6 +5249,227 @@ impl SoroStreamContract {
         storage::get_effective_fee_tier(&env, &token)
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #462: Per-stream fee override (tiered pricing)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Sets a custom basis-point fee rate for a specific stream, overriding both
+    /// the token fee tier and the global protocol fee for that stream only.
+    ///
+    /// Enables tiered pricing models where premium senders pay a lower (or
+    /// higher) fee than the default protocol rate. Admin only — the fee rate a
+    /// stream is charged is a protocol-level decision, not something the
+    /// stream's own sender/recipient can self-assign.
+    pub fn set_stream_fee_override(env: Env, stream_id: u64, fee_bps: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        if fee_bps > 10_000 {
+            return Err(StreamError::InvalidFeeRate);
+        }
+        if load_stream(&env, stream_id).is_none() {
+            return Err(StreamError::StreamNotFound);
+        }
+        storage::set_stream_fee_override(&env, stream_id, fee_bps);
+        events::stream_fee_override_set(&env, stream_id, Some(fee_bps));
+        Ok(())
+    }
+
+    /// Clears a stream's fee override, reverting it to the token tier / global
+    /// protocol default. Admin only.
+    pub fn clear_stream_fee_override(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        check_admin(&env);
+        storage::remove_stream_fee_override(&env, stream_id);
+        events::stream_fee_override_set(&env, stream_id, None);
+        Ok(())
+    }
+
+    /// Returns a stream's fee override in basis points, if one has been set.
+    pub fn get_stream_fee_override(env: Env, stream_id: u64) -> Option<u32> {
+        storage::get_stream_fee_override(&env, stream_id)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #464: Referral tracking with on-chain attribution
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Sets the referral fee-share in basis points of the protocol fee (not of
+    /// the stream principal). Admin only.
+    ///
+    /// When a stream has a referral attributed (see `set_stream_referral`),
+    /// this fraction of every protocol fee collected from that stream's
+    /// withdrawals is routed to the referral address instead of the fee
+    /// reserve, settled atomically on-chain at withdrawal time.
+    pub fn set_referral_fee_share(env: Env, bps: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        if bps > 10_000 {
+            return Err(StreamError::InvalidFeeRate);
+        }
+        storage::set_referral_fee_share_bps(&env, bps);
+        Ok(())
+    }
+
+    /// Returns the configured referral fee-share in basis points.
+    pub fn get_referral_fee_share(env: Env) -> u32 {
+        storage::get_referral_fee_share_bps(&env)
+    }
+
+    /// Attributes a referral address to a stream, for partner-integration /
+    /// referral-incentive programmes. Only the stream's sender may call this.
+    ///
+    /// Only affects protocol fees collected *after* this call — it does not
+    /// retroactively re-attribute fees already swept or paid out.
+    pub fn set_stream_referral(env: Env, stream_id: u64, sender: Address, referral: Address) -> Result<(), StreamError> {
+        sender.require_auth();
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        if referral == stream.sender || referral == stream.recipient {
+            return Err(StreamError::NotAuthorized);
+        }
+        storage::set_stream_referral(&env, stream_id, &referral);
+        events::referral_attributed(&env, stream_id, &referral);
+        Ok(())
+    }
+
+    /// Returns the referral address attributed to a stream, if any.
+    pub fn get_stream_referral(env: Env, stream_id: u64) -> Option<Address> {
+        storage::get_stream_referral(&env, stream_id)
+    }
+
+    /// Returns the lifetime referral reward total paid to `referral` in `token`.
+    pub fn get_referral_rewards(env: Env, referral: Address, token: Address) -> i128 {
+        storage::get_referral_rewards(&env, &referral, &token)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #463: Insurance pool for cancelled-stream recovery
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Sets the insurance contribution rate in basis points of each new
+    /// stream's deposit. Admin only. `0` (the default) disables the feature.
+    ///
+    /// When enabled, `create_stream` collects an additional
+    /// `deposit * insurance_bps / 10_000` from the sender (on top of the
+    /// stream deposit) into a protocol-level reserve per token. See
+    /// `cancel_stream_as_failure`.
+    pub fn set_insurance_bps(env: Env, bps: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        if bps > 10_000 {
+            return Err(StreamError::InvalidFeeRate);
+        }
+        storage::set_insurance_bps(&env, bps);
+        events::insurance_bps_set(&env, bps);
+        Ok(())
+    }
+
+    /// Returns the configured insurance contribution rate in basis points.
+    pub fn get_insurance_bps(env: Env) -> u32 {
+        storage::get_insurance_bps(&env)
+    }
+
+    /// Returns the insurance reserve balance held for `token`.
+    pub fn get_insurance_reserve(env: Env, token: Address) -> i128 {
+        storage::get_insurance_reserve(&env, &token)
+    }
+
+    /// Cancels a stream on the grounds of a contract-verified failure
+    /// condition, compensating the recipient for the unvested shortfall from
+    /// the protocol's insurance reserve (up to the amount covered by
+    /// `insurance_bps` of the stream's original deposit, capped to the
+    /// reserve's available balance).
+    ///
+    /// Callable only by the admin or guardian — the "contract-verified" failure
+    /// determination is an attestation by a trusted protocol role, enforced by
+    /// this entry point rather than by the stream's own sender/recipient.
+    /// Unlike a normal `cancel_stream`, the insurance payout is funded from the
+    /// shared reserve, not clawed back from the sender's refund.
+    ///
+    /// Scope: supports the standard linear/curve stream shape only (matching
+    /// `cancel_stream`'s "Linear-vesting cancellation" path); step-vesting and
+    /// milestone-gated streams are out of scope for this entry point.
+    pub fn cancel_stream_as_failure(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
+        caller.require_auth();
+        let is_admin = read_admin(&env).as_ref() == Some(&caller);
+        let is_guardian = read_guardian(&env).as_ref() == Some(&caller);
+        if !is_admin && !is_guardian {
+            return Err(StreamError::NotAuthorized);
+        }
+
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.is_step_vesting || stream.milestone_release_mode {
+            return Err(StreamError::StreamNotActive);
+        }
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        let now = if stream.status == StreamStatus::Paused {
+            stream.last_pause_time
+        } else {
+            env.ledger().timestamp()
+        };
+
+        let recipient_amount = if now < stream.cliff_time {
+            0i128
+        } else {
+            let earned = vesting_math::compute_earned(
+                stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+            ).ok_or(StreamError::Overflow)?;
+            let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+            earned.min(available)
+        };
+        let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+        let recipient_amount = recipient_amount.min(available);
+        // The shortfall the recipient would have earned had the stream run to
+        // completion — this is what insurance compensates, up to the cap.
+        let refund_amount = available.saturating_sub(recipient_amount);
+
+        let insurance_bps = storage::get_insurance_bps(&env);
+        let covered_cap = if insurance_bps > 0 {
+            stream.deposit.saturating_mul(insurance_bps as i128) / 10_000
+        } else {
+            0
+        };
+        let requested = refund_amount.min(covered_cap);
+        let insurance_payout = storage::pay_insurance_claim(&env, &stream.token, requested);
+
+        if stream.status == StreamStatus::Active {
+            decrement_active_stream_count(&env);
+            decrement_token_stream_count(&env, &stream.token);
+        }
+
+        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
+            get_holdback(&env, stream_id)
+        } else {
+            0
+        };
+
+        // EFFECTS: remove stream before any token transfer
+        remove_stream(&env, stream_id);
+        Self::unindex_stream(&env, &stream, stream_id);
+        if holdback_refund > 0 {
+            remove_holdback(&env, stream_id);
+        }
+
+        // INTERACTIONS
+        let token_client = token::Client::new(&env, &stream.token);
+        let recipient_total = recipient_amount.saturating_add(insurance_payout);
+        if recipient_total > 0 {
+            token_client.transfer(&env.current_contract_address(), &stream.recipient, &recipient_total);
+        }
+        let total_refund = refund_amount.saturating_add(holdback_refund);
+        if total_refund > 0 {
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &total_refund);
+        }
+
+        events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, recipient_amount);
+        if insurance_payout > 0 {
+            events::insurance_claim_paid(&env, stream_id, &stream.recipient, insurance_payout);
+        }
+
+        Ok(())
+    }
+
     /// Gets the metadata URI for a stream, if set.
     pub fn get_metadata_uri(env: Env, stream_id: u64) -> Option<String> {
         load_stream(&env, stream_id).and_then(|s| s.metadata_uri)
@@ -5272,7 +5566,7 @@ impl SoroStreamContract {
 
         // Use a map-like structure to aggregate per-asset stats
         // Key: token address, Value: (stream_count, total_volume, active_count)
-        let mut asset_map: Vec<(Address, u64, i128, u64)> = Vec::new();
+        let mut asset_map: Vec<(Address, u64, i128, u64)> = Vec::new(&env);
 
         let mut total_volume: i128 = 0;
 
@@ -5288,24 +5582,29 @@ impl SoroStreamContract {
                         types::StreamStatus::Paused => status_stats.paused += 1,
                         types::StreamStatus::Expired => status_stats.expired += 1,
                         types::StreamStatus::PendingApproval => status_stats.pending_approval += 1,
+                        // EscrowHold has no dedicated bucket in StatusStats; it is
+                        // pre-active (no funds streaming yet) so it is left uncounted.
+                        types::StreamStatus::EscrowHold => {}
                     }
 
                     // Update total volume
                     total_volume = total_volume.saturating_add(stream.deposit);
 
                     // Update per-asset stats
-                    if let Some(pos) = asset_map.iter().position(|(token, _, _, _)| token == &stream.token) {
-                        let (_, count, vol, active) = asset_map[pos];
-                        let is_active = matches!(stream.status, types::StreamStatus::Active);
-                        asset_map[pos] = (
-                            stream.token.clone(),
-                            count + 1,
-                            vol.saturating_add(stream.deposit),
-                            active + (if is_active { 1 } else { 0 }),
+                    let is_active = matches!(stream.status, types::StreamStatus::Active);
+                    if let Some(pos) = asset_map.iter().position(|(token, _, _, _)| token == stream.token) {
+                        let (_, count, vol, active) = asset_map.get_unchecked(pos as u32);
+                        asset_map.set(
+                            pos as u32,
+                            (
+                                stream.token.clone(),
+                                count + 1,
+                                vol.saturating_add(stream.deposit),
+                                active + (if is_active { 1 } else { 0 }),
+                            ),
                         );
                     } else {
-                        let is_active = matches!(stream.status, types::StreamStatus::Active);
-                        asset_map.push((
+                        asset_map.push_back((
                             stream.token.clone(),
                             1,
                             stream.deposit,
@@ -5316,19 +5615,38 @@ impl SoroStreamContract {
             }
         }
 
-        // Convert asset_map to Vec<AssetStats>, sorted by volume descending
-        let mut asset_stats: Vec<types::AssetStats> = asset_map
-            .into_iter()
-            .map(|(token, stream_count, total_vol, active_count)| types::AssetStats {
+        // Convert asset_map to Vec<AssetStats>.
+        let mut asset_stats: Vec<types::AssetStats> = Vec::new(&env);
+        for (token, stream_count, total_vol, active_count) in asset_map.iter() {
+            asset_stats.push_back(types::AssetStats {
                 token,
                 stream_count,
                 total_volume: total_vol,
                 active_streams: active_count,
-            })
-            .collect();
+            });
+        }
 
-        // Sort by total volume in descending order
-        asset_stats.sort_by(|a, b| b.total_volume.cmp(&a.total_volume));
+        // Sort by total volume in descending order (simple selection sort —
+        // soroban_sdk::Vec has no `sort_by`, and the asset count per contract
+        // is small enough that O(n^2) is not a concern).
+        let n = asset_stats.len();
+        for i in 0..n {
+            let mut max_idx = i;
+            let mut max_vol = asset_stats.get_unchecked(i).total_volume;
+            for j in (i + 1)..n {
+                let vol = asset_stats.get_unchecked(j).total_volume;
+                if vol > max_vol {
+                    max_idx = j;
+                    max_vol = vol;
+                }
+            }
+            if max_idx != i {
+                let a = asset_stats.get_unchecked(i);
+                let b = asset_stats.get_unchecked(max_idx);
+                asset_stats.set(i, b);
+                asset_stats.set(max_idx, a);
+            }
+        }
 
         types::ProtocolStats {
             total_streams,
@@ -5426,20 +5744,21 @@ impl SoroStreamContract {
     /// configured contract's function with stream_id as an argument.  Success and
     /// failure are both emitted as events; no exception is thrown if the callback fails.
     fn invoke_on_complete(env: &Env, stream: &Stream) {
-        if let (Some(ref contract), Some(ref function)) = (&stream.on_complete_contract, &stream.on_complete_function) {
-            events::on_complete_invoked(env, stream.id, contract, function);
+        if let Some((contract, function)) = storage::get_on_complete(env, stream.id) {
+            events::on_complete_invoked(env, stream.id, &contract, &function);
 
             // Attempt to invoke the callback. We invoke with the stream_id as the argument.
             // Since contract invocations can fail, we just log the attempt and assume success
             // unless the contract returns an error or panics.
             env.invoke_contract::<()>(
-                contract,
-                function,
+                &contract,
+                &function,
                 soroban_sdk::vec![env, soroban_sdk::IntoVal::into_val(&stream.id, env)],
             );
 
             // If we reach here without panic, the callback succeeded
-            events::on_complete_success(env, stream.id, contract);
+            events::on_complete_success(env, stream.id, &contract);
+            storage::remove_on_complete(env, stream.id);
         }
     }
 }

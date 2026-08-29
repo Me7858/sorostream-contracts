@@ -1557,3 +1557,211 @@ pub fn remove_stream_tag(env: &Env, stream_id: u64) {
         .persistent()
         .remove(&stream_tag_key(env, stream_id));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// On-complete callback (moved from Stream struct to keep field count <= 40,
+// the Soroban UDT struct-field limit)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn on_complete_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "oncomp"), stream_id)
+}
+
+/// Returns the configured on-complete callback `(contract, function)` for a stream, if any.
+pub fn get_on_complete(env: &Env, stream_id: u64) -> Option<(Address, Symbol)> {
+    env.storage()
+        .persistent()
+        .get(&on_complete_key(env, stream_id))
+}
+
+/// Sets the on-complete callback for a stream.
+pub fn set_on_complete(env: &Env, stream_id: u64, contract: &Address, function: &Symbol) {
+    env.storage()
+        .persistent()
+        .set(&on_complete_key(env, stream_id), &(contract.clone(), function.clone()));
+}
+
+/// Removes the on-complete callback entry for a stream (call on stream removal).
+pub fn remove_on_complete(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&on_complete_key(env, stream_id));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #465 — Configurable protocol fee recipient
+// ═══════════════════════════════════════════════════════════════════════════
+
+const FEE_RECIPIENT_KEY: &str = "fee_rcpt";
+
+/// Returns the configured protocol fee recipient, if any.
+pub fn get_fee_recipient(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, FEE_RECIPIENT_KEY))
+}
+
+/// Sets the protocol fee recipient that `sweep_fees` pays out to.
+pub fn set_fee_recipient(env: &Env, recipient: &Address) {
+    env.storage().instance().set(&Symbol::new(env, FEE_RECIPIENT_KEY), recipient);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #462 — Per-stream fee override (tiered pricing)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn stream_fee_override_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "sfo"), stream_id)
+}
+
+/// Returns the per-stream fee override in basis points, if one has been set.
+pub fn get_stream_fee_override(env: &Env, stream_id: u64) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&stream_fee_override_key(env, stream_id))
+}
+
+/// Sets a custom basis-point fee rate for a specific stream, overriding both
+/// the token fee tier and the global protocol fee for that stream only.
+pub fn set_stream_fee_override(env: &Env, stream_id: u64, fee_bps: u32) {
+    env.storage()
+        .persistent()
+        .set(&stream_fee_override_key(env, stream_id), &fee_bps);
+}
+
+/// Clears a stream's fee override, reverting it to the token tier / protocol default.
+pub fn remove_stream_fee_override(env: &Env, stream_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&stream_fee_override_key(env, stream_id));
+}
+
+/// Returns the effective fee rate (bps) for a stream: the per-stream override
+/// if set, otherwise the token's fee tier, otherwise the global protocol fee.
+pub fn get_effective_fee_for_stream(env: &Env, stream_id: u64, token: &Address) -> u32 {
+    get_stream_fee_override(env, stream_id).unwrap_or_else(|| get_effective_fee_tier(env, token))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #464 — Referral tracking with on-chain attribution
+// ═══════════════════════════════════════════════════════════════════════════
+
+const REFERRAL_FEE_SHARE_BPS_KEY: &str = "ref_bps";
+
+/// Returns the configured referral fee-share, in basis points of the protocol
+/// fee (not of the stream principal). Defaults to 0 (no referral share) until
+/// an admin configures it via `set_referral_fee_share`.
+pub fn get_referral_fee_share_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, REFERRAL_FEE_SHARE_BPS_KEY))
+        .unwrap_or(0u32)
+}
+
+/// Sets the referral fee-share in basis points (0..=10_000) of the protocol fee.
+pub fn set_referral_fee_share_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, REFERRAL_FEE_SHARE_BPS_KEY), &bps);
+}
+
+fn stream_referral_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "sref"), stream_id)
+}
+
+/// Returns the referral address attributed to a stream, if any.
+pub fn get_stream_referral(env: &Env, stream_id: u64) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&stream_referral_key(env, stream_id))
+}
+
+/// Attributes a referral address to a stream at creation time.
+pub fn set_stream_referral(env: &Env, stream_id: u64, referral: &Address) {
+    env.storage()
+        .persistent()
+        .set(&stream_referral_key(env, stream_id), referral);
+}
+
+fn referral_rewards_key(env: &Env, referral: &Address, token: &Address) -> (Symbol, Address, Address) {
+    (Symbol::new(env, "rrew"), referral.clone(), token.clone())
+}
+
+/// Returns the lifetime referral reward total paid to `referral` in `token`.
+pub fn get_referral_rewards(env: &Env, referral: &Address, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&referral_rewards_key(env, referral, token))
+        .unwrap_or(0i128)
+}
+
+/// Records a referral reward payout (for on-chain auditability / querying);
+/// the actual token transfer is settled atomically by the caller.
+pub fn accumulate_referral_reward(env: &Env, referral: &Address, token: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let current = get_referral_rewards(env, referral, token);
+    let next = current.checked_add(amount).expect("referral_rewards overflow");
+    env.storage()
+        .persistent()
+        .set(&referral_rewards_key(env, referral, token), &next);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #463 — Insurance pool for cancelled-stream recovery
+// ═══════════════════════════════════════════════════════════════════════════
+
+const INSURANCE_BPS_KEY: &str = "ins_bps";
+
+/// Returns the configured insurance contribution rate, in basis points of
+/// each stream's deposit. Defaults to 0 (feature disabled) until configured.
+pub fn get_insurance_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, INSURANCE_BPS_KEY))
+        .unwrap_or(0u32)
+}
+
+/// Sets the insurance contribution rate in basis points (0..=10_000).
+pub fn set_insurance_bps(env: &Env, bps: u32) {
+    env.storage().instance().set(&Symbol::new(env, INSURANCE_BPS_KEY), &bps);
+}
+
+fn insurance_reserve_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "ins_res"), token.clone())
+}
+
+/// Returns the insurance reserve balance held for `token`.
+pub fn get_insurance_reserve(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&insurance_reserve_key(env, token))
+        .unwrap_or(0i128)
+}
+
+/// Adds `amount` to the insurance reserve for `token`.
+pub fn accumulate_insurance_reserve(env: &Env, token: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let current = get_insurance_reserve(env, token);
+    let next = current.checked_add(amount).expect("insurance_reserve overflow");
+    env.storage()
+        .persistent()
+        .set(&insurance_reserve_key(env, token), &next);
+}
+
+/// Pays out up to `requested` from the insurance reserve for `token`, capped
+/// to the available balance. Returns the amount actually deducted.
+pub fn pay_insurance_claim(env: &Env, token: &Address, requested: i128) -> i128 {
+    if requested <= 0 {
+        return 0;
+    }
+    let current = get_insurance_reserve(env, token);
+    let payout = requested.min(current);
+    if payout > 0 {
+        env.storage()
+            .persistent()
+            .set(&insurance_reserve_key(env, token), &(current - payout));
+    }
+    payout
+}

@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter};
+use crate::types::{AuditEntry, ProtocolStats, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter, StreamCreateOptions};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -31,16 +31,8 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
-        renew_count: Option<u32>,
         lock_until: u64,
-        allow_recipient_termination: bool,
-        non_transferable: bool,
-        holdback_amount: i128,
-        withdrawal_steps: Option<u32>,
-        min_withdrawal_amount: Option<i128>,
-        non_transferable: bool,
-        requires_recipient_approval: bool,
-        enforce_recipient_allowlist: bool,
+        options: StreamCreateOptions,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -251,12 +243,6 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
-        lock_until: u64,
-        allow_recipient_termination: bool,
-        holdback_amount: i128,
-        on_complete_contract: Option<Address>,
-        on_complete_function: Option<Symbol>,
-        escrow_hold: bool,
     ) -> Result<u64, StreamError>;
 
     /// Runs a one-time migration step after a WASM upgrade. Admin-gated and idempotent.
@@ -298,7 +284,13 @@ pub trait SoroStreamInterface {
     fn remove_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError>;
     fn is_fee_exempt(env: Env, addr: Address) -> bool;
     fn get_fees_collected(env: Env, token: Address) -> i128;
-    fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError>;
+
+    /// Sets the protocol fee recipient that `sweep_fees` pays out to. Admin only.
+    fn set_fee_recipient(env: Env, recipient: Address) -> Result<(), StreamError>;
+    /// Returns the configured protocol fee recipient, if any.
+    fn get_fee_recipient(env: Env) -> Option<Address>;
+    /// Sweeps accumulated protocol fees for `token` to the configured fee recipient. Admin only.
+    fn sweep_fees(env: Env, token: Address) -> Result<(), StreamError>;
 
     fn set_guardian(env: Env, guardian: Address) -> Result<(), StreamError>;
     fn get_guardian(env: Env) -> Option<Address>;
@@ -314,6 +306,27 @@ pub trait SoroStreamInterface {
     fn set_token_fee_tier(env: Env, admin: Address, token: Address, fee_bps: u32) -> Result<(), StreamError>;
     fn remove_token_fee_tier(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
     fn get_token_fee_tier(env: Env, token: Address) -> u32;
+
+    // ── Issue #462: Per-stream fee override ─────────────────────────────────
+
+    fn set_stream_fee_override(env: Env, stream_id: u64, fee_bps: u32) -> Result<(), StreamError>;
+    fn clear_stream_fee_override(env: Env, stream_id: u64) -> Result<(), StreamError>;
+    fn get_stream_fee_override(env: Env, stream_id: u64) -> Option<u32>;
+
+    // ── Issue #464: Referral tracking ───────────────────────────────────────
+
+    fn set_referral_fee_share(env: Env, bps: u32) -> Result<(), StreamError>;
+    fn get_referral_fee_share(env: Env) -> u32;
+    fn set_stream_referral(env: Env, stream_id: u64, sender: Address, referral: Address) -> Result<(), StreamError>;
+    fn get_stream_referral(env: Env, stream_id: u64) -> Option<Address>;
+    fn get_referral_rewards(env: Env, referral: Address, token: Address) -> i128;
+
+    // ── Issue #463: Insurance pool ───────────────────────────────────────────
+
+    fn set_insurance_bps(env: Env, bps: u32) -> Result<(), StreamError>;
+    fn get_insurance_bps(env: Env) -> u32;
+    fn get_insurance_reserve(env: Env, token: Address) -> i128;
+    fn cancel_stream_as_failure(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError>;
 
     fn get_metadata_uri(env: Env, stream_id: u64) -> Option<String>;
     fn update_metadata_uri(env: Env, stream_id: u64, sender: Address, new_uri: Option<String>) -> Result<(), StreamError>;
