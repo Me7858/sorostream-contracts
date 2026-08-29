@@ -7687,10 +7687,98 @@ fn test_batch_create_multi_token_balance_check() {
         &lock_untils,
         &0u64,
     );
-    
+
     assert!(result.is_err(), "Batch should fail due to insufficient token2 balance");
-    
+
     // No streams should be created
     let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
     assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
+}
+
+// Issue #488: Validate that start_time is greater than or equal to current ledger time
+#[test]
+fn test_create_stream_scheduled_rejects_past_start_time() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(1000u64);
+
+    // Try to create stream with start_time in the past (before current time)
+    let result = c.try_create_stream_scheduled(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000u64,  // duration
+        &500u64,   // start_time in the past
+        &0u64,     // cliff
+        &0u64,     // nonce
+        &false,    // auto_renew
+        &0u64,     // lock_until
+        &false,    // allow_recipient_termination
+        &0i128,    // holdback_amount
+        &None::<Address>,  // on_complete_contract
+        &None::<soroban_sdk::Symbol>,  // on_complete_function
+        &false,    // escrow_hold
+    );
+
+    assert!(result.is_err(), "Should reject stream with start_time in the past");
+}
+
+#[test]
+fn test_create_stream_scheduled_accepts_current_time() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(1000u64);
+
+    // Create stream with start_time equal to current time
+    let result = c.try_create_stream_scheduled(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000u64,  // duration
+        &1000u64,  // start_time equal to current time
+        &0u64,     // cliff
+        &0u64,     // nonce
+        &false,    // auto_renew
+        &0u64,     // lock_until
+        &false,    // allow_recipient_termination
+        &0i128,    // holdback_amount
+        &None::<Address>,
+        &None::<soroban_sdk::Symbol>,
+        &false,
+    );
+
+    assert!(result.is_ok(), "Should accept stream with start_time equal to current time");
+}
+
+#[test]
+fn test_create_stream_scheduled_accepts_future_start_time() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(1000u64);
+
+    // Create stream with start_time in the future
+    let result = c.try_create_stream_scheduled(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000u64,  // duration
+        &2000u64,  // start_time in the future
+        &0u64,     // cliff
+        &0u64,     // nonce
+        &false,    // auto_renew
+        &0u64,     // lock_until
+        &false,    // allow_recipient_termination
+        &0i128,    // holdback_amount
+        &None::<Address>,
+        &None::<soroban_sdk::Symbol>,
+        &false,
+    );
+
+    assert!(result.is_ok(), "Should accept stream with start_time in the future");
 }
