@@ -21,6 +21,10 @@ pub use oracle::IPriceOracle;
 #[cfg(test)] mod integration_tests;
 // other test modules disabled during grace-period test restore
 #[cfg(test)] mod rate_limit_tests;
+#[cfg(test)] mod cascade_tests;
+#[cfg(test)] mod acl_tests;
+#[cfg(test)] mod bonus_tests;
+#[cfg(test)] mod batch_cancel_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
