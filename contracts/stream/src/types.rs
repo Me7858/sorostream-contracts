@@ -251,6 +251,20 @@ pub struct Stream {
     /// Optional function signature to invoke on stream completion.
     /// Only used if `on_complete_contract` is set.
     pub on_complete_function: Option<Symbol>,
+
+    // ── Ramp-up mode ────────────────────────────────────────────────────────
+
+    /// Optional ramp-up duration in ledgers.
+    /// During this period, the effective flow rate increases linearly from 0 to the
+    /// configured target flow_rate. After this period, the stream proceeds at full rate.
+    /// 0 means no ramp-up (immediate full rate).
+    pub ramp_duration: u64,
+
+    // ── Pause ledger recording ──────────────────────────────────────────────
+
+    /// Ledger number when the stream was paused (0 if never paused).
+    /// Used to calculate correct accrual on resume (subtract pause duration).
+    pub pause_ledger: u64,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
