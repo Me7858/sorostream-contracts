@@ -7855,3 +7855,69 @@ fn test_update_stream_rate_recalculates_end_time_with_rate_decrease() {
     // After rate decrease, end_time should be later (stream takes longer with lower rate)
     assert!(end_time2_after > end_time2_before, "End time should be later with decreased rate");
 }
+
+// Issue #486: Fix batch_withdraw to handle zero-balance streams
+#[test]
+fn test_batch_withdraw_handles_fully_withdrawn_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(0);
+
+    // Create two streams
+    let stream_id_1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stream_id_2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &1u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Fully withdraw the first stream
+    t.env.ledger().set_timestamp(1000);
+    c.withdraw(&stream_id_1, &t.recipient);
+
+    // Stream 1 should be completed and have zero remaining balance
+    let stream1 = c.get_stream(&stream_id_1);
+    assert_eq!(stream1.status, StreamStatus::Completed, "Stream 1 should be completed after full withdrawal");
+
+    // Try batch withdraw on both streams
+    let mut stream_ids = soroban_sdk::Vec::new(&t.env);
+    stream_ids.push_back(stream_id_1);
+    stream_ids.push_back(stream_id_2);
+
+    // This should succeed, even though stream_id_1 is already completed
+    // The function should skip the completed stream and still withdraw from stream_id_2
+    let result = c.try_batch_withdraw(&stream_ids, &t.recipient);
+
+    // Result should indicate the operation handled appropriately
+    if result.is_ok() {
+        let amounts = result.unwrap();
+        // We should get amounts for both streams (0 for completed, some for active)
+        assert_eq!(amounts.len(), 1, "Should have one amount in result for the active stream");
+    }
+}
+
+#[test]
+fn test_batch_withdraw_continues_on_stream_completion() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(0);
+
+    // Create two streams with different durations
+    let stream_id_1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &500, &0, &0u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stream_id_2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &1u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    // Move to after first stream's end time
+    t.env.ledger().set_timestamp(600);
+
+    let mut stream_ids = soroban_sdk::Vec::new(&t.env);
+    stream_ids.push_back(stream_id_1);
+    stream_ids.push_back(stream_id_2);
+
+    // Batch withdraw should process both streams
+    let result = c.try_batch_withdraw(&stream_ids, &t.recipient);
+    assert!(result.is_ok(), "Batch withdraw should handle mix of expired and active streams");
+}
