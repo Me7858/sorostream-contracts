@@ -7754,3 +7754,47 @@ fn test_split_stream_closes_parent_stream() {
     assert_eq!(child_stream1.deposit, 500_000);
     assert_eq!(child_stream2.deposit, 500_000);
 }
+
+// Issue #490: getStream returns Completed status when stream deposit is fully exhausted
+#[test]
+fn test_exhausted_stream_shows_completed_status() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1000 stroops deposit and 100 stroop/sec flow rate
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1000,
+        &100,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Verify initial status is Active
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // Advance time to allow full amount to be claimable (10 seconds for 1000 stroops at 100/sec)
+    t.env.ledger().set_timestamp(10);
+
+    // Withdraw all available amount
+    c.withdraw(&stream_id, &t.recipient);
+
+    // Check the stream status - should be Completed after full exhaustion
+    let stream_after = c.get_stream(&stream_id);
+    assert_eq!(
+        stream_after.status,
+        StreamStatus::Completed,
+        "Stream should show Completed status when deposit is fully exhausted"
+    );
+}
