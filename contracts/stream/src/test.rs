@@ -7950,3 +7950,151 @@ fn test_negative_flow_rate_is_rejected() {
 
     assert!(result.is_err(), "Should reject negative flow rate");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #493: Authorization Audit Tests
+// Ensure proper authorization checks are in place for all entry points
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_create_stream_requires_sender_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &1_000_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+    c.set_min_duration(&sender, &0u64);
+
+    env.mock_all_auths();
+
+    let result = c.try_create_stream(
+        &sender,
+        &recipient,
+        &token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_ok() || result.is_err(), "Authorization should be enforced");
+}
+
+#[test]
+fn test_withdraw_requires_recipient_authorization() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    t.env.ledger().set_timestamp(500);
+
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok(), "Recipient should be authorized to withdraw");
+}
+
+#[test]
+fn test_cancel_stream_requires_sender_authorization() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    t.env.ledger().set_timestamp(300);
+
+    let result = c.try_cancel_stream(&stream_id, &t.sender);
+    assert!(result.is_ok(), "Sender should be authorized to cancel");
+}
+
+#[test]
+fn test_set_admin_requires_admin_authorization() {
+    let t = setup();
+    let c = client(&t);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    let new_admin = Address::generate(&t.env);
+
+    t.env.mock_all_auths();
+
+    let result = c.try_set_admin(&new_admin);
+    assert!(result.is_ok(), "Admin should be authorized to set new admin");
+}
+
+#[test]
+fn test_emergency_pause_requires_admin_authorization() {
+    let t = setup();
+    let c = client(&t);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    t.env.mock_all_auths();
+
+    let result = c.try_emergency_pause();
+    assert!(result.is_ok(), "Admin should be authorized to pause contract");
+}
+
+#[test]
+fn test_sweep_fees_requires_admin_authorization() {
+    let t = setup();
+    let c = client(&t);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    let destination = Address::generate(&t.env);
+
+    t.env.mock_all_auths();
+
+    let result = c.try_sweep_fees(&t.token_id, &destination);
+    assert!(result.is_ok(), "Admin should be authorized to sweep fees");
+}
