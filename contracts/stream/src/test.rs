@@ -7689,8 +7689,117 @@ fn test_batch_create_multi_token_balance_check() {
     );
     
     assert!(result.is_err(), "Batch should fail due to insufficient token2 balance");
-    
+
     // No streams should be created
     let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
     assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #496: Address Validation Tests
+// Ensure comprehensive address validation across all entry points
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_reject_zero_recipient_address_on_create_stream() {
+    let t = setup();
+    let c = client(&t);
+
+    let zero_address = Address::from_contract_id(&t.env, &BytesN::<32>::from_array(&t.env, &[0u8; 32]));
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &zero_address,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject zero address as recipient");
+}
+
+#[test]
+fn test_reject_contract_own_address_as_recipient() {
+    let t = setup();
+    let c = client(&t);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.contract_id,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject contract address as recipient");
+}
+
+#[test]
+fn test_reject_sender_as_recipient() {
+    let t = setup();
+    let c = client(&t);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.sender,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject sender as recipient");
+}
+
+#[test]
+fn test_reject_invalid_token_address() {
+    let t = setup();
+    let c = client(&t);
+
+    let invalid_token = Address::generate(&t.env);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &invalid_token,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject invalid token address");
 }
