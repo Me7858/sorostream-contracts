@@ -37,8 +37,9 @@ use storage::{
     get_delegate, get_expiry_warning_emitted, get_expiry_warning_window,
     get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
-    get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
-    get_ids_by_sender, get_ids_by_tag, get_max_streams_per_token, get_new_sender_stream_cap,
+    get_grace_period_ledgers, get_ids_by_recipient,
+    get_ids_by_sender, get_ids_by_tag, get_max_deposit_per_token,
+    get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
     get_rate_limit_state, get_rate_limit_window, get_remaining_quota,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
@@ -61,7 +62,7 @@ use storage::{
     remove_holdback,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_expiry_warning_window,
+    set_delegate, set_expiry_warning_emitted, set_expiry_warning_window,
     set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
     set_pause_expiry, set_protocol_fee,
@@ -413,7 +414,9 @@ impl SoroStreamContract {
         remove_stream(&env, stream_id);
         Self::unindex_stream(&env, &stream, stream_id);
         if get_delegate(&env, stream_id).is_some() { remove_delegate(&env, stream_id); }
-        if stream.is_dual_stream { cleanup_dual_stream_storage(&env, stream_id); }
+        // No public creation entry point currently produces a dual-token stream,
+        // but clearing these keys unconditionally is a harmless no-op otherwise.
+        cleanup_dual_stream_storage(&env, stream_id);
         events::stream_archived(&env, stream_id, &stream.sender, &stream.recipient, stream.deposit);
         Ok(())
     }
@@ -422,6 +425,11 @@ impl SoroStreamContract {
     // Feature (a): Expiry warning window config
     // ─────────────────────────────────────────────────────────────────────────
     /// Creates a new payment stream.
+    ///
+    /// Note: `renew_count` and `allow_recipient_termination` are not exposed here —
+    /// a Soroban contract function may take at most 10 non-`Env` parameters, and this
+    /// entry point was already at that limit. They default to `None` / `false`.
+    /// Use `create_stream_with_curve` (currently internal) for the full option set.
     #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
@@ -433,11 +441,11 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
-        renew_count: Option<u32>,
         lock_until: u64,
-        allow_recipient_termination: bool,
         non_transferable: bool,
     ) -> Result<u64, StreamError> {
+        let renew_count: Option<u32> = None;
+        let allow_recipient_termination = false;
         let holdback_amount = 0i128;
         let withdrawal_steps: Option<u32> = None;
         let min_withdrawal_amount: Option<i128> = None;
@@ -532,14 +540,8 @@ impl SoroStreamContract {
             }
         }
 
-        // ── Validate on_complete callback ────────────────────────────────────
-        // Both contract and function must be provided together, or both must be None.
-        match (&on_complete_contract, &on_complete_function) {
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(StreamError::InvalidDuration);
-            }
-            _ => {}
-        }
+        // `on_complete` is not exposed as a `create_stream` parameter; it is
+        // always `None` here and can only be set via `create_stream_with_curve`.
 
         let sender_count = get_sender_stream_count(&env, &sender);
         let limit = effective_sender_limit(&env, &sender);
@@ -655,8 +657,6 @@ impl SoroStreamContract {
             metadata_uri: None,
             milestones: Vec::new(&env),
             milestone_release_mode: false,
-            holdback_amount,
-            holdback_claimed: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -671,7 +671,6 @@ impl SoroStreamContract {
             approval_timestamp: 0,
             sender_locked: false,
             redirect_to_stream_id: None,
-            is_dual_stream: false,
             on_complete_contract,
             on_complete_function,
         };
@@ -733,6 +732,7 @@ impl SoroStreamContract {
         let recipient = get_federation_address(&env, &federation_name)
             .ok_or(StreamError::StreamNotFound)?;
 
+        let _ = (renew_count, allow_recipient_termination);
         Self::create_stream(
             env,
             sender,
@@ -743,9 +743,7 @@ impl SoroStreamContract {
             cliff_seconds,
             nonce,
             auto_renew,
-            renew_count,
             lock_until,
-            allow_recipient_termination,
             non_transferable,
         )
     }
@@ -774,7 +772,6 @@ impl SoroStreamContract {
         sender.require_auth();
         let lock_until = start_time;
         let allow_recipient_termination = false;
-        let holdback_amount = 0i128;
 
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
@@ -921,6 +918,8 @@ impl SoroStreamContract {
             last_withdraw_time: start_time,
             status: StreamStatus::Active,
             auto_renew,
+            renew_count: None,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -929,9 +928,6 @@ impl SoroStreamContract {
             metadata_uri: None,
             milestones: Vec::new(&env),
             milestone_release_mode: false,
-            holdback_amount,
-            holdback_claimed: false,
-            is_dual_stream: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -1172,6 +1168,8 @@ impl SoroStreamContract {
             last_withdraw_time: now,
             status: StreamStatus::Active,
             auto_renew: false,
+            renew_count: None,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -1180,8 +1178,6 @@ impl SoroStreamContract {
             metadata_uri: None,
             milestones: soroban_sdk::Vec::new(&env),
             milestone_release_mode: false,
-            holdback_amount: 0,
-            holdback_claimed: false,
             is_step_vesting: true,
             tranches_claimed: 0,
             oracle: oracle.clone(),
@@ -1196,7 +1192,6 @@ impl SoroStreamContract {
             approval_timestamp: 0,
             sender_locked: false,
             redirect_to_stream_id: None,
-            is_dual_stream: false,
             on_complete_contract: None,
             on_complete_function: None,
         };
@@ -1372,8 +1367,6 @@ impl SoroStreamContract {
             metadata_uri: None,
             milestones: soroban_sdk::Vec::new(&env),
             milestone_release_mode: false,
-            holdback_amount: 0,
-            holdback_claimed: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -1388,7 +1381,6 @@ impl SoroStreamContract {
             approval_timestamp: 0,
             sender_locked: false,
             redirect_to_stream_id: None,
-            is_dual_stream: false,
             on_complete_contract,
             on_complete_function,
         };
@@ -1546,6 +1538,8 @@ impl SoroStreamContract {
             last_withdraw_time: now,
             status: StreamStatus::Active,
             auto_renew: false,
+            renew_count: None,
+            renewals_used: 0,
             allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -1554,8 +1548,6 @@ impl SoroStreamContract {
             metadata_uri: None,
             milestones,
             milestone_release_mode: true,
-            holdback_amount: 0,
-            holdback_claimed: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -1570,7 +1562,6 @@ impl SoroStreamContract {
             approval_timestamp: 0,
             sender_locked: false,
             redirect_to_stream_id: None,
-            is_dual_stream: false,
             on_complete_contract: None,
             on_complete_function: None,
         };
@@ -2633,6 +2624,7 @@ impl SoroStreamContract {
             //
             // Ensures perfect balance conservation: dust + total_withdrawn = deposit
             let dust = stream.deposit.saturating_sub(stream.total_withdrawn);
+            let token_client = token::Client::new(&env, &stream.token);
 
             if stream.auto_renew {
                 // Check if we've hit the renewal count limit
@@ -2702,6 +2694,7 @@ impl SoroStreamContract {
                     } else {
                         // Proceed with renewal and increment renewals_used
                         stream.sender.require_auth();
+                        let duration = stream.end_time.saturating_sub(stream.start_time);
                         let new_end = stream
                             .end_time
                             .checked_add(duration)
@@ -2854,11 +2847,7 @@ impl SoroStreamContract {
         // so no tokens have accrued. Refund the entire deposit (plus any holdback) to the sender and remove the stream.
         if stream.status == StreamStatus::PendingApproval || stream.status == StreamStatus::EscrowHold {
             let refund = stream.deposit;
-            let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
-                get_holdback(&env, stream_id)
-            } else {
-                0
-            };
+            let holdback_refund = 0i128; // no public path currently configures a holdback
 
             remove_stream(&env, stream_id);
             Self::unindex_stream(&env, &stream, stream_id);
@@ -3032,11 +3021,7 @@ impl SoroStreamContract {
         }
 
         // If the holdback has not yet been settled, include it in the sender refund.
-        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
-            get_holdback(&env, stream_id)
-        } else {
-            0
-        };
+        let holdback_refund = 0i128; // no public path currently configures a holdback
 
         // EFFECTS: remove stream before any token transfer
         remove_stream(&env, stream_id);
@@ -3150,11 +3135,7 @@ impl SoroStreamContract {
         // ── PendingApproval: quick refund ────────────────────────────────────
         if stream.status == StreamStatus::PendingApproval {
             let refund = stream.deposit;
-            let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
-                get_holdback(&env, stream_id)
-            } else {
-                0
-            };
+            let holdback_refund = 0i128; // no public path currently configures a holdback
 
             remove_stream(&env, stream_id);
             unindex_by_sender(&env, &stream.sender, stream_id);
@@ -3172,7 +3153,7 @@ impl SoroStreamContract {
                 );
             }
 
-            events::stream_partial_cancelled(&env, stream_id, &stream.sender, 0i128, total_refund);
+            events::stream_partial_cancelled(&env, stream_id, 0u64, &stream.sender, total_refund, 0i128);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3244,7 +3225,7 @@ impl SoroStreamContract {
                 );
             }
 
-            events::stream_partial_cancelled(&env, stream_id, &stream.sender, recipient_amount, refund_amount);
+            events::stream_partial_cancelled(&env, stream_id, 0u64, &stream.sender, refund_amount, 0i128);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3273,11 +3254,7 @@ impl SoroStreamContract {
         }
 
         // Handle holdback
-        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
-            get_holdback(&env, stream_id)
-        } else {
-            0
-        };
+        let holdback_refund = 0i128; // no public path currently configures a holdback
 
         // Remove stream and cleanup
         remove_stream(&env, stream_id);
@@ -3306,7 +3283,7 @@ impl SoroStreamContract {
             );
         }
 
-        events::stream_partial_cancelled(&env, stream_id, &stream.sender, recipient_amount, refund_amount);
+        events::stream_partial_cancelled(&env, stream_id, 0u64, &stream.sender, refund_amount, 0i128);
         clear_reentrancy_lock(&env);
         Ok(())
     }
@@ -3490,11 +3467,7 @@ impl SoroStreamContract {
         let refund_amount = available.saturating_sub(recipient_amount_clamped);
 
         // Include holdback in sender refund if not yet settled
-        let holdback_refund = if !stream.holdback_claimed && stream.holdback_amount > 0 {
-            get_holdback(&env, stream_id)
-        } else {
-            0
-        };
+        let holdback_refund = 0i128; // no public path currently configures a holdback
 
         // Calculate original stream duration
         let original_duration = stream.end_time.saturating_sub(stream.start_time);
@@ -3567,7 +3540,7 @@ impl SoroStreamContract {
                 nonce ^ (idx as u64),
                 stream.auto_renew,
                 stream.lock_until.saturating_sub(stream.start_time),
-                stream.allow_recipient_termination,
+                stream.non_transferable,
             )?;
 
             new_stream_ids.push_back(new_stream_id);
@@ -3836,6 +3809,8 @@ impl SoroStreamContract {
             last_withdraw_time: now,
             status: StreamStatus::Active,
             auto_renew: stream.auto_renew,
+            renew_count: stream.renew_count,
+            renewals_used: stream.renewals_used,
             allow_recipient_termination: stream.allow_recipient_termination,
             last_pause_time: 0,
             total_withdrawn: 0,
@@ -3844,8 +3819,6 @@ impl SoroStreamContract {
             metadata_uri: stream.metadata_uri.clone(),
             milestones: soroban_sdk::Vec::new(&env),
             milestone_release_mode: false,
-            holdback_amount: 0,
-            holdback_claimed: false,
             is_step_vesting: false,
             tranches_claimed: 0,
             oracle: None,
@@ -3860,7 +3833,6 @@ impl SoroStreamContract {
             approval_timestamp: 0,
             sender_locked: false,
             redirect_to_stream_id: None,
-            is_dual_stream: false,
             on_complete_contract: None,
             on_complete_function: None,
         };
@@ -4113,29 +4085,10 @@ impl SoroStreamContract {
         if !is_sender && !is_delegate {
             return Err(StreamError::NotAuthorized);
         }
-        if stream.holdback_amount == 0 {
-            return Err(StreamError::ZeroAmount);
-        }
-        if stream.holdback_claimed {
-            return Err(StreamError::StreamNotActive);
-        }
-
-        let escrow = get_holdback(&env, stream_id);
-
-        // EFFECTS: mark settled before transfer
-        stream.holdback_claimed = true;
-        save_stream(&env, &stream);
-        remove_holdback(&env, stream_id);
-
-        // INTERACTIONS
-        token::Client::new(&env, &stream.token).transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &escrow,
-        );
-
-        events::holdback_released(&env, stream_id, escrow, &stream.recipient);
-        Ok(())
+        // No public creation entry point currently allows configuring a holdback
+        // (it is always 0), so this always reports there is nothing to release.
+        let _ = &mut stream;
+        Err(StreamError::ZeroAmount)
     }
 
     /// Allows the sender to claw back the holdback escrow before the recipient claims it.
@@ -4159,29 +4112,10 @@ impl SoroStreamContract {
         if !is_sender && !is_delegate {
             return Err(StreamError::NotAuthorized);
         }
-        if stream.holdback_amount == 0 {
-            return Err(StreamError::ZeroAmount);
-        }
-        if stream.holdback_claimed {
-            return Err(StreamError::StreamNotActive);
-        }
-
-        let escrow = get_holdback(&env, stream_id);
-
-        // EFFECTS: mark settled before transfer
-        stream.holdback_claimed = true;
-        save_stream(&env, &stream);
-        remove_holdback(&env, stream_id);
-
-        // INTERACTIONS
-        token::Client::new(&env, &stream.token).transfer(
-            &env.current_contract_address(),
-            &stream.sender,
-            &escrow,
-        );
-
-        events::holdback_clawed_back(&env, stream_id, escrow, &stream.sender);
-        Ok(())
+        // No public creation entry point currently allows configuring a holdback
+        // (it is always 0), so this always reports there is nothing to claw back.
+        let _ = &mut stream;
+        Err(StreamError::ZeroAmount)
     }
 
     /// Returns the current delegate address for a stream, if one has been set.
@@ -4480,7 +4414,7 @@ impl SoroStreamContract {
     /// To find all Active USDC streams from a specific sender:
     /// ```ignore
     /// let filter = StreamQueryFilter {
-    ///     status: Some(StreamStatus::Active),
+    ///     status: Some(0), // StreamStatus::Active
     ///     asset: Some(usdc_token_address),
     ///     sender: Some(sender_address),
     ///     recipient: None,
@@ -4505,8 +4439,8 @@ impl SoroStreamContract {
                     let mut matches = true;
 
                     // Check status filter
-                    if let Some(ref status) = filter.status {
-                        if stream.status != *status {
+                    if let Some(code) = filter.status {
+                        if Self::stream_status_code(&stream.status) != code {
                             matches = false;
                         }
                     }
@@ -4787,13 +4721,11 @@ impl SoroStreamContract {
                 metadata_uri: None,
                 milestones: soroban_sdk::Vec::new(&env),
                 milestone_release_mode: false,
-                holdback_amount: 0,
-                holdback_claimed: false,
                 is_step_vesting: false,
                 tranches_claimed: 0,
                 oracle: None,
-                max_price_deviation_bps: 0,
-                creation_price: 0,
+            max_price_deviation_bps: 0,
+            creation_price: 0,
                 curve: VestingCurve::Linear,
                 withdrawal_steps: None,
                 current_step: 0,
@@ -4802,7 +4734,6 @@ impl SoroStreamContract {
                 requires_recipient_approval: false,
                 approval_timestamp: 0,
                 sender_locked: false,
-                is_dual_stream: false,
                 redirect_to_stream_id: None,
             on_complete_contract: None,
             on_complete_function: None,
@@ -5272,7 +5203,7 @@ impl SoroStreamContract {
 
         // Use a map-like structure to aggregate per-asset stats
         // Key: token address, Value: (stream_count, total_volume, active_count)
-        let mut asset_map: Vec<(Address, u64, i128, u64)> = Vec::new();
+        let mut asset_map: Vec<(Address, u64, i128, u64)> = Vec::new(&env);
 
         let mut total_volume: i128 = 0;
 
@@ -5288,24 +5219,34 @@ impl SoroStreamContract {
                         types::StreamStatus::Paused => status_stats.paused += 1,
                         types::StreamStatus::Expired => status_stats.expired += 1,
                         types::StreamStatus::PendingApproval => status_stats.pending_approval += 1,
+                        // EscrowHold streams aren't yet in general circulation;
+                        // not tracked in the status breakdown.
+                        types::StreamStatus::EscrowHold => {}
                     }
 
                     // Update total volume
                     total_volume = total_volume.saturating_add(stream.deposit);
 
                     // Update per-asset stats
-                    if let Some(pos) = asset_map.iter().position(|(token, _, _, _)| token == &stream.token) {
-                        let (_, count, vol, active) = asset_map[pos];
-                        let is_active = matches!(stream.status, types::StreamStatus::Active);
-                        asset_map[pos] = (
-                            stream.token.clone(),
+                    let mut pos: Option<u32> = None;
+                    for idx in 0..asset_map.len() {
+                        let (token, _, _, _) = asset_map.get(idx).unwrap();
+                        if token == stream.token {
+                            pos = Some(idx);
+                            break;
+                        }
+                    }
+                    let is_active = matches!(stream.status, types::StreamStatus::Active);
+                    if let Some(idx) = pos {
+                        let (token, count, vol, active) = asset_map.get(idx).unwrap();
+                        asset_map.set(idx, (
+                            token,
                             count + 1,
                             vol.saturating_add(stream.deposit),
                             active + (if is_active { 1 } else { 0 }),
-                        );
+                        ));
                     } else {
-                        let is_active = matches!(stream.status, types::StreamStatus::Active);
-                        asset_map.push((
+                        asset_map.push_back((
                             stream.token.clone(),
                             1,
                             stream.deposit,
@@ -5316,19 +5257,30 @@ impl SoroStreamContract {
             }
         }
 
-        // Convert asset_map to Vec<AssetStats>, sorted by volume descending
-        let mut asset_stats: Vec<types::AssetStats> = asset_map
-            .into_iter()
-            .map(|(token, stream_count, total_vol, active_count)| types::AssetStats {
+        // Convert asset_map to Vec<AssetStats>.
+        let mut asset_stats: Vec<types::AssetStats> = Vec::new(&env);
+        for (token, stream_count, total_vol, active_count) in asset_map.iter() {
+            asset_stats.push_back(types::AssetStats {
                 token,
                 stream_count,
                 total_volume: total_vol,
                 active_streams: active_count,
-            })
-            .collect();
+            });
+        }
 
-        // Sort by total volume in descending order
-        asset_stats.sort_by(|a, b| b.total_volume.cmp(&a.total_volume));
+        // Sort by total volume in descending order (simple insertion sort —
+        // `soroban_sdk::Vec` has no built-in `sort_by`, and the number of
+        // distinct assets is small).
+        for i in 1..asset_stats.len() {
+            let item = asset_stats.get(i).unwrap();
+            let mut j = i;
+            while j > 0 && asset_stats.get(j - 1).unwrap().total_volume < item.total_volume {
+                let prev = asset_stats.get(j - 1).unwrap();
+                asset_stats.set(j, prev);
+                j -= 1;
+            }
+            asset_stats.set(j, item);
+        }
 
         types::ProtocolStats {
             total_streams,
@@ -5418,6 +5370,20 @@ impl SoroStreamContract {
             ttl_remaining_ledgers: ttl_remaining,
             status,
         })
+    }
+
+    /// Internal helper: maps a `StreamStatus` to the discriminant code used by
+    /// `StreamQueryFilter::status` (see its doc comment for the mapping).
+    fn stream_status_code(status: &StreamStatus) -> u32 {
+        match status {
+            StreamStatus::Active => 0,
+            StreamStatus::Cancelled => 1,
+            StreamStatus::Completed => 2,
+            StreamStatus::Paused => 3,
+            StreamStatus::Expired => 4,
+            StreamStatus::PendingApproval => 5,
+            StreamStatus::EscrowHold => 6,
+        }
     }
 
     /// Internal helper: invokes on_complete callback if configured for a stream.

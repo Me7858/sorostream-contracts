@@ -140,11 +140,6 @@ pub struct Stream {
     pub milestone_release_mode: bool,
     /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
     pub locked: bool,
-    /// Optional holdback amount kept in escrow until explicitly released (in stroops).
-    /// Deducted from the streaming portion at creation time.
-    pub holdback_amount: i128,
-    /// Whether the holdback has been settled (released to recipient or clawed back to sender).
-    pub holdback_claimed: bool,
 
     // ── Step-vesting (tranche) fields ────────────────────────────────────────
 
@@ -240,8 +235,6 @@ pub struct Stream {
 
     /// Optional redirect target stream ID.
     pub redirect_to_stream_id: Option<u64>,
-    /// Whether this stream is a dual-token stream.
-    pub is_dual_stream: bool,
 
     // ── On-complete callback (composable DeFi) ──────────────────────────────
 
@@ -252,6 +245,7 @@ pub struct Stream {
     /// Only used if `on_complete_contract` is set.
     pub on_complete_function: Option<Symbol>,
 }
+
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
 ///
@@ -417,8 +411,16 @@ pub struct AdminOverrideRequest {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct StreamQueryFilter {
-    /// Optional status filter. If set, only streams with this status are returned.
-    pub status: Option<StreamStatus>,
+    /// Optional status filter, as a `StreamStatus` discriminant code
+    /// (`Active`=0, `Cancelled`=1, `Completed`=2, `Paused`=3, `Expired`=4,
+    /// `PendingApproval`=5, `EscrowHold`=6). If set, only streams with this
+    /// status are returned.
+    ///
+    /// Stored as a raw code rather than `Option<StreamStatus>` because
+    /// `Option<T>` for a custom `#[contracttype]` enum does not round-trip
+    /// through `ScVal` in this soroban-sdk version when nested inside another
+    /// `#[contracttype]` struct field.
+    pub status: Option<u32>,
     /// Optional asset (token) filter. If set, only streams using this token are returned.
     pub asset: Option<Address>,
     /// Optional sender filter. If set, only streams created by this address are returned.
