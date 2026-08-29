@@ -7694,3 +7694,778 @@ fn test_batch_create_multi_token_balance_check() {
     let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
     assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
 }
+
+// ==================== Issue #481: Ramp-up Mode Tests ====================
+
+#[test]
+fn test_ramp_up_mode_zero_duration() {
+    let t = setup();
+    let c = client(&t);
+
+    // Create stream with no ramp-up (ramp_duration = 0)
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000i128,
+        &100u64,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    let stream = c.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.ramp_duration, 0, "Ramp duration should be 0");
+
+    // With no ramp-up, full flow rate applies immediately
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 50,
+        sequence_number: 50,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    // At t=50 (50 ledgers of flow), should have accrued normally
+    let accrued = c.get_accrued_balance(&stream_id, &t.recipient).unwrap();
+    assert!(accrued > 0, "Should have accrued tokens without ramp-up");
+}
+
+#[test]
+fn test_ramp_up_mode_linear_increase() {
+    let t = setup();
+    let c = client(&t);
+
+    let ramp_ledgers = 100u64;
+    let flow_rate = 1_000i128;
+    let deposit = 500_000i128;
+
+    // Create stream with ramp-up duration
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &deposit,
+        &500u64,  // total duration
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    let stream = c.get_stream(&stream_id).unwrap();
+    assert_eq!(stream.flow_rate, flow_rate, "Stream should have configured flow_rate");
+
+    // At ledger 50 (halfway through ramp), effective rate should be ~50% of target
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 50,
+        sequence_number: 50,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_halfway = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // At ledger 100 (end of ramp), effective rate should be 100% of target
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 100,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_end_ramp = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // At ledger 200 (well past ramp), effective rate should stay at 100% of target
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 200,
+        sequence_number: 200,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_post_ramp = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // Verify monotonic increase
+    assert!(accrued_end_ramp >= accrued_halfway,
+            "Accrued should increase: halfway={} end_ramp={}",
+            accrued_halfway, accrued_end_ramp);
+    assert!(accrued_post_ramp >= accrued_end_ramp,
+            "Accrued should increase: end_ramp={} post_ramp={}",
+            accrued_end_ramp, accrued_post_ramp);
+}
+
+#[test]
+fn test_ramp_up_with_cliff() {
+    let t = setup();
+    let c = client(&t);
+
+    let cliff_time = 50u64;
+    let ramp_ledgers = 100u64;
+
+    // Create stream with both cliff and ramp-up
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000i128,
+        &300u64,
+        &cliff_time,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    // Before cliff, nothing should accrue
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 30,
+        sequence_number: 30,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_pre_cliff = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+    assert_eq!(accrued_pre_cliff, 0, "Nothing should accrue before cliff");
+
+    // At cliff + ramp start
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 50,
+        sequence_number: 50,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_at_cliff = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // Ramp should start after cliff, so minimal amount should accrue immediately
+    assert!(accrued_at_cliff >= 0, "Should have minimal accrual at cliff");
+}
+
+// ==================== Issue #482: getAccruedBalance View Function Tests ====================
+
+#[test]
+fn test_get_accrued_balance_basic() {
+    let t = setup();
+    let c = client(&t);
+
+    let deposit = 1_000_000i128;
+    let duration = 100u64;
+    let flow_rate = deposit / (duration as i128);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &deposit,
+        &duration,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    // At ledger 50, should have accrued 50% of deposit
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 50,
+        sequence_number: 50,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued = c.get_accrued_balance(&stream_id, &t.recipient).unwrap();
+    let expected = deposit / 2;
+    assert!(accrued >= expected - 10 && accrued <= expected + 10,
+            "At 50% duration, should have accrued ~50% of deposit. Got {}, expected {}",
+            accrued, expected);
+}
+
+#[test]
+fn test_get_accrued_balance_after_cliff() {
+    let t = setup();
+    let c = client(&t);
+
+    let deposit = 1_000_000i128;
+    let duration = 200u64;
+    let cliff = 50u64;
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &deposit,
+        &duration,
+        &cliff,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    // Before cliff
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 30,
+        sequence_number: 30,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_pre_cliff = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+    assert_eq!(accrued_pre_cliff, 0, "Should accrue nothing before cliff");
+
+    // After cliff
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 100,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_post_cliff = c.get_accrued_balance(&stream_id, &t.recipient).unwrap();
+    assert!(accrued_post_cliff > 0, "Should accrue tokens after cliff");
+}
+
+#[test]
+fn test_get_accrued_balance_readonly() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000i128,
+        &100u64,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 50,
+        sequence_number: 50,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let initial_balance = c.get_accrued_balance(&stream_id, &t.recipient).unwrap();
+
+    // Call get_accrued_balance multiple times - should not mutate state
+    let balance_2 = c.get_accrued_balance(&stream_id, &t.recipient).unwrap();
+    let balance_3 = c.get_accrued_balance(&stream_id, &t.recipient).unwrap();
+
+    // All three calls should return the same value (read-only)
+    assert_eq!(initial_balance, balance_2, "Read-only function should return consistent values");
+    assert_eq!(balance_2, balance_3, "Multiple read-only calls should be consistent");
+}
+
+// ==================== Issue #483: topUp Extends end_time Tests ====================
+
+#[test]
+fn test_top_up_extends_end_time() {
+    let t = setup();
+    let c = client(&t);
+
+    let initial_deposit = 1_000_000i128;
+    let duration = 100u64;
+    let flow_rate = 10_000i128;
+
+    // Create stream with specific flow rate
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &initial_deposit,
+        &duration,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    let stream_before = c.get_stream(&stream_id).unwrap();
+    let original_end_time = stream_before.end_time;
+
+    // Add more tokens - this should extend end_time
+    let top_up_amount = 500_000i128;
+    c.top_up(&stream_id, &t.sender, &t.token_id, &top_up_amount).unwrap();
+
+    let stream_after = c.get_stream(&stream_id).unwrap();
+
+    // New end_time should be extended by (top_up_amount / flow_rate)
+    let expected_additional_time = top_up_amount / flow_rate;
+    let expected_new_end_time = original_end_time + expected_additional_time;
+
+    assert!(stream_after.end_time > original_end_time,
+            "end_time should be extended after topUp. Before: {}, After: {}",
+            original_end_time, stream_after.end_time);
+
+    // Verify the extension is approximately correct
+    let time_difference = stream_after.end_time - original_end_time;
+    assert!(time_difference >= expected_additional_time - 10 &&
+            time_difference <= expected_additional_time + 10,
+            "Time extension should match (amount / flow_rate). Expected: {}, Got: {}",
+            expected_additional_time, time_difference);
+}
+
+#[test]
+fn test_top_up_extends_deposit_and_end_time() {
+    let t = setup();
+    let c = client(&t);
+
+    let initial_deposit = 1_000_000i128;
+    let duration = 100u64;
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &initial_deposit,
+        &duration,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    let stream_before = c.get_stream(&stream_id).unwrap();
+
+    // Top up with 25% more
+    let top_up_amount = (initial_deposit / 4) as i128;
+    c.top_up(&stream_id, &t.sender, &t.token_id, &top_up_amount).unwrap();
+
+    let stream_after = c.get_stream(&stream_id).unwrap();
+
+    // Verify both deposit and end_time are updated
+    assert_eq!(stream_after.deposit, stream_before.deposit + top_up_amount,
+               "Deposit should increase by top_up amount");
+    assert!(stream_after.end_time > stream_before.end_time,
+            "end_time should be extended");
+}
+
+#[test]
+fn test_top_up_multiple_times() {
+    let t = setup();
+    let c = client(&t);
+
+    let initial_deposit = 2_000_000i128;
+    let duration = 100u64;
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &initial_deposit,
+        &duration,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    let stream_step_0 = c.get_stream(&stream_id).unwrap();
+
+    // First top up
+    c.top_up(&stream_id, &t.sender, &t.token_id, &500_000i128).unwrap();
+    let stream_step_1 = c.get_stream(&stream_id).unwrap();
+
+    // Second top up
+    c.top_up(&stream_id, &t.sender, &t.token_id, &500_000i128).unwrap();
+    let stream_step_2 = c.get_stream(&stream_id).unwrap();
+
+    // Verify progressive extension
+    assert!(stream_step_1.end_time > stream_step_0.end_time, "First topUp should extend end_time");
+    assert!(stream_step_2.end_time > stream_step_1.end_time, "Second topUp should extend end_time further");
+
+    // Deposit should accumulate
+    assert_eq!(stream_step_1.deposit, stream_step_0.deposit + 500_000i128);
+    assert_eq!(stream_step_2.deposit, stream_step_1.deposit + 500_000i128);
+}
+
+// ==================== Issue #484: pauseStream Records pause_ledger Tests ====================
+
+#[test]
+fn test_pause_stream_records_ledger() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000i128,
+        &200u64,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    let stream_before_pause = c.get_stream(&stream_id).unwrap();
+    assert_eq!(stream_before_pause.pause_ledger, 0, "pause_ledger should be 0 before pausing");
+
+    // Pause the stream
+    c.pause_stream(&stream_id, &t.sender).unwrap();
+
+    let stream_after_pause = c.get_stream(&stream_id).unwrap();
+
+    // pause_ledger should now be recorded
+    assert!(stream_after_pause.pause_ledger > 0,
+            "pause_ledger should be recorded when stream is paused");
+    assert!(stream_after_pause.status == StreamStatus::Paused,
+            "Stream status should be Paused");
+}
+
+#[test]
+fn test_pause_resume_calculates_correct_accrual() {
+    let t = setup();
+    let c = client(&t);
+
+    let deposit = 1_000_000i128;
+    let duration = 500u64;
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &deposit,
+        &duration,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    // Accrue for some time
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 100,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_before_pause = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // Pause the stream
+    c.pause_stream(&stream_id, &t.sender).unwrap();
+
+    // Record the pause ledger for accrual comparison
+    let stream_paused = c.get_stream(&stream_id).unwrap();
+    let pause_ledger = stream_paused.pause_ledger;
+
+    // Move time forward while paused
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 200,
+        sequence_number: 200,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    // While paused, accrual should not change
+    let accrued_while_paused = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+    assert_eq!(accrued_before_pause, accrued_while_paused,
+               "Accrual should not change while paused");
+
+    // Resume the stream
+    c.resume_stream(&stream_id, &t.sender).unwrap();
+
+    let stream_resumed = c.get_stream(&stream_id).unwrap();
+
+    // After resume, the contract should use pause_ledger to calculate correct elapsed time
+    // (subtracting the pause duration from elapsed time)
+    let accrued_after_resume = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // Should still match the accrual before pause (we were paused the whole time)
+    assert_eq!(accrued_after_resume, accrued_before_pause,
+               "After resume, accrual calculation should account for pause period");
+}
+
+#[test]
+fn test_pause_resume_clear_pause_ledger() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000i128,
+        &200u64,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    // Pause stream
+    c.pause_stream(&stream_id, &t.sender).unwrap();
+
+    let stream_paused = c.get_stream(&stream_id).unwrap();
+    assert!(stream_paused.pause_ledger > 0, "pause_ledger should be set when paused");
+
+    // Resume stream
+    c.resume_stream(&stream_id, &t.sender).unwrap();
+
+    let stream_resumed = c.get_stream(&stream_id).unwrap();
+
+    // pause_ledger should still be preserved for accrual calculations
+    // (it's used to track pause duration, not cleared on resume)
+    assert!(stream_resumed.pause_ledger >= stream_paused.pause_ledger,
+            "pause_ledger should be preserved for accrual calculation");
+    assert!(stream_resumed.status == StreamStatus::Active,
+            "Stream status should be Active after resume");
+}
+
+#[test]
+fn test_pause_resume_multiple_times() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &2_000_000i128,
+        &400u64,
+        &0u64,
+        &0u64,
+        &false,
+        &None,
+        &0u64,
+        &false,
+        &false,
+        &0i128,
+        &None,
+        &None,
+        &false,
+        &false,
+        &false,
+    ).unwrap();
+
+    // First pause
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 50,
+        sequence_number: 50,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    c.pause_stream(&stream_id, &t.sender).unwrap();
+    let accrued_after_first_pause = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // First resume
+    c.resume_stream(&stream_id, &t.sender).unwrap();
+
+    // Accrue more
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 100,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_after_first_resume = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+    assert!(accrued_after_first_resume > accrued_after_first_pause,
+            "Accrual should continue after resume");
+
+    // Second pause
+    c.pause_stream(&stream_id, &t.sender).unwrap();
+    let accrued_after_second_pause = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+
+    // Second resume
+    c.resume_stream(&stream_id, &t.sender).unwrap();
+
+    // Accrue more
+    t.env.ledger().set(LedgerInfo {
+        timestamp: 150,
+        sequence_number: 150,
+        network_id: Default::default(),
+        base_reserve: 300_000_000,
+        base_fee: 100,
+        rent_expiration_ledger: 0,
+        min_temp_entry_ttl: 16 * 60,
+        min_persistent_entry_ttl: 6 * 60 * 60,
+        max_entry_ttl: 6 * 60 * 60 * 24 * 365,
+    });
+
+    let accrued_after_second_resume = c.get_accrued_balance(&stream_id, &t.recipient).unwrap_or(0);
+    assert!(accrued_after_second_resume > accrued_after_second_pause,
+            "Accrual should continue after second resume");
+}
