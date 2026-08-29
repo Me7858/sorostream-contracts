@@ -674,6 +674,8 @@ impl SoroStreamContract {
             is_dual_stream: false,
             on_complete_contract,
             on_complete_function,
+            ramp_duration: 0,
+            pause_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -948,6 +950,8 @@ impl SoroStreamContract {
             redirect_to_stream_id: None,
             on_complete_contract: None,
             on_complete_function: None,
+            ramp_duration: 0,
+            pause_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -1199,6 +1203,8 @@ impl SoroStreamContract {
             is_dual_stream: false,
             on_complete_contract: None,
             on_complete_function: None,
+            ramp_duration: 0,
+            pause_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -1391,6 +1397,8 @@ impl SoroStreamContract {
             is_dual_stream: false,
             on_complete_contract,
             on_complete_function,
+            ramp_duration: 0,
+            pause_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -1573,6 +1581,8 @@ impl SoroStreamContract {
             is_dual_stream: false,
             on_complete_contract: None,
             on_complete_function: None,
+            ramp_duration: 0,
+            pause_ledger: 0,
         };
 
         save_stream(&env, &stream);
@@ -4363,6 +4373,90 @@ impl SoroStreamContract {
         Ok(claimable)
     }
 
+    pub fn get_accrued_balance(env: Env, stream_id: u64, _recipient: Address) -> Result<i128, StreamError> {
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+            return Ok(0);
+        }
+
+        let now = if stream.status == StreamStatus::Paused {
+            stream.last_pause_time
+        } else {
+            env.ledger().timestamp()
+        };
+
+        if now >= stream.end_time && stream.total_withdrawn >= stream.deposit {
+            return Ok(0);
+        }
+
+        if stream.milestone_release_mode {
+            let mut accrued: i128 = 0;
+            for milestone in stream.milestones.iter() {
+                if (now >= milestone.unlock_time && milestone.status == crate::types::MilestoneStatus::Pending)
+                    || milestone.status == crate::types::MilestoneStatus::Released {
+                    accrued = accrued
+                        .checked_add(milestone.amount)
+                        .ok_or(StreamError::Overflow)?;
+                }
+            }
+            return Ok(accrued.max(0));
+        }
+
+        if stream.is_step_vesting {
+            let tranches = load_tranches(&env, stream_id);
+            let mut accrued: i128 = 0;
+            for i in 0..tranches.len() {
+                let t = tranches.get(i).unwrap();
+                if now >= t.unlock_time {
+                    accrued = accrued
+                        .checked_add(t.amount)
+                        .ok_or(StreamError::Overflow)?;
+                } else {
+                    break;
+                }
+            }
+            return Ok(accrued);
+        }
+
+        if now < stream.cliff_time {
+            return Ok(0);
+        }
+
+        let raw = match &stream.curve {
+            VestingCurve::Linear => vesting_math::compute_claimable(
+                stream.flow_rate,
+                now,
+                stream.cliff_time,
+                stream.end_time,
+                stream.start_time,
+            )
+            .ok_or(StreamError::Overflow)?,
+
+            VestingCurve::TimeDecay(decay_factor) => {
+                vesting_math::compute_claimable_decay(
+                    stream.deposit,
+                    stream.start_time,
+                    stream.end_time,
+                    now,
+                    stream.cliff_time,
+                    stream.start_time,
+                    *decay_factor,
+                )
+                .ok_or(StreamError::Overflow)?
+            }
+        };
+
+        let available = stream.deposit.saturating_sub(stream.total_withdrawn);
+        let accrued = raw.min(available);
+
+        if accrued <= DUST_THRESHOLD {
+            return Ok(0);
+        }
+
+        Ok(accrued)
+    }
+
     /// Returns true if `address` is either the sender or recipient of the given stream.
     pub fn is_participant(env: Env, stream_id: u64, address: Address) -> Result<bool, StreamError> {
         let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -4804,9 +4898,11 @@ impl SoroStreamContract {
                 sender_locked: false,
                 is_dual_stream: false,
                 redirect_to_stream_id: None,
-            on_complete_contract: None,
-            on_complete_function: None,
-        };
+                on_complete_contract: None,
+                on_complete_function: None,
+                ramp_duration: 0,
+                pause_ledger: 0,
+            };
 
             save_stream(&env, &stream);
             stream_ids.push_back(stream_id);
