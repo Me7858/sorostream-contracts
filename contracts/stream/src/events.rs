@@ -291,14 +291,6 @@ pub fn creation_fee_collected(env: &Env, fee_amount: i128, treasury: &Address) {
     );
 }
 
-/// Emitted when a creation tax is collected in the stream's deposit token.
-pub fn creation_tax_collected(env: &Env, token: &Address, tax_amount: i128, treasury: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "CreationTaxCollected"),),
-        (token.clone(), tax_amount, treasury.clone()),
-    );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Escrow Hold Events
 // ─────────────────────────────────────────────────────────────────────────────

@@ -20,8 +20,6 @@ const PAUSE_EXPIRES_KEY: &str = "p_exp";
 /// Maximum pause duration in seconds (72 hours). After this the contract auto-unpauses.
 pub const MAX_PAUSE_DURATION: u64 = 72 * 60 * 60;
 const CREATION_FEE_XLM_KEY: &str = "cf_xlm";
-const CREATION_TAX_FLAT_KEY: &str = "ct_flat";
-const CREATION_TAX_BPS_KEY: &str = "ct_bps";
 /// Default maximum start-time offset: 365 days in seconds.
 pub const DEFAULT_MAX_FUTURE_START_OFFSET: u64 = 365 * 24 * 60 * 60;
 const MAX_FUTURE_OFFSET_KEY: &str = "mf_start";
@@ -705,32 +703,6 @@ pub fn set_creation_fee_xlm(env: &Env, fee: i128) {
     env.storage()
         .instance()
         .set(&Symbol::new(env, CREATION_FEE_XLM_KEY), &fee);
-}
-
-pub fn get_creation_tax_flat(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, CREATION_TAX_FLAT_KEY))
-        .unwrap_or(0i128)
-}
-
-pub fn set_creation_tax_flat(env: &Env, tax: i128) {
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, CREATION_TAX_FLAT_KEY), &tax);
-}
-
-pub fn get_creation_tax_bps(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, CREATION_TAX_BPS_KEY))
-        .unwrap_or(0u32)
-}
-
-pub fn set_creation_tax_bps(env: &Env, tax_bps: u32) {
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, CREATION_TAX_BPS_KEY), &tax_bps);
 }
 
 const XLM_TOKEN_KEY: &str = "xlm_tok";
