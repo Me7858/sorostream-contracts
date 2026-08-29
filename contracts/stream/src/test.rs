@@ -7782,3 +7782,76 @@ fn test_create_stream_scheduled_accepts_future_start_time() {
 
     assert!(result.is_ok(), "Should accept stream with start_time in the future");
 }
+
+// Issue #487: Fix update_stream_rate to recalculate end_time
+#[test]
+fn test_update_stream_rate_recalculates_end_time_with_rate_increase() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1000 token deposit and 1000 second duration
+    // Flow rate = 1000 / 1000 = 1 token per second
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &1000, &1000, &0, &0u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stream_before = c.get_stream(&stream_id);
+    let end_time_before = stream_before.end_time;
+
+    t.env.ledger().set_timestamp(500);
+
+    // Increase the rate to 2 tokens per second
+    c.update_stream_rate(&stream_id, &t.sender, &2);
+
+    let stream_after = c.get_stream(&stream_id);
+    let end_time_after = stream_after.end_time;
+
+    // After rate increase, end_time should be earlier (stream finishes faster with higher rate)
+    assert!(end_time_after < end_time_before, "End time should be earlier with increased rate");
+
+    // Remaining balance should be approximately 500 (1000 - 500*1)
+    // With new rate of 2, remaining duration should be ~250 seconds
+    // So new end_time should be around 500 + 250 = 750
+    let expected_end_time_range = (700u64, 800u64);
+    assert!(
+        end_time_after >= expected_end_time_range.0 && end_time_after <= expected_end_time_range.1,
+        "End time should be recalculated based on new rate"
+    );
+}
+
+#[test]
+fn test_update_stream_rate_recalculates_end_time_with_rate_decrease() {
+    let t = setup();
+    let c = client(&t);
+
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1000 token deposit and 1000 second duration
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &1000, &1000, &0, &0u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stream_before = c.get_stream(&stream_id);
+    let end_time_before = stream_before.end_time;
+
+    t.env.ledger().set_timestamp(500);
+
+    // Decrease the rate to 0.5 tokens per second (but since we're using i128, we need to work with integers)
+    // Let's say original rate is 2 tokens/sec (2000/1000), and we decrease to 1 token/sec
+    let stream_id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &2000, &1000, &0, &1u64,
+        &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
+
+    let stream2_before = c.get_stream(&stream_id2);
+    let end_time2_before = stream2_before.end_time;
+
+    t.env.ledger().set_timestamp(250);
+
+    // Decrease the rate to 1 token per second
+    c.update_stream_rate(&stream_id2, &t.sender, &1);
+
+    let stream2_after = c.get_stream(&stream_id2);
+    let end_time2_after = stream2_after.end_time;
+
+    // After rate decrease, end_time should be later (stream takes longer with lower rate)
+    assert!(end_time2_after > end_time2_before, "End time should be later with decreased rate");
+}
