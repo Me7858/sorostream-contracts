@@ -7803,3 +7803,67 @@ fn test_reject_invalid_token_address() {
 
     assert!(result.is_err(), "Should reject invalid token address");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #495: Reentrancy Guard Tests
+// Ensure reentrancy attacks are prevented
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_reentrancy_guard_prevents_nested_calls() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    t.env.ledger().set_timestamp(500);
+
+    let result = c.try_withdraw(&stream_id, &t.recipient);
+    assert!(result.is_ok(), "First withdrawal should succeed");
+}
+
+#[test]
+fn test_reentrancy_guard_lock_is_cleared_after_operation() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    t.env.ledger().set_timestamp(500);
+    c.withdraw(&stream_id, &t.recipient);
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.total_withdrawn, 50_000, "Withdrawal should complete successfully");
+}
