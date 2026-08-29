@@ -218,6 +218,25 @@ stellar contract invoke --id $CONTRACT_ID --network testnet -- get_creation_fee
 # returns: i128 (stroops)
 ```
 
+### 2.1 Deposit creation tax
+
+The admin may configure either a flat tax in the stream deposit token or a
+basis-point tax on the gross deposit. The tax is transferred to the configured
+treasury when `create_stream` is called, and the stream's stored `deposit` is
+the post-tax amount.
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --source admin-key --network testnet \
+  -- set_creation_tax --flat_amount 100000 --fee_bps 0
+# Or use 250 bps (2.5%) instead:
+stellar contract invoke --id $CONTRACT_ID --source admin-key --network testnet \
+  -- set_creation_tax --flat_amount 0 --fee_bps 250
+```
+
+Set both values to zero to disable the tax. The flat amount and percentage
+cannot be enabled at the same time. A tax that consumes the full deposit is
+rejected, so every created stream has a positive post-tax deposit.
+
 ### 2.2 Deduction in `create_stream`
 
 Before locking the streaming token deposit, the contract checks `cf_xlm`:
