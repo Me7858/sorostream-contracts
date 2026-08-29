@@ -7867,3 +7867,86 @@ fn test_reentrancy_guard_lock_is_cleared_after_operation() {
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.total_withdrawn, 50_000, "Withdrawal should complete successfully");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #494: Bounds Checking Tests
+// Ensure i128 overflow is prevented in arithmetic operations
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_overflow_detection_for_extreme_flow_rate() {
+    let t = setup();
+    let c = client(&t);
+
+    let extreme_flow_rate = i128::MAX / 2;
+    let large_amount = i128::MAX / 4;
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &large_amount,
+        &100 * 365 * 24 * 60 * 60,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &extreme_flow_rate,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject flow rate that could cause overflow");
+}
+
+#[test]
+fn test_zero_flow_rate_is_rejected() {
+    let t = setup();
+    let c = client(&t);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject zero flow rate");
+}
+
+#[test]
+fn test_negative_flow_rate_is_rejected() {
+    let t = setup();
+    let c = client(&t);
+
+    let result = c.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &-100i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>
+    );
+
+    assert!(result.is_err(), "Should reject negative flow rate");
+}
