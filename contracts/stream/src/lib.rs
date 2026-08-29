@@ -24,6 +24,7 @@ pub use oracle::IPriceOracle;
 #[cfg(test)] mod upgrade_proposal_tests;
 #[cfg(test)] mod event_versioning_tests;
 #[cfg(test)] mod cargo_audit_tests;
+#[cfg(test)] mod entry_point_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
