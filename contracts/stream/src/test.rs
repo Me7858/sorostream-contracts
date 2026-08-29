@@ -7798,3 +7798,55 @@ fn test_exhausted_stream_shows_completed_status() {
         "Stream should show Completed status when deposit is fully exhausted"
     );
 }
+
+// Issue #491: execute_admin_override entry point checks timelock before execution
+#[test]
+fn test_admin_override_checks_timelock() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    // Set admin override timelock to 1000 seconds
+    let timelock_seconds = 1000u64;
+    c.set_admin_override_timelock(&timelock_seconds).unwrap();
+
+    // Create a stream
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &100,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Initiate an override request
+    let reason = soroban_sdk::String::from_str(&t.env, "test override");
+    let request_id = c.initiate_admin_override(
+        &stream_id,
+        &OverrideAction::Cancel,
+        &reason,
+    ).unwrap();
+
+    // Try to execute override immediately (should fail - timelock not elapsed)
+    let result = c.try_execute_admin_override(&request_id);
+    assert!(result.is_err(), "execute_admin_override should fail before timelock elapsed");
+
+    // Advance time past the timelock
+    t.env.ledger().set_timestamp(timelock_seconds + 1);
+
+    // Now execute override should succeed
+    let result = c.try_execute_admin_override(&request_id);
+    assert!(result.is_ok(), "execute_admin_override should succeed after timelock elapsed");
+}
