@@ -490,7 +490,7 @@ fn test_dual_stream_created_single_record() {
     let stream_id = make_dual_stream(&t, 0, 1000);
     let stream = c.get_stream(&stream_id);
 
-    assert!(stream.is_dual_stream);
+    assert!(stream.options.is_dual_stream);
     assert_eq!(stream.deposit, 100_000i128);  // token1 deposit
     assert_eq!(stream.token, t.token_id);
     assert_eq!(stream.status, StreamStatus::Active);
@@ -1781,7 +1781,7 @@ fn test_split_stream_recipient_withdrawal() {
     c.withdraw(&stream_ids.get_unchecked(0), &recipient1);
 
     let stream1_after = c.get_stream(&stream_ids.get_unchecked(0));
-    assert_eq!(stream1_after.total_withdrawn, 250_000);
+    assert_eq!(stream1_after.options.total_withdrawn, 250_000);
 }
 
 /// Test: Split stream requires correct total weight
