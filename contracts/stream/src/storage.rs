@@ -487,6 +487,32 @@ pub fn remove_delegate(env: &Env, stream_id: u64) {
     env.storage().persistent().remove(&delegate_key(env, stream_id));
 }
 
+// --- On-complete callback helpers ---
+//
+// Kept outside the `Stream` struct itself (rather than as two `Option` fields)
+// to stay under the Soroban `#[contracttype]` struct field cap.
+
+fn on_complete_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "oncmp"), stream_id)
+}
+
+/// Gets the configured on-complete callback `(contract, function)` for a stream, if any.
+pub fn get_on_complete(env: &Env, stream_id: u64) -> Option<(Address, Symbol)> {
+    env.storage().persistent().get(&on_complete_key(env, stream_id))
+}
+
+/// Sets the on-complete callback for a stream.
+pub fn set_on_complete(env: &Env, stream_id: u64, contract: &Address, function: &Symbol) {
+    env.storage()
+        .persistent()
+        .set(&on_complete_key(env, stream_id), &(contract.clone(), function.clone()));
+}
+
+/// Removes the on-complete callback for a stream.
+pub fn remove_on_complete(env: &Env, stream_id: u64) {
+    env.storage().persistent().remove(&on_complete_key(env, stream_id));
+}
+
 // --- Version tracking ---
 
 /// Stores the contract version string.
@@ -567,6 +593,47 @@ pub fn add_to_whitelist(env: &Env, recipient: &Address) {
 /// Removes a recipient from the whitelist.
 pub fn remove_from_whitelist(env: &Env, recipient: &Address) {
     env.storage().persistent().remove(&whitelist_key(env, recipient));
+}
+
+// --- Sender (creation) whitelist (Issue #469) ---
+//
+// Distinct from the recipient whitelist above: this gates *who may create*
+// streams, not who may receive them.
+
+const SENDER_WHITELIST_ENABLED_KEY: &str = "swl_en";
+
+/// Returns whether sender (creation) whitelisting is enabled.
+pub fn is_sender_whitelist_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, SENDER_WHITELIST_ENABLED_KEY))
+        .unwrap_or(false)
+}
+
+/// Enables or disables sender (creation) whitelisting.
+pub fn set_sender_whitelist_enabled(env: &Env, enabled: bool) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, SENDER_WHITELIST_ENABLED_KEY), &enabled);
+}
+
+fn sender_whitelist_key(env: &Env, sender: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "swl"), sender.clone())
+}
+
+/// Returns whether a sender is on the stream-creation whitelist.
+pub fn is_sender_whitelisted(env: &Env, sender: &Address) -> bool {
+    env.storage().persistent().get(&sender_whitelist_key(env, sender)).unwrap_or(false)
+}
+
+/// Adds a sender to the stream-creation whitelist.
+pub fn add_to_sender_whitelist(env: &Env, sender: &Address) {
+    env.storage().persistent().set(&sender_whitelist_key(env, sender), &true);
+}
+
+/// Removes a sender from the stream-creation whitelist.
+pub fn remove_from_sender_whitelist(env: &Env, sender: &Address) {
+    env.storage().persistent().remove(&sender_whitelist_key(env, sender));
 }
 
 // --- Recipient allowlist (for regulated payment scenarios) ---

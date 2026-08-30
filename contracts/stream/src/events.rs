@@ -498,6 +498,32 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     );
 }
 
+// ── Issue #469: Sender (creation) whitelist ─────────────────────────────────
+
+/// Emitted when a sender is added to the stream-creation whitelist.
+pub fn sender_whitelisted(env: &Env, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "SenderWhitelisted"),),
+        sender.clone(),
+    );
+}
+
+/// Emitted when a sender is removed from the stream-creation whitelist.
+pub fn sender_dewhitelisted(env: &Env, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "SenderDewhitelisted"),),
+        sender.clone(),
+    );
+}
+
+/// Emitted when sender-whitelist enforcement is toggled.
+pub fn sender_whitelist_toggled(env: &Env, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "SenderWhitelistToggled"),),
+        enabled,
+    );
+}
+
 /// Emitted when a recipient is added to the allowlist.
 pub fn recipient_allowlisted(env: &Env, recipient: &Address) {
     env.events().publish(

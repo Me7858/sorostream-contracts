@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter};
+use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter, ProtocolStats};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -31,16 +31,8 @@ pub trait SoroStreamInterface {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
-        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
-        non_transferable: bool,
-        holdback_amount: i128,
-        withdrawal_steps: Option<u32>,
-        min_withdrawal_amount: Option<i128>,
-        non_transferable: bool,
-        requires_recipient_approval: bool,
-        enforce_recipient_allowlist: bool,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(
@@ -340,6 +332,19 @@ pub trait SoroStreamInterface {
     fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
     fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
     fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
+
+    // ── Issue #469: Sender (creation) whitelist ─────────────────────────────
+
+    /// Enables or disables sender (creation) whitelist enforcement. Admin only.
+    fn set_sender_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
+    /// Returns whether sender (creation) whitelist enforcement is enabled.
+    fn is_sender_whitelist_enabled(env: Env) -> bool;
+    /// Adds a sender to the stream-creation whitelist. Admin only.
+    fn add_sender_to_whitelist(env: Env, admin: Address, sender: Address) -> Result<(), StreamError>;
+    /// Removes a sender from the stream-creation whitelist. Admin only.
+    fn remove_sender_from_whitelist(env: Env, admin: Address, sender: Address) -> Result<(), StreamError>;
+    /// Returns whether a sender is on the stream-creation whitelist.
+    fn is_sender_whitelisted(env: Env, sender: Address) -> bool;
 
     fn set_slippage_params(env: Env, sender: Address, stream_id: u64, reference_price: i128, max_slippage_bps: u32) -> Result<(), StreamError>;
 

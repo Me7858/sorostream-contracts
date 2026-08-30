@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
 /// Vesting release curve applied to a payment stream.
 ///
@@ -37,7 +37,7 @@ pub struct VestingTranche {
 
 /// Status of a payment stream.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum StreamStatus {
     /// Stream is currently active and tokens are flowing.
     Active,
@@ -240,17 +240,13 @@ pub struct Stream {
 
     /// Optional redirect target stream ID.
     pub redirect_to_stream_id: Option<u64>,
-    /// Whether this stream is a dual-token stream.
-    pub is_dual_stream: bool,
 
     // ── On-complete callback (composable DeFi) ──────────────────────────────
-
-    /// Optional contract address to invoke when the stream completes.
-    /// If set, the contract's function specified by `on_complete_function` will be called.
-    pub on_complete_contract: Option<Address>,
-    /// Optional function signature to invoke on stream completion.
-    /// Only used if `on_complete_contract` is set.
-    pub on_complete_function: Option<Symbol>,
+    //
+    // Note: the callback `(contract, function)` itself is *not* stored as
+    // fields here — it lives in side storage (see `storage::get_on_complete` /
+    // `storage::set_on_complete`) to stay under the Soroban `#[contracttype]`
+    // struct field cap.
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
@@ -410,15 +406,32 @@ pub struct AdminOverrideRequest {
     pub reason: String,
 }
 
+/// Status filter for `query_streams`.
+///
+/// A dedicated enum (rather than `Option<StreamStatus>`) sidesteps a
+/// soroban-sdk 22.x limitation: `#[contracttype]` unit enums nested inside
+/// an `Option<_>` field don't get the XDR `Into<ScVal>` conversion the SDK's
+/// `testutils` machinery needs, which breaks the test build even though the
+/// contract itself builds fine.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StatusFilter {
+    /// No filtering on status.
+    Any,
+    /// Only streams with this exact status.
+    Only(StreamStatus),
+}
+
 /// Optional filter struct for querying streams efficiently without iterating all records.
 ///
-/// All fields are optional; a `None` value means no filtering on that criterion.
-/// Multiple filters are combined with AND logic (all must match).
+/// All fields are optional; a `None` (or `StatusFilter::Any`) value means no
+/// filtering on that criterion. Multiple filters are combined with AND logic
+/// (all must match).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct StreamQueryFilter {
-    /// Optional status filter. If set, only streams with this status are returned.
-    pub status: Option<StreamStatus>,
+    /// Status filter. `StatusFilter::Any` means no filtering on status.
+    pub status: StatusFilter,
     /// Optional asset (token) filter. If set, only streams using this token are returned.
     pub asset: Option<Address>,
     /// Optional sender filter. If set, only streams created by this address are returned.

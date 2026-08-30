@@ -271,8 +271,13 @@ fn integration_treasury_fees_on_batch_withdraw() {
     assert_eq!(c.get_fees_collected(&ie.token), 25_000);
 }
 
+// The flat XLM creation fee (`set_creation_fee`) is charged in a *separate*
+// SAC token from the stream's own asset, and does not reduce the stream's
+// deposit — it's an additive charge collected up front. See
+// `Contract::set_creation_fee` / `Contract::create_stream` in lib.rs.
+
 #[test]
-fn integration_creation_tax_reduces_stream_deposit() {
+fn integration_creation_fee_charged_in_xlm_token() {
     let ie = setup_integration();
     let c = client(&ie);
     let admin = Address::generate(&ie.env);
@@ -280,23 +285,36 @@ fn integration_creation_tax_reduces_stream_deposit() {
     ie.env.ledger().set_timestamp(0);
     mint(&ie, &ie.sender, &1_000_000);
 
+    // Register a distinct SAC token to act as the XLM creation-fee asset.
+    let xlm_admin = Address::generate(&ie.env);
+    let xlm_token = ie
+        .env
+        .register_stellar_asset_contract_v2(xlm_admin.clone())
+        .address();
+    StellarAssetClient::new(&ie.env, &xlm_token).mint(&ie.sender, &100_000);
+
     c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
     c.set_treasury_address(&treasury);
-    c.set_creation_tax(&100_000, &0u32);
+    c.set_creation_fee(&100_000, &xlm_token);
 
     let stream_id = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
         &0u64, &false, &0u64, &false,
     );
 
+    // The stream's own token balances are untouched by the fee.
     assert_eq!(balance(&ie, &ie.sender), 0);
-    assert_eq!(balance(&ie, &treasury), 100_000);
-    assert_eq!(balance(&ie, &ie.contract), 900_000);
-    assert_eq!(c.get_stream(&stream_id).deposit, 900_000);
+    assert_eq!(balance(&ie, &ie.contract), 1_000_000);
+    assert_eq!(c.get_stream(&stream_id).deposit, 1_000_000);
+
+    // The fee was charged in the XLM token instead.
+    let xlm_balance = |who: &Address| TokenClient::new(&ie.env, &xlm_token).balance(who);
+    assert_eq!(xlm_balance(&ie.sender), 0);
+    assert_eq!(xlm_balance(&treasury), 100_000);
 }
 
 #[test]
-fn integration_creation_tax_bps_reduces_stream_deposit() {
+fn integration_creation_fee_updates_replace_prior_value() {
     let ie = setup_integration();
     let c = client(&ie);
     let admin = Address::generate(&ie.env);
@@ -304,18 +322,28 @@ fn integration_creation_tax_bps_reduces_stream_deposit() {
     ie.env.ledger().set_timestamp(0);
     mint(&ie, &ie.sender, &1_000_000);
 
+    let xlm_admin = Address::generate(&ie.env);
+    let xlm_token = ie
+        .env
+        .register_stellar_asset_contract_v2(xlm_admin.clone())
+        .address();
+    StellarAssetClient::new(&ie.env, &xlm_token).mint(&ie.sender, &50_000);
+
     c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
     c.set_treasury_address(&treasury);
-    c.set_creation_tax(&0, &250u32);
+    // Set once, then update — the later call should fully replace the fee/token.
+    c.set_creation_fee(&999_999, &ie.token);
+    c.set_creation_fee(&25_000, &xlm_token);
 
     let stream_id = c.create_stream(
         &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
         &0u64, &false, &0u64, &false,
     );
 
-    assert_eq!(balance(&ie, &treasury), 25_000);
-    assert_eq!(balance(&ie, &ie.contract), 975_000);
-    assert_eq!(c.get_stream(&stream_id).deposit, 975_000);
+    let xlm_balance = |who: &Address| TokenClient::new(&ie.env, &xlm_token).balance(who);
+    assert_eq!(xlm_balance(&treasury), 25_000);
+    assert_eq!(xlm_balance(&ie.sender), 25_000);
+    assert_eq!(c.get_stream(&stream_id).deposit, 1_000_000);
 }
 
 #[test]
@@ -373,8 +401,10 @@ fn integration_batch_create_withdraw_lifecycle() {
         &tokens,
         &1000,
         &false,
+        &None::<u32>,
         &lock_untils,
         &0u64,
+        &false,
     );
 
     assert_eq!(stream_ids.len(), 2);
