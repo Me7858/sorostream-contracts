@@ -428,3 +428,19 @@ pub struct StreamQueryFilter {
     /// Optional recipient filter. If set, only streams targeting this address are returned.
     pub recipient: Option<Address>,
 }
+
+/// A snapshot of a stream's cumulative withdrawn amount at a point in time.
+///
+/// Recorded periodically (see `checkpoint_stream`) so that accrued-balance
+/// history can be audited or recomputed without replaying every withdrawal
+/// event from the stream's full lifetime.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Checkpoint {
+    /// Ledger sequence number at which this checkpoint was recorded.
+    pub ledger: u32,
+    /// Ledger timestamp at which this checkpoint was recorded.
+    pub timestamp: u64,
+    /// The stream's `total_withdrawn` value at the time of this checkpoint.
+    pub cumulative_withdrawn: i128,
+}

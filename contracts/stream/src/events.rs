@@ -1061,3 +1061,91 @@ pub fn on_complete_failed(
         (on_complete_contract.clone(), error_message.clone()),
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #460: Per-stream withdrawal cooldown
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a per-stream withdrawal cooldown is configured at creation time.
+pub fn stream_withdrawal_cooldown_set(env: &Env, stream_id: u64, cooldown_seconds: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamWithdrawalCooldownSet"), stream_id),
+        cooldown_seconds,
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #459: Recipient notification hook on first withdrawal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a sender registers a recipient-notification hook for a stream.
+pub fn recipient_hook_set(env: &Env, stream_id: u64, hook_contract: &Address, hook_function: &Symbol) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientHookSet"), stream_id),
+        (hook_contract.clone(), hook_function.clone()),
+    );
+}
+
+/// Emitted immediately before a registered recipient hook is invoked, on the
+/// stream's first withdrawal.
+pub fn recipient_hook_invoked(env: &Env, stream_id: u64, hook_contract: &Address, hook_function: &Symbol) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientHookInvoked"), stream_id),
+        (hook_contract.clone(), hook_function.clone()),
+    );
+}
+
+/// Emitted when a recipient hook invocation succeeds.
+pub fn recipient_hook_success(env: &Env, stream_id: u64, hook_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientHookSuccess"), stream_id),
+        hook_contract.clone(),
+    );
+}
+
+/// Emitted when a recipient hook invocation fails or panics. The withdrawal
+/// that triggered it is unaffected — this is purely informational.
+pub fn recipient_hook_failed(env: &Env, stream_id: u64, hook_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientHookFailed"), stream_id),
+        hook_contract.clone(),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #458: Stream checkpoint storage
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a checkpoint of a stream's cumulative withdrawn amount is recorded.
+pub fn checkpoint_recorded(
+    env: &Env,
+    stream_id: u64,
+    checkpoint_index: u32,
+    ledger: u32,
+    cumulative_withdrawn: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "CheckpointRecorded"), stream_id),
+        (checkpoint_index, ledger, cumulative_withdrawn),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #461: Dispute lock
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emitted when an admin places a dispute lock on a stream.
+pub fn stream_dispute_locked(env: &Env, stream_id: u64, expiry_ledger: u32) {
+    env.events().publish(
+        (Symbol::new(env, "StreamDisputeLocked"), stream_id),
+        expiry_ledger,
+    );
+}
+
+/// Emitted when an admin lifts a dispute lock on a stream early.
+pub fn stream_dispute_lock_cleared(env: &Env, stream_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "StreamDisputeLockCleared"), stream_id),
+        (),
+    );
+}

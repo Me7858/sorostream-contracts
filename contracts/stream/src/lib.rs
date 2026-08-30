@@ -15,7 +15,7 @@ pub mod vesting_math;
 
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
-pub use types::{AuditEntry, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve, StreamQueryFilter};
+pub use types::{AuditEntry, Checkpoint, HealthStatus, Stream, StreamHealth, Stats, StreamStatus, VestingCurve, StreamQueryFilter};
 pub use oracle::IPriceOracle;
 
 #[cfg(test)] mod integration_tests;
@@ -29,21 +29,22 @@ use types::VestingTranche;
 use types::{Milestone, MilestoneStatus};
 use storage::{
     accumulate_fees, add_fee_exempt, add_to_blocklist,
-    append_audit_entry, check_admin, cleanup_dual_stream_storage,
+    append_audit_entry, append_checkpoint, check_admin, cleanup_dual_stream_storage,
     clear_pending_fee_proposal, clear_reentrancy_lock, decrement_active_stream_count,
     decrement_token_stream_count, derive_stream_id,
     drain_fees_collected, effective_sender_limit, extend_instance_ttl,
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm,
-    get_delegate, get_expiry_warning_emitted, get_expiry_warning_window,
+    get_checkpoint, get_checkpoint_count, get_checkpoint_interval_ledgers,
+    get_delegate, get_dispute_lock_expiry, get_expiry_warning_emitted, get_expiry_warning_window,
     get_federation_address,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_ids_by_recipient,
-    get_ids_by_sender, get_ids_by_tag, get_max_deposit_per_token,
+    get_ids_by_sender, get_ids_by_tag, get_last_checkpoint_ledger, get_max_deposit_per_token,
     get_max_streams_per_token, get_new_sender_stream_cap,
     get_pause_expiry, get_protocol_fee, get_rate_limit_max_creations,
-    get_rate_limit_state, get_rate_limit_window, get_remaining_quota,
+    get_rate_limit_state, get_rate_limit_window, get_recipient_hook, get_remaining_quota,
     get_sender_lifetime_count, get_sender_promotion_threshold, get_sender_stream_count,
-    get_stream_tag, get_token_stream_count,
+    get_stream_tag, get_stream_withdrawal_cooldown, get_token_stream_count,
     get_treasury, get_withdrawal_cooldown, get_xlm_token,
     increment_active_stream_count, increment_batch_nonce,
     increment_sender_lifetime_count, increment_token_stream_count,
@@ -59,19 +60,20 @@ use storage::{
     read_max_future_start_offset, read_min_duration, read_pending_fee_proposal,
     read_version, record_migration, register_federation_address,
     remove_delegate, remove_fee_exempt, remove_from_blocklist,
-    remove_holdback,
+    remove_holdback, remove_recipient_hook,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
-    save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
-    set_delegate, set_expiry_warning_emitted, set_expiry_warning_window,
+    save_stream, save_tranches, set_active_stream_count, set_checkpoint_interval_ledgers,
+    set_creation_fee_xlm,
+    set_delegate, set_dispute_lock_expiry, set_expiry_warning_emitted, set_expiry_warning_window,
     set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
     set_max_streams_per_token, set_new_sender_stream_cap, set_paused,
     set_pause_expiry, set_protocol_fee,
-    set_rate_limit_state, set_reentrancy_lock,
+    set_rate_limit_state, set_recipient_hook, set_reentrancy_lock,
     set_rate_limit_window, set_rate_limit_max_creations,
     add_rate_limit_exempt, remove_rate_limit_exempt,
     set_sender_last_creation_time, set_sender_limit, set_sender_promotion_threshold,
     set_slippage_params, set_stream_creation_cooldown,
-    set_stream_tag_storage,
+    set_stream_tag_storage, set_stream_withdrawal_cooldown,
     set_treasury, set_whitelist_enabled, set_withdrawal_cooldown,
     set_xlm_token, stream_exists, unindex_by_recipient,
     unindex_by_sender, unindex_by_tag, unregister_federation_address, write_admin,
@@ -801,9 +803,6 @@ impl SoroStreamContract {
             return Err(StreamError::DuplicateStream);
         }
         if amount <= 0 {
-            return Err(StreamError::ZeroAmount);
-        }
-        if 0i128 < 0 || 0i128 >= amount {
             return Err(StreamError::ZeroAmount);
         }
 
@@ -2216,10 +2215,17 @@ impl SoroStreamContract {
             return Err(StreamError::StreamLocked);
         }
 
-        let cooldown = get_withdrawal_cooldown(&env);
+        // The protocol-wide cooldown and this stream's own cooldown (Issue #460)
+        // both apply; whichever requires the longer wait wins.
+        let cooldown = get_withdrawal_cooldown(&env).max(get_stream_withdrawal_cooldown(&env, stream_id));
         if cooldown > 0 && now < stream.last_withdraw_time.saturating_add(cooldown) {
             return Err(StreamError::WithdrawalCooldownActive);
         }
+
+        // Captured before any mutation below: `total_withdrawn` only ever
+        // increases, so this is exactly "no prior withdrawal has settled".
+        // Used by the Issue #459 recipient-notification hook.
+        let is_first_withdrawal = stream.total_withdrawn == 0;
 
         // ── Milestone-release-mode withdrawal path ───────────────────────────
         if stream.milestone_release_mode {
@@ -2310,6 +2316,8 @@ impl SoroStreamContract {
             }
 
             events::stream_withdrawn(&env, stream_id, &recipient, available, now, stream.total_withdrawn);
+            Self::maybe_invoke_recipient_hook(&env, stream_id, &recipient, available, is_first_withdrawal);
+            Self::maybe_checkpoint(&env, stream_id, stream.total_withdrawn);
             return Ok(());
         }
 
@@ -2431,6 +2439,8 @@ impl SoroStreamContract {
             if all_claimed {
                 events::stream_completed(&env, stream_id);
             }
+            Self::maybe_invoke_recipient_hook(&env, stream_id, &recipient, claimable, is_first_withdrawal);
+            Self::maybe_checkpoint(&env, stream_id, stream.total_withdrawn);
 
             clear_reentrancy_lock(&env);
             return Ok(());
@@ -2781,6 +2791,8 @@ impl SoroStreamContract {
         }
 
         events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
+        Self::maybe_invoke_recipient_hook(&env, stream_id, &recipient, claimable, is_first_withdrawal);
+        Self::maybe_checkpoint(&env, stream_id, stream.total_withdrawn);
 
         // Clear stream-specific reentrancy lock only if the stream still exists.
         // Final non-renewing withdraw removes the entry; re-saving would resurrect it.
@@ -2814,6 +2826,10 @@ impl SoroStreamContract {
         let is_delegate = Some(caller.clone()) == get_delegate(&env, stream_id);
         if !is_sender && !is_delegate {
             return Err(StreamError::NotAuthorized);
+        }
+
+        if Self::dispute_lock_active(&env, stream_id) {
+            return Err(StreamError::DisputeLockActive);
         }
 
         // PendingApproval and EscrowHold streams may be cancelled freely — the sender incurs no penalty.
@@ -3575,6 +3591,9 @@ impl SoroStreamContract {
         if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
             return Err(StreamError::StreamNotActive);
         }
+        if Self::dispute_lock_active(&env, stream_id) {
+            return Err(StreamError::DisputeLockActive);
+        }
 
         let now = if stream.status == StreamStatus::Paused {
             stream.last_pause_time
@@ -3725,6 +3744,67 @@ impl SoroStreamContract {
 
         events::stream_sender_locked(&env, stream_id, &sender);
         Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #461: Dispute lock
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Places a time-bounded dispute lock on a stream, admin only.
+    ///
+    /// While active, `pause_stream`, `transfer_recipient`, `cancel_stream`, and
+    /// `update_stream_rate` all return `DisputeLockActive` for this stream.
+    /// Recipients may still `withdraw` normally, and the contract-wide
+    /// `emergency_pause` is unaffected. The lock expires automatically
+    /// `lock_duration_ledgers` ledgers after this call — no explicit unlock is
+    /// required, though `clear_dispute_lock` can lift it early.
+    ///
+    /// Calling this again while a lock is already active replaces it with a
+    /// fresh window measured from the current ledger (it does not stack).
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `InvalidDuration` — `lock_duration_ledgers` is 0.
+    pub fn lock_stream_for_dispute(
+        env: Env,
+        stream_id: u64,
+        lock_duration_ledgers: u32,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        if load_stream(&env, stream_id).is_none() {
+            return Err(StreamError::StreamNotFound);
+        }
+        if lock_duration_ledgers == 0 {
+            return Err(StreamError::InvalidDuration);
+        }
+        let expiry_ledger = env.ledger().sequence().saturating_add(lock_duration_ledgers);
+        set_dispute_lock_expiry(&env, stream_id, expiry_ledger);
+        events::stream_dispute_locked(&env, stream_id, expiry_ledger);
+        Ok(())
+    }
+
+    /// Lifts an active dispute lock on a stream early. Admin only. No-op if the
+    /// stream has no active lock.
+    pub fn clear_dispute_lock(env: Env, stream_id: u64) -> Result<(), StreamError> {
+        check_admin(&env);
+        if load_stream(&env, stream_id).is_none() {
+            return Err(StreamError::StreamNotFound);
+        }
+        set_dispute_lock_expiry(&env, stream_id, 0);
+        events::stream_dispute_lock_cleared(&env, stream_id);
+        Ok(())
+    }
+
+    /// Returns `true` if `stream_id` currently has an active dispute lock.
+    pub fn is_dispute_locked(env: Env, stream_id: u64) -> bool {
+        Self::dispute_lock_active(&env, stream_id)
+    }
+
+    /// Internal helper shared by the enforcement points above and by
+    /// `is_dispute_locked`.
+    fn dispute_lock_active(env: &Env, stream_id: u64) -> bool {
+        let expiry_ledger = get_dispute_lock_expiry(env, stream_id);
+        expiry_ledger > 0 && env.ledger().sequence() < expiry_ledger
     }
 
     /// Partially cancels an active stream by reclaiming `cancel_amount` from the unstreamed
@@ -3959,6 +4039,10 @@ impl SoroStreamContract {
             return Err(StreamError::StreamNotActive);
         }
 
+        if Self::dispute_lock_active(&env, stream_id) {
+            return Err(StreamError::DisputeLockActive);
+        }
+
         if new_rate <= 0 {
             return Err(StreamError::ZeroFlowRate);
         }
@@ -4121,6 +4205,139 @@ impl SoroStreamContract {
     /// Returns the current delegate address for a stream, if one has been set.
     pub fn get_delegate(env: Env, stream_id: u64) -> Option<Address> {
         storage::get_delegate(&env, stream_id)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #459: Recipient notification hook on first withdrawal
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Registers a downstream contract to be notified the first time this
+    /// stream is withdrawn from.
+    ///
+    /// `hook_contract`'s `hook_function` is invoked with `(stream_id, recipient,
+    /// amount)` immediately after the first successful withdrawal settles the
+    /// stream's state. The call is best-effort: if the hook contract panics or
+    /// returns an error, the withdrawal itself is unaffected (the recipient
+    /// still receives their tokens) and an `RecipientHookFailed` event is
+    /// emitted instead of `RecipientHookSuccess`.
+    ///
+    /// Only the stream sender may call this, and only before any withdrawal has
+    /// occurred — the hook fires exactly once, so registering after the fact
+    /// would never invoke it.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `NotSender` — caller is not this stream's sender.
+    /// - `InvalidRecipientHook` — the stream has already received a withdrawal.
+    pub fn set_recipient_hook(
+        env: Env,
+        sender: Address,
+        stream_id: u64,
+        hook_contract: Address,
+        hook_function: Symbol,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        if stream.total_withdrawn > 0 {
+            return Err(StreamError::InvalidRecipientHook);
+        }
+        set_recipient_hook(&env, stream_id, &hook_contract, &hook_function);
+        events::recipient_hook_set(&env, stream_id, &hook_contract, &hook_function);
+        Ok(())
+    }
+
+    /// Clears the recipient-notification hook for a stream, if one is set.
+    /// Only the stream sender may call this.
+    pub fn clear_recipient_hook(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
+        sender.require_auth();
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        remove_recipient_hook(&env, stream_id);
+        Ok(())
+    }
+
+    /// Returns the `(contract, function)` recipient-notification hook registered
+    /// for a stream, if any.
+    pub fn get_recipient_hook(env: Env, stream_id: u64) -> Option<(Address, Symbol)> {
+        storage::get_recipient_hook(&env, stream_id)
+    }
+
+    /// Internal helper: invokes the registered recipient hook, if any, the first
+    /// time a stream is withdrawn from. Best-effort — failures are caught and
+    /// reported via an event rather than propagated to the caller.
+    fn maybe_invoke_recipient_hook(env: &Env, stream_id: u64, recipient: &Address, amount: i128, was_first_withdrawal: bool) {
+        if !was_first_withdrawal || amount <= 0 {
+            return;
+        }
+        if let Some((hook_contract, hook_function)) = get_recipient_hook(env, stream_id) {
+            events::recipient_hook_invoked(env, stream_id, &hook_contract, &hook_function);
+            let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &hook_contract,
+                &hook_function,
+                (stream_id, recipient.clone(), amount).into_val(env),
+            );
+            match result {
+                Ok(_) => events::recipient_hook_success(env, stream_id, &hook_contract),
+                Err(_) => events::recipient_hook_failed(env, stream_id, &hook_contract),
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #460: Per-stream withdrawal cooldown
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Creates a new payment stream with an optional per-stream withdrawal
+    /// cooldown: a minimum number of seconds that must elapse between
+    /// consecutive withdrawals by the recipient. Useful for payroll-style
+    /// streams that want to discourage overly frequent micro-withdrawals.
+    ///
+    /// All other parameters and validation behave exactly like `create_stream`
+    /// (this simply wraps it and additionally records the cooldown). Pass `0`
+    /// for `withdrawal_cooldown_seconds` to create a stream with no cooldown.
+    pub fn create_stream_with_cooldown(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        withdrawal_cooldown_seconds: u64,
+    ) -> Result<u64, StreamError> {
+        let stream_id = Self::create_stream(
+            env.clone(),
+            sender,
+            recipient,
+            token,
+            amount,
+            duration_seconds,
+            cliff_seconds,
+            nonce,
+            false,
+            0,
+            false,
+        )?;
+        if withdrawal_cooldown_seconds > 0 {
+            set_stream_withdrawal_cooldown(&env, stream_id, withdrawal_cooldown_seconds);
+            events::stream_withdrawal_cooldown_set(&env, stream_id, withdrawal_cooldown_seconds);
+        }
+        Ok(stream_id)
+    }
+
+    /// Returns the per-stream withdrawal cooldown in seconds (0 = none configured).
+    ///
+    /// This is independent of the protocol-wide cooldown set by
+    /// `set_withdrawal_cooldown`; `withdraw` enforces whichever of the two
+    /// requires the longer wait.
+    pub fn get_stream_withdrawal_cooldown(env: Env, stream_id: u64) -> u64 {
+        storage::get_stream_withdrawal_cooldown(&env, stream_id)
     }
 
     /// Returns the full stream struct for a given stream ID.
@@ -4498,6 +4715,9 @@ impl SoroStreamContract {
         }
         if stream.status != StreamStatus::Active {
             return Err(StreamError::StreamNotActive);
+        }
+        if Self::dispute_lock_active(&env, stream_id) {
+            return Err(StreamError::DisputeLockActive);
         }
 
         stream.status = StreamStatus::Paused;
@@ -5370,6 +5590,96 @@ impl SoroStreamContract {
             ttl_remaining_ledgers: ttl_remaining,
             status,
         })
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #458: Stream checkpoint storage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Returns the configured checkpoint interval in ledgers (default: 100).
+    pub fn get_checkpoint_interval(env: Env) -> u32 {
+        get_checkpoint_interval_ledgers(&env)
+    }
+
+    /// Sets the checkpoint interval in ledgers. Admin only.
+    pub fn set_checkpoint_interval(env: Env, ledgers: u32) -> Result<(), StreamError> {
+        check_admin(&env);
+        if ledgers == 0 {
+            return Err(StreamError::InvalidDuration);
+        }
+        set_checkpoint_interval_ledgers(&env, ledgers);
+        Ok(())
+    }
+
+    /// Permissionlessly records a checkpoint snapshot of a stream's cumulative
+    /// withdrawn amount at the current ledger, if at least
+    /// `get_checkpoint_interval` ledgers have passed since the stream's last
+    /// checkpoint (or none has been recorded yet).
+    ///
+    /// Anyone may call this — it moves no funds and grants no privileges, so
+    /// there is no reason to gate it behind auth. Returns the new checkpoint's
+    /// index.
+    ///
+    /// `withdraw` also opportunistically records a checkpoint once the interval
+    /// has elapsed, so under normal usage this rarely needs to be called
+    /// directly; it exists for streams that go quiet for long stretches and for
+    /// indexers that want a checkpoint at a specific moment.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — stream does not exist.
+    /// - `CheckpointIntervalNotElapsed` — called again before the interval elapsed.
+    pub fn checkpoint_stream(env: Env, stream_id: u64) -> Result<u32, StreamError> {
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if get_checkpoint_count(&env, stream_id) > 0 {
+            let current_ledger = env.ledger().sequence();
+            let last = get_last_checkpoint_ledger(&env, stream_id);
+            let interval = get_checkpoint_interval_ledgers(&env);
+            if current_ledger < last.saturating_add(interval) {
+                return Err(StreamError::CheckpointIntervalNotElapsed);
+            }
+        }
+        Ok(Self::record_checkpoint(&env, stream_id, stream.total_withdrawn))
+    }
+
+    /// Returns the number of checkpoints recorded for a stream.
+    pub fn get_checkpoint_count(env: Env, stream_id: u64) -> u32 {
+        get_checkpoint_count(&env, stream_id)
+    }
+
+    /// Returns the checkpoint at `index` for a stream, if it exists.
+    pub fn get_checkpoint(env: Env, stream_id: u64, index: u32) -> Option<Checkpoint> {
+        get_checkpoint(&env, stream_id, index)
+    }
+
+    /// Internal helper: unconditionally records a checkpoint and emits
+    /// `CheckpointRecorded`. Callers are responsible for interval gating.
+    fn record_checkpoint(env: &Env, stream_id: u64, cumulative_withdrawn: i128) -> u32 {
+        let checkpoint = types::Checkpoint {
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+            cumulative_withdrawn,
+        };
+        let idx = append_checkpoint(env, stream_id, &checkpoint);
+        events::checkpoint_recorded(env, stream_id, idx, checkpoint.ledger, cumulative_withdrawn);
+        idx
+    }
+
+    /// Internal helper: opportunistically records a checkpoint from `withdraw`
+    /// if the configured interval has elapsed since the last one. Silent no-op
+    /// otherwise — this is a best-effort side effect, never a reason to fail
+    /// the withdrawal.
+    fn maybe_checkpoint(env: &Env, stream_id: u64, cumulative_withdrawn: i128) {
+        let count = get_checkpoint_count(env, stream_id);
+        let due = if count == 0 {
+            true
+        } else {
+            let current_ledger = env.ledger().sequence();
+            let last = get_last_checkpoint_ledger(env, stream_id);
+            current_ledger >= last.saturating_add(get_checkpoint_interval_ledgers(env))
+        };
+        if due {
+            Self::record_checkpoint(env, stream_id, cumulative_withdrawn);
+        }
     }
 
     /// Internal helper: maps a `StreamStatus` to the discriminant code used by
