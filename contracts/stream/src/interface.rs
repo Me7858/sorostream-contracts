@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter, ProtocolStats};
+use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter, ProtocolStats, AssetAnalytics};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -213,6 +213,11 @@ pub trait SoroStreamInterface {
     fn get_stats(env: Env) -> Stats;
     fn get_protocol_stats(env: Env) -> ProtocolStats;
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
+
+    /// Returns an incrementally-maintained per-asset analytics snapshot
+    /// (total value streamed, streams created, streams cancelled) for `token`.
+    /// O(1) — no stream scanning required. See Issue #468.
+    fn get_stream_analytics(env: Env, token: Address) -> AssetAnalytics;
 
     fn min_duration(env: Env) -> u64;
     fn set_min_duration(env: Env, admin: Address, seconds: u64);

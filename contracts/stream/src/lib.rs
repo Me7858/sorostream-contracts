@@ -22,6 +22,7 @@ pub use oracle::IPriceOracle;
 // other test modules disabled during grace-period test restore
 #[cfg(test)] mod rate_limit_tests;
 #[cfg(test)] mod sender_whitelist_tests;
+#[cfg(test)] mod stream_analytics_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -37,6 +38,8 @@ use storage::{
     get_active_stream_count, get_batch_nonce, get_creation_fee_xlm,
     get_delegate, get_expiry_warning_emitted, get_expiry_warning_window,
     get_federation_address, get_on_complete, set_on_complete, remove_on_complete,
+    get_analytics_value_streamed, get_analytics_streams_created, get_analytics_streams_cancelled,
+    record_value_streamed, record_stream_created, record_stream_cancelled,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_ids_by_tag, get_max_deposit_per_token, get_max_streams_per_token, get_new_sender_stream_cap,
@@ -673,6 +676,7 @@ impl SoroStreamContract {
         };
 
         save_stream(&env, &stream);
+        record_stream_created(&env, &stream.token);
         extend_instance_ttl(&env);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
@@ -947,6 +951,7 @@ impl SoroStreamContract {
         };
 
         save_stream(&env, &stream);
+        record_stream_created(&env, &stream.token);
         extend_instance_ttl(&env);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
@@ -1574,6 +1579,7 @@ impl SoroStreamContract {
         };
 
         save_stream(&env, &stream);
+        record_stream_created(&env, &stream.token);
         index_by_sender(&env, &sender, stream_id);
         index_by_recipient(&env, &recipient, stream_id);
         index_global_stream(&env, stream_id);
@@ -2362,6 +2368,7 @@ impl SoroStreamContract {
             }
 
             events::stream_withdrawn(&env, stream_id, &recipient, available, now, stream.total_withdrawn);
+            record_value_streamed(&env, &stream.token, recipient_amount);
             return Ok(());
         }
 
@@ -2480,6 +2487,7 @@ impl SoroStreamContract {
                 events::tranches_withdrawn(&env, stream_id, &recipient, tranches_newly_claimed, claimable);
             }
             events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
+            record_value_streamed(&env, &stream.token, recipient_amount);
             if all_claimed {
                 events::stream_completed(&env, stream_id);
             }
@@ -2833,6 +2841,7 @@ impl SoroStreamContract {
         }
 
         events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
+        record_value_streamed(&env, &stream.token, recipient_amount);
 
         // Clear stream-specific reentrancy lock only if the stream still exists.
         // Final non-renewing withdraw removes the entry; re-saving would resurrect it.
@@ -2929,6 +2938,7 @@ impl SoroStreamContract {
             }
 
             events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, 0i128);
+            record_stream_cancelled(&env, &stream.token);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -2995,6 +3005,8 @@ impl SoroStreamContract {
 
             events::tranche_stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
             events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
+            record_value_streamed(&env, &stream.token, recipient_amount);
+            record_stream_cancelled(&env, &stream.token);
 
             clear_reentrancy_lock(&env);
             return Ok(());
@@ -3046,6 +3058,8 @@ impl SoroStreamContract {
             }
 
             events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
+            record_value_streamed(&env, &stream.token, recipient_amount);
+            record_stream_cancelled(&env, &stream.token);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3117,6 +3131,8 @@ impl SoroStreamContract {
         }
 
         events::stream_cancelled(&env, stream_id, &stream.sender, total_refund, recipient_amount);
+        record_value_streamed(&env, &stream.token, recipient_amount);
+        record_stream_cancelled(&env, &stream.token);
 
         clear_reentrancy_lock(&env);
         Ok(())
@@ -3218,6 +3234,7 @@ impl SoroStreamContract {
             }
 
             events::stream_partial_cancelled(&env, stream_id, stream_id, &stream.sender, total_refund, 0i128);
+            record_stream_cancelled(&env, &stream.token);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3290,6 +3307,8 @@ impl SoroStreamContract {
             }
 
             events::stream_partial_cancelled(&env, stream_id, stream_id, &stream.sender, refund_amount, 0i128);
+            record_value_streamed(&env, &stream.token, recipient_amount);
+            record_stream_cancelled(&env, &stream.token);
             clear_reentrancy_lock(&env);
             return Ok(());
         }
@@ -3352,6 +3371,8 @@ impl SoroStreamContract {
         }
 
         events::stream_partial_cancelled(&env, stream_id, stream_id, &stream.sender, refund_amount, 0i128);
+        record_value_streamed(&env, &stream.token, recipient_amount);
+        record_stream_cancelled(&env, &stream.token);
         clear_reentrancy_lock(&env);
         Ok(())
     }
@@ -3437,6 +3458,8 @@ impl SoroStreamContract {
         unindex_by_recipient(&env, &stream.recipient, stream_id);
 
         events::stream_terminated_by_recipient(&env, stream_id, &recipient, recipient_amount, refund_amount);
+        record_value_streamed(&env, &stream.token, recipient_amount);
+        record_stream_cancelled(&env, &stream.token);
 
         clear_reentrancy_lock(&env);
         Ok(())
@@ -3699,6 +3722,7 @@ impl SoroStreamContract {
                         );
                     }
                     events::stream_withdrawn(&env, stream_id, &current_recipient, claimable, now, stream.total_withdrawn);
+                    record_value_streamed(&env, &stream.token, recipient_amount);
                 }
             }
         }
@@ -3861,6 +3885,7 @@ impl SoroStreamContract {
         decrement_active_stream_count(&env);
         decrement_token_stream_count(&env, &stream.token);
         events::stream_cancelled(&env, stream_id, &stream.sender, cancel_amount, earned);
+        record_value_streamed(&env, &stream.token, earned);
 
         let new_nonce = stream_id;
         let new_stream_id =
@@ -3914,6 +3939,7 @@ impl SoroStreamContract {
         index_global_stream(&env, new_stream_id);
         increment_active_stream_count(&env);
         increment_token_stream_count(&env, &new_stream.token);
+        record_stream_created(&env, &new_stream.token);
 
         events::stream_partial_cancelled(
             &env,
@@ -4873,6 +4899,7 @@ impl SoroStreamContract {
             index_global_stream(&env, stream_id);
             increment_active_stream_count(&env);
             increment_token_stream_count(&env, &stream_token);
+            record_stream_created(&env, &stream_token);
 
             events::stream_created(
                 &env, stream_id, &sender, &recipient, amount, flow_rate, end_time, false,
@@ -5057,6 +5084,7 @@ impl SoroStreamContract {
 
             amounts.push_back(claimable);
             events::stream_withdrawn(&env, stream_id, &recipient, claimable, now, stream.total_withdrawn);
+            record_value_streamed(&env, &stream.token, claimable);
         }
 
         Ok(amounts)
@@ -5126,6 +5154,8 @@ impl SoroStreamContract {
                 }
 
                 events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
+                record_value_streamed(&env, &stream.token, recipient_amount);
+                record_stream_cancelled(&env, &stream.token);
                 Ok(())
             })();
             results.push_back(result);
@@ -5392,6 +5422,28 @@ impl SoroStreamContract {
             total_volume,
             status_breakdown: status_stats,
             asset_breakdown: asset_stats,
+        }
+    }
+
+    // ── Issue #468: On-chain per-asset analytics aggregator ─────────────────
+    //
+    // Unlike get_protocol_stats above (which scans every stream on each
+    // call), these counters are maintained incrementally at stream
+    // creation/withdrawal/cancellation, so a snapshot is O(1) storage reads.
+    // See storage::record_value_streamed / record_stream_created /
+    // record_stream_cancelled for the write side.
+
+    /// Returns an incrementally-maintained analytics snapshot for `token`:
+    /// cumulative value streamed, streams created, and streams cancelled.
+    ///
+    /// Read-only, no auth required. Returns all-zero counters for a token
+    /// that has never been used in a stream.
+    pub fn get_stream_analytics(env: Env, token: Address) -> types::AssetAnalytics {
+        types::AssetAnalytics {
+            token: token.clone(),
+            total_value_streamed: get_analytics_value_streamed(&env, &token),
+            total_streams_created: get_analytics_streams_created(&env, &token),
+            total_streams_cancelled: get_analytics_streams_cancelled(&env, &token),
         }
     }
 

@@ -422,6 +422,28 @@ pub enum StatusFilter {
     Only(StreamStatus),
 }
 
+/// Per-asset on-chain analytics snapshot (Issue #468).
+///
+/// Unlike [`ProtocolStats`], which is recomputed by scanning every stream on
+/// each call, these counters are maintained incrementally at the storage
+/// mutation points (stream creation, withdrawal, cancellation) so a snapshot
+/// is a handful of storage reads rather than an O(n) scan — cheap enough for
+/// dashboards/indexers to poll directly instead of replaying events.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetAnalytics {
+    /// The asset (token) this snapshot is for.
+    pub token: Address,
+    /// Cumulative amount of `token` ever paid out to recipients (via
+    /// withdrawals and cancellation payouts), in stroops.
+    pub total_value_streamed: i128,
+    /// Total number of streams ever created using `token`.
+    pub total_streams_created: u64,
+    /// Total number of streams using `token` that were cancelled
+    /// (cancel_stream / stop_stream / batch_cancel_stream / recipient_terminate).
+    pub total_streams_cancelled: u64,
+}
+
 /// Optional filter struct for querying streams efficiently without iterating all records.
 ///
 /// All fields are optional; a `None` (or `StatusFilter::Any`) value means no

@@ -1433,6 +1433,73 @@ pub fn is_blocked(env: &Env, addr: &Address) -> bool {
     env.storage().persistent().get(&blocklist_key(env, addr)).unwrap_or(false)
 }
 
+// --- Per-asset analytics (Issue #468) ---
+//
+// Raw counters, stored one entry per token so each update touches a single
+// storage slot. `crate::types::AssetAnalytics` (returned to callers) is
+// assembled from these on read.
+
+fn analytics_value_streamed_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "an_val"), token.clone())
+}
+
+fn analytics_created_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "an_cre"), token.clone())
+}
+
+fn analytics_cancelled_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "an_can"), token.clone())
+}
+
+/// Returns the cumulative amount of `token` ever paid out to recipients.
+pub fn get_analytics_value_streamed(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&analytics_value_streamed_key(env, token))
+        .unwrap_or(0)
+}
+
+/// Adds `amount` to the cumulative value-streamed counter for `token`.
+/// No-ops for `amount <= 0`.
+pub fn record_value_streamed(env: &Env, token: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let key = analytics_value_streamed_key(env, token);
+    let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    env.storage().persistent().set(&key, &current.saturating_add(amount));
+}
+
+/// Returns the total number of streams ever created using `token`.
+pub fn get_analytics_streams_created(env: &Env, token: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&analytics_created_key(env, token))
+        .unwrap_or(0)
+}
+
+/// Increments the streams-created counter for `token`.
+pub fn record_stream_created(env: &Env, token: &Address) {
+    let key = analytics_created_key(env, token);
+    let current: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+    env.storage().persistent().set(&key, &current.saturating_add(1));
+}
+
+/// Returns the total number of streams using `token` that were cancelled.
+pub fn get_analytics_streams_cancelled(env: &Env, token: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&analytics_cancelled_key(env, token))
+        .unwrap_or(0)
+}
+
+/// Increments the streams-cancelled counter for `token`.
+pub fn record_stream_cancelled(env: &Env, token: &Address) {
+    let key = analytics_cancelled_key(env, token);
+    let current: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+    env.storage().persistent().set(&key, &current.saturating_add(1));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (i): Post-expiry grace period
 // ═══════════════════════════════════════════════════════════════════════════
