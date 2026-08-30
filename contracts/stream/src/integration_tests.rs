@@ -1229,10 +1229,9 @@ fn integration_batch_withdraw_final_no_overdraw_with_fees() {
     
     // Verify no overdraw: total paid out should not exceed deposit
     let total_paid = total_recipient + total_fees_collected;
-    assert_eq!(total_paid, deposit, 
+    assert_eq!(total_paid, deposit,
         "Total paid out (recipient + fees) must not exceed deposit. \
-         Total: {}, Recipient: {}, Fees: {}, Deposit: {}", 
-        total_paid, total_recipient, total_fees_collected, deposit);
+         Total: {total_paid}, Recipient: {total_recipient}, Fees: {total_fees_collected}, Deposit: {deposit}");
     
     // In this scenario with 50% fee:
     // recipient gets 50% of each claimable tranche: 250K mid + 250K final = 500K

@@ -915,9 +915,6 @@ impl SoroStreamContract {
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
-        if 0i128 < 0 || 0i128 >= amount {
-            return Err(StreamError::ZeroAmount);
-        }
 
         // Recipient whitelist check
         if is_whitelist_enabled(&env) && !is_whitelisted(&env, &recipient) {
@@ -925,7 +922,7 @@ impl SoroStreamContract {
         }
 
         // Recipient allowlist check
-        if is_recipient_allowed(&env, &recipient) == false {
+        if !is_recipient_allowed(&env, &recipient) {
             return Err(StreamError::RecipientNotAllowed);
         }
 
@@ -3642,7 +3639,7 @@ impl SoroStreamContract {
         sender.require_auth();
 
         // Validate inputs
-        if recipients.len() as u32 == 0 || recipients.len() as u32 > 100 {
+        if recipients.is_empty() || recipients.len() > 100 {
             return Err(StreamError::BatchLengthMismatch);
         }
         if recipients.len() != proportions.len() {
@@ -4989,7 +4986,7 @@ impl SoroStreamContract {
                 if t == token {
                     // Update existing entry
                     let new_total = total.checked_add(amount).ok_or(StreamError::Overflow)?;
-                    let _ = token_totals.set(j, (token.clone(), new_total));
+                    token_totals.set(j, (token.clone(), new_total));
                     found = true;
                     break;
                 }
