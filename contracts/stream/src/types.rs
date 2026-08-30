@@ -85,36 +85,13 @@ pub struct Milestone {
     pub status: MilestoneStatus,
 }
 
-/// Represents a single payment stream.
+/// Extended configuration and runtime state attached to a payment stream.
+///
+/// Kept separate from [`Stream`] so the core struct stays within Soroban's XDR
+/// field-count limit for `#[contracttype]` structs (40 fields).
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Stream {
-    /// Unique stream identifier.
-    pub id: u64,
-    /// Address of the stream creator / payer.
-    pub sender: Address,
-    /// Address of the stream beneficiary.
-    pub recipient: Address,
-    /// SAC-compatible token contract address (e.g. USDC).
-    pub token: Address,
-    /// Total token deposit locked in the contract (in stroops).
-    pub deposit: i128,
-    /// Tokens released per second (stroops/second).
-    pub flow_rate: i128,
-    /// Ledger timestamp when the stream started.
-    pub start_time: u64,
-    /// Ledger timestamp before which no tokens are claimable (>= start_time, <= end_time).
-    pub cliff_time: u64,
-    /// Ledger timestamp before which no withdrawals are permitted (>= start_time, <= end_time).
-    pub lock_until: u64,
-    /// Ledger timestamp when the stream ends.
-    pub end_time: u64,
-    /// Ledger timestamp of the last withdrawal.
-    pub last_withdraw_time: u64,
-    /// Current status of the stream.
-    pub status: StreamStatus,
-    /// Whether the stream auto-renews on completion.
-    pub auto_renew: bool,
+pub struct StreamOptions {
     /// Optional limit on the number of auto-renewals. When set, the stream will automatically
     /// renew up to this many times. Once reached, the stream will complete permanently and not renew.
     /// `None` means unlimited auto-renewals (default behaviour when auto_renew is true).
@@ -251,6 +228,78 @@ pub struct Stream {
     /// Optional function signature to invoke on stream completion.
     /// Only used if `on_complete_contract` is set.
     pub on_complete_function: Option<Symbol>,
+
+    // ── Stream comment (issue #513) ──────────────────────────────────────────
+
+    /// Optional human-readable payment reference attached by the sender at
+    /// creation time. UTF-8 text, at most 256 bytes.
+    pub comment: Option<String>,
+}
+
+/// Represents a single payment stream.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Stream {
+    /// Unique stream identifier.
+    pub id: u64,
+    /// Address of the stream creator / payer.
+    pub sender: Address,
+    /// Address of the stream beneficiary.
+    pub recipient: Address,
+    /// SAC-compatible token contract address (e.g. USDC).
+    pub token: Address,
+    /// Total token deposit locked in the contract (in stroops).
+    pub deposit: i128,
+    /// Tokens released per second (stroops/second).
+    pub flow_rate: i128,
+    /// Ledger timestamp when the stream started.
+    pub start_time: u64,
+    /// Ledger timestamp before which no tokens are claimable (>= start_time, <= end_time).
+    pub cliff_time: u64,
+    /// Ledger timestamp before which no withdrawals are permitted (>= start_time, <= end_time).
+    pub lock_until: u64,
+    /// Ledger timestamp when the stream ends.
+    pub end_time: u64,
+    /// Ledger timestamp of the last withdrawal.
+    pub last_withdraw_time: u64,
+    /// Current status of the stream.
+    pub status: StreamStatus,
+    /// Whether the stream auto-renews on completion.
+    pub auto_renew: bool,
+    /// Extended configuration and runtime state. Nested so `Stream` stays within
+    /// Soroban's XDR field-count limit for `#[contracttype]` structs.
+    pub options: StreamOptions,
+}
+
+/// Creation-time options for `create_stream`.
+///
+/// Bundles the optional per-stream configuration that would otherwise push
+/// `create_stream` past Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone, Debug, Default)]
+pub struct CreateStreamOptions {
+    /// Optional limit on the number of auto-renewals. When set, the stream will
+    /// automatically renew up to this many times. `None` means unlimited
+    /// auto-renewals (default behaviour when `auto_renew` is true).
+    pub renew_count: Option<u32>,
+    /// Whether the recipient is allowed to terminate the stream early.
+    pub allow_recipient_termination: bool,
+    /// Whether the stream's recipient rights are locked to the original recipient.
+    pub non_transferable: bool,
+    /// Optional holdback amount kept in escrow until explicitly released (in stroops).
+    /// Deducted from the streaming portion at creation time.
+    pub holdback_amount: i128,
+    /// Optional number of evenly-spaced withdrawal steps.
+    /// `None` means free-form withdrawal (default behaviour).
+    pub withdrawal_steps: Option<u32>,
+    /// Optional minimum claimable amount required before a withdrawal is accepted.
+    /// `None` means no minimum (default behaviour).
+    pub min_withdrawal_amount: Option<i128>,
+    /// Whether this stream requires explicit recipient approval before tokens
+    /// begin to accrue.
+    pub requires_recipient_approval: bool,
+    /// Optional human-readable payment reference (UTF-8, at most 256 bytes).
+    pub comment: Option<String>,
 }
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.

@@ -1281,7 +1281,7 @@ pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
 // Feature (c): Stream redirect
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
+// Redirect target is stored in Stream.options.redirect_to_stream_id (no separate storage key needed).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (f): Instance TTL extension
