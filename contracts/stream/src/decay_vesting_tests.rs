@@ -380,7 +380,7 @@ fn test_contract_linear_curve_stored_and_claimable() {
     );
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.curve, VestingCurve::Linear);
+    assert_eq!(stream.options.curve, VestingCurve::Linear);
 
     // Advance to 50 % of duration.
     t.env.ledger().set_timestamp(1000 + duration / 2);
@@ -415,7 +415,7 @@ fn test_contract_decay_curve_stored_and_claimable_gte_linear() {
     );
 
     let stream = c.get_stream(&decay_id);
-    assert_eq!(stream.curve, VestingCurve::TimeDecay(df));
+    assert_eq!(stream.options.curve, VestingCurve::TimeDecay(df));
 
     // Check at several time points that decay ≥ linear.
     for elapsed in [1000u64, 3000, 5000, 7000, 9000, 10_000] {

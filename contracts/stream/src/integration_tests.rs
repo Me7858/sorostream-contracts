@@ -272,6 +272,53 @@ fn integration_treasury_fees_on_batch_withdraw() {
 }
 
 #[test]
+fn integration_creation_tax_reduces_stream_deposit() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_treasury_address(&treasury);
+    c.set_creation_tax(&100_000, &0u32);
+
+    let stream_id = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
+        &0u64, &false, &0u64, &false,
+    );
+
+    assert_eq!(balance(&ie, &ie.sender), 0);
+    assert_eq!(balance(&ie, &treasury), 100_000);
+    assert_eq!(balance(&ie, &ie.contract), 900_000);
+    assert_eq!(c.get_stream(&stream_id).deposit, 900_000);
+}
+
+#[test]
+fn integration_creation_tax_bps_reduces_stream_deposit() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_treasury_address(&treasury);
+    c.set_creation_tax(&0, &250u32);
+
+    let stream_id = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
+        &0u64, &false, &0u64, &false,
+    );
+
+    assert_eq!(balance(&ie, &treasury), 25_000);
+    assert_eq!(balance(&ie, &ie.contract), 975_000);
+    assert_eq!(c.get_stream(&stream_id).deposit, 975_000);
+}
+
+#[test]
 fn integration_zero_fee_no_treasury_deduction() {
     let ie = setup_integration();
     let c = client(&ie);
@@ -1374,5 +1421,190 @@ fn integration_grace_period_claim_and_recover() {
 
     let after_recover = c.try_withdraw(&stream_recover, &ie.recipient);
     assert_eq!(after_recover, Err(Ok(StreamError::StreamNotFound)));
+}
+
+// ── Issue #502: Full lifecycle test covering all stream operations ────────────
+
+#[test]
+fn integration_complete_lifecycle_all_operations() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+
+    mint(&ie, &ie.sender, &5_000_000);
+    let token = soroban_sdk::token::Client::new(&ie.env, &ie.token);
+
+    // 1. Create a stream
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 1_000_000);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(balance(&ie, &ie.contract), 1_000_000);
+
+    // 2. Perform a partial withdraw
+    ie.env.ledger().set_timestamp(250);
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 250_000);
+
+    // 3. Top-up the stream
+    let stream_before_topup = c.get_stream(&stream_id);
+    let end_time_before = stream_before_topup.end_time;
+
+    c.top_up(&stream_id, &ie.sender, &ie.token, &500_000);
+
+    let stream_after_topup = c.get_stream(&stream_id);
+    assert_eq!(stream_after_topup.deposit, 1_500_000);
+    assert!(stream_after_topup.end_time > end_time_before);
+
+    // 4. Pause the stream
+    ie.env.ledger().set_timestamp(400);
+    c.pause_stream(&stream_id, &ie.sender);
+    let paused_stream = c.get_stream(&stream_id);
+    assert_eq!(paused_stream.status, StreamStatus::Paused);
+
+    // Verify pause halts accrual: balance should remain the same
+    let balance_at_pause = balance(&ie, &ie.recipient);
+    ie.env.ledger().set_timestamp(500);
+    let claimable_while_paused = c.get_claimable(&stream_id);
+    // After pause, claimable should not increase beyond what was accrued at pause time
+    c.withdraw(&stream_id, &ie.recipient);
+    let balance_after_attempted_withdraw = balance(&ie, &ie.recipient);
+    assert_eq!(balance_at_pause, balance_after_attempted_withdraw);
+
+    // 5. Resume the stream
+    ie.env.ledger().set_timestamp(600);
+    c.resume_stream(&stream_id, &ie.sender);
+    let resumed_stream = c.get_stream(&stream_id);
+    assert_eq!(resumed_stream.status, StreamStatus::Active);
+
+    // Accrual should resume
+    ie.env.ledger().set_timestamp(700);
+    c.withdraw(&stream_id, &ie.recipient);
+    assert!(balance(&ie, &ie.recipient) > balance_after_attempted_withdraw);
+
+    // 6. Cancel the stream to verify final state
+    ie.env.ledger().set_timestamp(800);
+    let sender_before_cancel = balance(&ie, &ie.sender);
+    let recipient_before_cancel = balance(&ie, &ie.recipient);
+
+    c.cancel_stream(&stream_id, &ie.sender);
+
+    let sender_after_cancel = balance(&ie, &ie.sender);
+    let recipient_after_cancel = balance(&ie, &ie.recipient);
+
+    // Verify balance conservation: refund + recipient = deposit
+    let refund = sender_after_cancel - sender_before_cancel;
+    let total_received = recipient_after_cancel;
+
+    assert_eq!(
+        refund + total_received,
+        1_500_000,
+        "Balance conservation check failed on cancel"
+    );
+
+    // Stream should be marked as Cancelled
+    let cancelled_stream = c.get_stream(&stream_id);
+    assert_eq!(cancelled_stream.status, StreamStatus::Cancelled);
+}
+
+#[test]
+fn integration_lifecycle_with_multiple_pauses_and_resumes() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+
+    mint(&ie, &ie.sender, &2_000_000);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // First pause/resume cycle
+    ie.env.ledger().set_timestamp(100);
+    c.pause_stream(&stream_id, &ie.sender);
+    assert_eq!(c.get_stream(&stream_id).status, StreamStatus::Paused);
+
+    ie.env.ledger().set_timestamp(200);
+    c.resume_stream(&stream_id, &ie.sender);
+    assert_eq!(c.get_stream(&stream_id).status, StreamStatus::Active);
+
+    // Second pause/resume cycle
+    ie.env.ledger().set_timestamp(300);
+    c.pause_stream(&stream_id, &ie.sender);
+
+    ie.env.ledger().set_timestamp(400);
+    c.resume_stream(&stream_id, &ie.sender);
+
+    // Withdraw and verify consistency
+    ie.env.ledger().set_timestamp(500);
+    c.withdraw(&stream_id, &ie.recipient);
+
+    let recipient_balance = balance(&ie, &ie.recipient);
+    assert!(recipient_balance > 0);
+    assert!(recipient_balance <= 1_000_000);
+}
+
+#[test]
+fn integration_lifecycle_with_topup_during_pause() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    ie.env.ledger().set_timestamp(0);
+
+    mint(&ie, &ie.sender, &3_000_000);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+    );
+
+    // Pause the stream
+    ie.env.ledger().set_timestamp(100);
+    c.pause_stream(&stream_id, &ie.sender);
+
+    // Top-up while paused
+    let stream_before = c.get_stream(&stream_id);
+    c.top_up(&stream_id, &ie.sender, &ie.token, &500_000);
+    let stream_after = c.get_stream(&stream_id);
+
+    assert_eq!(stream_after.deposit, stream_before.deposit + 500_000);
+    assert_eq!(stream_after.status, StreamStatus::Paused);
+
+    // Resume and verify stream continues with new deposit
+    ie.env.ledger().set_timestamp(200);
+    c.resume_stream(&stream_id, &ie.sender);
+
+    ie.env.ledger().set_timestamp(300);
+    c.withdraw(&stream_id, &ie.recipient);
+
+    assert!(balance(&ie, &ie.recipient) > 0);
 }
 
