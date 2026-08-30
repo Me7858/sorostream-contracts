@@ -23,6 +23,7 @@ pub use oracle::IPriceOracle;
 #[cfg(test)] mod rate_limit_tests;
 #[cfg(test)] mod sender_whitelist_tests;
 #[cfg(test)] mod stream_analytics_tests;
+#[cfg(test)] mod stream_manager_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -40,6 +41,7 @@ use storage::{
     get_federation_address, get_on_complete, set_on_complete, remove_on_complete,
     get_analytics_value_streamed, get_analytics_streams_created, get_analytics_streams_cancelled,
     record_value_streamed, record_stream_created, record_stream_cancelled,
+    get_stream_manager, set_stream_manager, remove_stream_manager,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_ids_by_tag, get_max_deposit_per_token, get_max_streams_per_token, get_new_sender_stream_cap,
@@ -428,6 +430,7 @@ impl SoroStreamContract {
         Self::unindex_stream(&env, &stream, stream_id);
         if get_delegate(&env, stream_id).is_some() { remove_delegate(&env, stream_id); }
         if get_on_complete(&env, stream_id).is_some() { remove_on_complete(&env, stream_id); }
+        if get_stream_manager(&env, stream_id).is_some() { remove_stream_manager(&env, stream_id); }
         events::stream_archived(&env, stream_id, &stream.sender, &stream.recipient, stream.deposit);
         Ok(())
     }
@@ -4030,20 +4033,23 @@ impl SoroStreamContract {
     /// Only the sender may call this. Settles the recipient's accrued balance
     /// at the current rate before applying the new rate. The stream's deposit
     /// and end_time are adjusted to maintain the promised total.
+    /// The stream's sender, or its authorised manager (Issue #467), may call this.
     pub fn update_stream_rate(
         env: Env,
         stream_id: u64,
-        sender: Address,
+        caller: Address,
         new_rate: i128,
     ) -> Result<(), StreamError> {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        sender.require_auth();
+        caller.require_auth();
 
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
 
-        if stream.sender != sender {
+        let is_sender = stream.sender == caller;
+        let is_manager = Some(caller.clone()) == get_stream_manager(&env, stream_id);
+        if !is_sender && !is_manager {
             return Err(StreamError::NotSender);
         }
 
@@ -4256,6 +4262,55 @@ impl SoroStreamContract {
     /// Returns the current delegate address for a stream, if one has been set.
     pub fn get_delegate(env: Env, stream_id: u64) -> Option<Address> {
         storage::get_delegate(&env, stream_id)
+    }
+
+    // ── Issue #467: Stream manager delegation ───────────────────────────────
+    //
+    // A restricted counterpart to the delegate above. A manager may pause,
+    // resume, and update the flow rate of a stream on the sender's behalf,
+    // but — unlike a delegate — can never cancel/stop the stream or redirect
+    // its funds. Only the sender may appoint or revoke a manager, and doing
+    // so is always revocable via revoke_stream_manager.
+
+    /// Designates `manager` as the restricted manager for `stream_id`.
+    ///
+    /// Only the stream's sender may call this. The manager may subsequently
+    /// call `pause_stream`, `resume_stream`, and `update_stream_rate` on this
+    /// stream, but has no cancellation or fund-redirection rights.
+    /// Setting a new manager replaces any prior one.
+    ///
+    /// Emits `ManagerSet { stream_id, sender, manager }`.
+    pub fn set_stream_manager(env: Env, sender: Address, stream_id: u64, manager: Address) -> Result<(), StreamError> {
+        sender.require_auth();
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        set_stream_manager(&env, stream_id, &manager);
+        events::manager_set(&env, stream_id, &sender, &manager);
+        Ok(())
+    }
+
+    /// Revokes the current manager from a stream, if one is set.
+    ///
+    /// Only the stream's sender may call this. After revocation the former
+    /// manager loses all rights over the stream immediately.
+    ///
+    /// Emits `ManagerRevoked { stream_id, sender }`.
+    pub fn revoke_stream_manager(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
+        sender.require_auth();
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        remove_stream_manager(&env, stream_id);
+        events::manager_revoked(&env, stream_id, &sender);
+        Ok(())
+    }
+
+    /// Returns the current manager address for a stream, if one has been set.
+    pub fn get_stream_manager(env: Env, stream_id: u64) -> Option<Address> {
+        storage::get_stream_manager(&env, stream_id)
     }
 
     /// Returns the full stream struct for a given stream ID.
@@ -4621,14 +4676,18 @@ impl SoroStreamContract {
     }
 
     /// Pauses an active stream.
-    pub fn pause_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+    ///
+    /// The stream's sender, or its authorised manager (Issue #467), may call this.
+    pub fn pause_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        sender.require_auth();
+        caller.require_auth();
 
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
-        if stream.sender != sender {
+        let is_sender = stream.sender == caller;
+        let is_manager = Some(caller.clone()) == get_stream_manager(&env, stream_id);
+        if !is_sender && !is_manager {
             return Err(StreamError::NotSender);
         }
         if stream.status != StreamStatus::Active {
@@ -4640,19 +4699,23 @@ impl SoroStreamContract {
         save_stream(&env, &stream);
         decrement_active_stream_count(&env);
 
-        events::stream_paused(&env, stream.id, &sender);
+        events::stream_paused(&env, stream.id, &caller);
         Ok(())
     }
 
     /// Resumes a paused stream, pushing back the end time.
-    pub fn resume_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+    ///
+    /// The stream's sender, or its authorised manager (Issue #467), may call this.
+    pub fn resume_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), StreamError> {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
-        sender.require_auth();
+        caller.require_auth();
 
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
-        if stream.sender != sender {
+        let is_sender = stream.sender == caller;
+        let is_manager = Some(caller.clone()) == get_stream_manager(&env, stream_id);
+        if !is_sender && !is_manager {
             return Err(StreamError::NotSender);
         }
         if stream.status != StreamStatus::Paused {
@@ -4673,7 +4736,7 @@ impl SoroStreamContract {
         save_stream(&env, &stream);
         increment_active_stream_count(&env);
 
-        events::stream_resumed(&env, stream.id, &sender);
+        events::stream_resumed(&env, stream.id, &caller);
         Ok(())
     }
 

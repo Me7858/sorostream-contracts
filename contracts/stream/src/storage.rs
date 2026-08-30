@@ -513,6 +513,33 @@ pub fn remove_on_complete(env: &Env, stream_id: u64) {
     env.storage().persistent().remove(&on_complete_key(env, stream_id));
 }
 
+// --- Stream manager (Issue #467) ---
+//
+// A restricted counterpart to the delegate above: a manager may pause,
+// resume, and update the flow rate of a stream on the sender's behalf, but
+// (unlike a delegate) may never cancel/stop the stream or redirect its
+// funds. Enforcement of exactly which entry points accept the manager lives
+// in lib.rs; this module only stores the mapping.
+
+fn stream_manager_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "mgr"), stream_id)
+}
+
+/// Gets the authorized manager for a stream, if one has been set.
+pub fn get_stream_manager(env: &Env, stream_id: u64) -> Option<Address> {
+    env.storage().persistent().get(&stream_manager_key(env, stream_id))
+}
+
+/// Sets the authorized manager for a stream.
+pub fn set_stream_manager(env: &Env, stream_id: u64, manager: &Address) {
+    env.storage().persistent().set(&stream_manager_key(env, stream_id), manager);
+}
+
+/// Removes the authorized manager for a stream.
+pub fn remove_stream_manager(env: &Env, stream_id: u64) {
+    env.storage().persistent().remove(&stream_manager_key(env, stream_id));
+}
+
 // --- Version tracking ---
 
 /// Stores the contract version string.

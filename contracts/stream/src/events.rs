@@ -434,6 +434,24 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, sender: &Address) {
         sender.clone(),
     );
 }
+// ── Issue #467: Stream manager delegation ────────────────────────────────────
+
+/// Emitted when a restricted manager is set for a stream.
+pub fn manager_set(env: &Env, stream_id: u64, sender: &Address, manager: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "ManagerSet"), stream_id),
+        (sender.clone(), manager.clone()),
+    );
+}
+
+/// Emitted when a stream's manager is revoked.
+pub fn manager_revoked(env: &Env, stream_id: u64, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "ManagerRevoked"), stream_id),
+        sender.clone(),
+    );
+}
+
 /// Emitted when fees are swept from the contract.
 pub fn fee_swept(env: &Env, token: &Address, amount: i128, destination: &Address) {
     env.events().publish(

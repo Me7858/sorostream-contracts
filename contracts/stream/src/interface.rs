@@ -320,6 +320,17 @@ pub trait SoroStreamInterface {
     fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
     fn get_delegate(env: Env, stream_id: u64) -> Option<Address>;
 
+    // ── Issue #467: Stream manager delegation ───────────────────────────────
+
+    /// Designates `manager` as the restricted manager for `stream_id`: pause/
+    /// resume/update_stream_rate only — no cancellation or redirection rights.
+    /// Only the stream's sender may call this.
+    fn set_stream_manager(env: Env, sender: Address, stream_id: u64, manager: Address) -> Result<(), StreamError>;
+    /// Revokes the current manager from a stream. Only the sender may call this.
+    fn revoke_stream_manager(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
+    /// Returns the current manager address for a stream, if one has been set.
+    fn get_stream_manager(env: Env, stream_id: u64) -> Option<Address>;
+
     /// Sets the sliding-window size for the per-sender rate limit, in **ledgers**.
     /// Default: 720 ledgers (~1 hour at 5 s/ledger). Only admin may call this.
     fn set_rate_limit_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), StreamError>;
