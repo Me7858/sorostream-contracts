@@ -21,6 +21,7 @@ pub use oracle::IPriceOracle;
 #[cfg(test)] mod integration_tests;
 // other test modules disabled during grace-period test restore
 #[cfg(test)] mod rate_limit_tests;
+#[cfg(test)] mod sender_whitelist_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -773,6 +774,9 @@ impl SoroStreamContract {
             return Err(StreamError::ContractPaused);
         }
 
+        // Check sender (creation) whitelist (Issue #469)
+        check_sender_whitelist(&env, &sender)?;
+
         let now = env.ledger().timestamp();
 
         // Validate start_time: must be >= now
@@ -1424,6 +1428,10 @@ impl SoroStreamContract {
         if is_paused_or_auto_unpause(&env) {
             return Err(StreamError::ContractPaused);
         }
+
+        // Check sender (creation) whitelist (Issue #469)
+        check_sender_whitelist(&env, &sender)?;
+
         if nonce_used(&env, &sender, nonce) {
             return Err(StreamError::DuplicateStream);
         }
@@ -4666,6 +4674,9 @@ impl SoroStreamContract {
 
         // Check rate limit (per-sender creation frequency cap)
         check_rate_limit(&env, &sender)?;
+
+        // Check sender (creation) whitelist (Issue #469)
+        check_sender_whitelist(&env, &sender)?;
 
         let expected_nonce = get_batch_nonce(&env, &sender);
         if nonce != expected_nonce {
