@@ -11,6 +11,7 @@ pub fn stream_created(
     flow_rate: i128,
     end_time: u64,
     non_transferable: bool,
+    comment: &Option<String>,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
@@ -21,6 +22,7 @@ pub fn stream_created(
             flow_rate,
             end_time,
             non_transferable,
+            comment.clone(),
         ),
     );
 }

@@ -132,8 +132,8 @@ fn test_tranche_no_tranches_vested_get_claimable_is_zero() {
     // Stream is still active and untouched.
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.tranches_claimed, 0);
-    assert_eq!(stream.total_withdrawn, 0);
+    assert_eq!(stream.options.tranches_claimed, 0);
+    assert_eq!(stream.options.total_withdrawn, 0);
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn test_tranche_no_tranches_vested_withdraw_transfers_nothing() {
     assert_eq!(balance_after, balance_before, "recipient should receive nothing before unlock");
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.tranches_claimed, 0);
+    assert_eq!(stream.options.tranches_claimed, 0);
 }
 
 #[test]
@@ -200,8 +200,8 @@ fn test_tranche_one_tranche_vested() {
     assert_eq!(balance_after - balance_before, tranche_amount, "recipient should receive first tranche");
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.tranches_claimed, 1, "cursor should have advanced by 1");
-    assert_eq!(stream.total_withdrawn, tranche_amount);
+    assert_eq!(stream.options.tranches_claimed, 1, "cursor should have advanced by 1");
+    assert_eq!(stream.options.total_withdrawn, tranche_amount);
     assert_eq!(stream.status, StreamStatus::Active, "stream still has 3 remaining tranches");
 }
 
@@ -268,8 +268,8 @@ fn test_tranche_partial_withdraw_then_remaining() {
     c.withdraw(&stream_id, &t.recipient);
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.tranches_claimed, 2);
-    assert_eq!(stream.total_withdrawn, 200_000);
+    assert_eq!(stream.options.tranches_claimed, 2);
+    assert_eq!(stream.options.total_withdrawn, 200_000);
 
     // Claim remaining two tranches.
     t.env.ledger().set_timestamp(1500); // tranches at offsets 300 and 400 have unlocked
@@ -520,7 +520,7 @@ fn test_oracle_price_within_threshold_succeeds() {
 
     // Verify creation price was recorded.
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.creation_price, 1_000_000);
+    assert_eq!(stream.options.creation_price, 1_000_000);
 
     // At withdrawal time: price moves by 5 % (within threshold).
     MockOracleClient::new(&t.env, &t.oracle_id).set_price(&1_050_000i128); // +5 %
@@ -567,8 +567,8 @@ fn test_oracle_price_above_threshold_reverts() {
 
     // Verify the stream is still intact (nothing should have changed).
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.total_withdrawn, 0, "no tokens should have moved");
-    assert_eq!(stream.tranches_claimed, 0, "cursor must be unchanged after failed withdraw");
+    assert_eq!(stream.options.total_withdrawn, 0, "no tokens should have moved");
+    assert_eq!(stream.options.tranches_claimed, 0, "cursor must be unchanged after failed withdraw");
 }
 
 #[test]
@@ -610,7 +610,7 @@ fn test_oracle_linear_stream_price_check_on_withdraw() {
 
     // Linear stream with oracle — use create_stream (original entrypoint) which does NOT
     // accept oracle params, so we create it and then verify the oracle=None path is clean.
-    // The oracle check for linear streams is triggered from withdraw when stream.oracle is Some.
+    // The oracle check for linear streams is triggered from withdraw when stream.options.oracle is Some.
     // Since create_stream doesn't accept oracle params, this test focuses on confirming the
     // no-oracle linear case remains unaffected.
     let stream_id = c.create_stream(
@@ -719,7 +719,7 @@ fn test_oracle_three_price_updates_accumulator_correct() {
     );
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.creation_price, 1_000_000, "creation price must be stored");
+    assert_eq!(stream.options.creation_price, 1_000_000, "creation price must be stored");
     assert_eq!(stream.deposit, deposit);
 
     let oracle = MockOracleClient::new(&t.env, &t.oracle_id);
@@ -746,8 +746,8 @@ fn test_oracle_three_price_updates_accumulator_correct() {
     );
 
     let s = c.get_stream(&stream_id);
-    assert_eq!(s.total_withdrawn, tranche_amount, "accumulator after period 1");
-    assert_eq!(s.tranches_claimed, 1, "cursor after period 1");
+    assert_eq!(s.options.total_withdrawn, tranche_amount, "accumulator after period 1");
+    assert_eq!(s.options.tranches_claimed, 1, "cursor after period 1");
 
     // ── Period 2: price UP to 1_150_000 (+15 %, within 20 % band) ──────────
     // Price: +15 % from creation (deviation = 1500 bps ≤ 2000 bps threshold)
@@ -770,8 +770,8 @@ fn test_oracle_three_price_updates_accumulator_correct() {
     );
 
     let s = c.get_stream(&stream_id);
-    assert_eq!(s.total_withdrawn, tranche_amount * 2, "accumulator after period 2");
-    assert_eq!(s.tranches_claimed, 2, "cursor after period 2");
+    assert_eq!(s.options.total_withdrawn, tranche_amount * 2, "accumulator after period 2");
+    assert_eq!(s.options.tranches_claimed, 2, "cursor after period 2");
 
     // ── Period 3: price DOWN to 870_000 (−13 %, within 20 % band) ──────────
     // Price: -13 % from creation (deviation = 1300 bps ≤ 2000 bps threshold)
@@ -794,8 +794,8 @@ fn test_oracle_three_price_updates_accumulator_correct() {
     );
 
     let s = c.get_stream(&stream_id);
-    assert_eq!(s.total_withdrawn, tranche_amount * 3, "accumulator after period 3");
-    assert_eq!(s.tranches_claimed, 3, "cursor after period 3");
+    assert_eq!(s.options.total_withdrawn, tranche_amount * 3, "accumulator after period 3");
+    assert_eq!(s.options.tranches_claimed, 3, "cursor after period 3");
 
     // ── Period 4: price back to 1_000_000 (0 % deviation) — final tranche ──
     oracle.set_price(&1_000_000i128);
@@ -880,14 +880,14 @@ fn test_oracle_price_out_of_band_blocks_mid_stream_withdraw() {
 
     // Accumulator and cursor must be unchanged.
     let s = c.get_stream(&stream_id);
-    assert_eq!(s.total_withdrawn, 0, "total_withdrawn must not advance on failed withdraw");
-    assert_eq!(s.tranches_claimed, 0, "tranche cursor must not advance on failed withdraw");
+    assert_eq!(s.options.total_withdrawn, 0, "total_withdrawn must not advance on failed withdraw");
+    assert_eq!(s.options.tranches_claimed, 0, "tranche cursor must not advance on failed withdraw");
 
     // Oracle recovers; withdrawal now succeeds.
     MockOracleClient::new(&t.env, &t.oracle_id).set_price(&1_050_000i128); // +5 %, within 10 %
     c.withdraw(&stream_id, &t.recipient);
 
     let s = c.get_stream(&stream_id);
-    assert_eq!(s.total_withdrawn, tranche_amount, "accumulator must advance after recovery");
-    assert_eq!(s.tranches_claimed, 1);
+    assert_eq!(s.options.total_withdrawn, tranche_amount, "accumulator must advance after recovery");
+    assert_eq!(s.options.tranches_claimed, 1);
 }
