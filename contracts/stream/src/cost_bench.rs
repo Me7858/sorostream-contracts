@@ -1115,3 +1115,101 @@ fn cost_regression_cancel_stream() {
     c.cancel_stream(&stream_id, &b.sender);
     assert_no_regression(&b.env, "cancel_stream", BASELINE_CANCEL_STREAM);
 }
+
+// ── Issue #503: Additional entry point gas benchmarks ────────────────────────
+
+/// Benchmark for pause_stream (individual stream pause operation).
+#[test]
+fn bench_pause_stream() {
+    let b = setup_bench();
+    let c = client(&b);
+    b.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &b.sender, &b.recipient, &b.token_id,
+        &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+        &0i128,
+    );
+
+    c.pause_stream(&stream_id, &b.sender);
+    assert_within_limits(&b.env, "pause_stream (single stream)");
+}
+
+/// Benchmark for resume_stream (individual stream resume operation).
+#[test]
+fn bench_resume_stream() {
+    let b = setup_bench();
+    let c = client(&b);
+    b.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &b.sender, &b.recipient, &b.token_id,
+        &100_000, &1000, &0, &0u64, &false, &0u64, &false,
+        &0i128,
+    );
+
+    c.pause_stream(&stream_id, &b.sender);
+    c.resume_stream(&stream_id, &b.sender);
+    assert_within_limits(&b.env, "resume_stream (single stream)");
+}
+
+/// Benchmark for upgrade (WASM contract upgrade operation).
+#[test]
+fn bench_upgrade() {
+    let b = setup_bench();
+    let c = client(&b);
+
+    let fake_hash = soroban_sdk::BytesN::from_array(&b.env, &[1u8; 32]);
+    let _ = c.try_upgrade(&fake_hash);
+    assert_within_limits(&b.env, "upgrade");
+}
+
+/// Benchmark for set_max_streams (configuration of maximum stream limit).
+#[test]
+fn bench_set_max_streams() {
+    let b = setup_bench();
+    let c = client(&b);
+
+    c.set_max_streams(&1000u32);
+    assert_within_limits(&b.env, "set_max_streams");
+}
+
+/// Benchmark for set_sender_stream_limit (per-sender stream limit configuration).
+#[test]
+fn bench_set_sender_stream_limit() {
+    let b = setup_bench();
+    let c = client(&b);
+
+    c.set_sender_stream_limit(&b.sender, &500u32);
+    assert_within_limits(&b.env, "set_sender_stream_limit");
+}
+
+/// Benchmark for get_version (query contract version).
+#[test]
+fn bench_get_version() {
+    let b = setup_bench();
+    let c = client(&b);
+
+    c.get_version();
+    assert_within_limits(&b.env, "get_version");
+}
+
+/// Benchmark for set_min_duration (configuration of minimum stream duration).
+#[test]
+fn bench_set_min_duration() {
+    let b = setup_bench();
+    let c = client(&b);
+
+    c.set_min_duration(&b.sender, &60u64);
+    assert_within_limits(&b.env, "set_min_duration");
+}
+
+/// Benchmark for get_min_duration (query minimum stream duration).
+#[test]
+fn bench_get_min_duration() {
+    let b = setup_bench();
+    let c = client(&b);
+
+    c.get_min_duration(&b.sender);
+    assert_within_limits(&b.env, "get_min_duration");
+}

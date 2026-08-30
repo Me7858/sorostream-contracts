@@ -1,6 +1,14 @@
 #![allow(dead_code)]
 use soroban_sdk::{Address, Bytes, Env, String, Symbol};
 
+/// Event schema version for compatibility tracking
+const EVENT_SCHEMA_VERSION: u32 = 1;
+
+/// Returns the current event schema version for off-chain compatibility checking
+pub fn get_event_schema_version() -> u32 {
+    EVENT_SCHEMA_VERSION
+}
+
 /// Emitted when a new stream is created.
 pub fn stream_created(
     env: &Env,
@@ -11,16 +19,19 @@ pub fn stream_created(
     flow_rate: i128,
     end_time: u64,
     non_transferable: bool,
+    comment: &Option<String>,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
         (
+            EVENT_SCHEMA_VERSION,
             sender.clone(),
             recipient.clone(),
             amount,
             flow_rate,
             end_time,
             non_transferable,
+            comment.clone(),
         ),
     );
 }
@@ -40,7 +51,7 @@ pub fn stream_withdrawn(
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamWithdrawn"), stream_id),
-        (recipient.clone(), amount, timestamp, total_withdrawn),
+        (EVENT_SCHEMA_VERSION, recipient.clone(), amount, timestamp, total_withdrawn),
     );
 }
 
@@ -54,7 +65,7 @@ pub fn stream_cancelled(
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCancelled"), stream_id),
-        (sender.clone(), refund_amount, recipient_amount),
+        (EVENT_SCHEMA_VERSION, sender.clone(), refund_amount, recipient_amount),
     );
 }
 
@@ -92,7 +103,7 @@ pub fn renewal_limit_reached(env: &Env, stream_id: u64, sender: &Address, renewa
 pub fn contract_deployed(env: &Env, version: &String, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ContractDeployed"),),
-        (version.clone(), admin.clone()),
+        (EVENT_SCHEMA_VERSION, version.clone(), admin.clone()),
     );
 }
 
