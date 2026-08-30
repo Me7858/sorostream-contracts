@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
-use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{Address, Bytes, BytesN, Env, String, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
 const PAUSED_KEY: &str = "paused";
@@ -1281,7 +1281,7 @@ pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
 // Feature (c): Stream redirect
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
+// Redirect target is stored in Stream.options.redirect_to_stream_id (no separate storage key needed).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (f): Instance TTL extension
@@ -1556,4 +1556,91 @@ pub fn remove_stream_tag(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&stream_tag_key(env, stream_id));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WASM Upgrade Proposal Queue (Issue #497)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn upgrade_proposal_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_prop")
+}
+
+fn upgrade_proposal_expiry_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_exp")
+}
+
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_by: Address,
+    pub created_at: u64,
+}
+
+pub fn propose_upgrade(
+    env: &Env,
+    wasm_hash: BytesN<32>,
+    proposed_by: &Address,
+    expiry_ledger: u64,
+) -> Result<(), String> {
+    if get_pending_upgrade_proposal(env).is_some() {
+        return Err("Upgrade proposal already pending".to_string());
+    }
+
+    let proposal = UpgradeProposal {
+        wasm_hash,
+        proposed_by: proposed_by.clone(),
+        created_at: env.ledger().timestamp(),
+    };
+
+    env.storage()
+        .instance()
+        .set(&upgrade_proposal_key(env), &(proposal.wasm_hash.clone(), proposal.proposed_by.clone(), proposal.created_at));
+    env.storage()
+        .instance()
+        .set(&upgrade_proposal_expiry_key(env), &expiry_ledger);
+    Ok(())
+}
+
+pub fn get_pending_upgrade_proposal(env: &Env) -> Option<(BytesN<32>, Address, u64)> {
+    env.storage()
+        .instance()
+        .get(&upgrade_proposal_key(env))
+}
+
+pub fn get_upgrade_proposal_expiry(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&upgrade_proposal_expiry_key(env))
+}
+
+pub fn approve_upgrade_proposal(env: &Env, approver: &Address) -> Result<BytesN<32>, String> {
+    let proposal = get_pending_upgrade_proposal(env)
+        .ok_or("No pending upgrade proposal".to_string())?;
+
+    let expiry = get_upgrade_proposal_expiry(env)
+        .ok_or("Proposal expiry not set".to_string())?;
+
+    if env.ledger().sequence() > expiry {
+        clear_upgrade_proposal(env);
+        return Err("Upgrade proposal expired".to_string());
+    }
+
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_key(env));
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
+
+    Ok(proposal.0)
+}
+
+pub fn clear_upgrade_proposal(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_key(env));
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
 }

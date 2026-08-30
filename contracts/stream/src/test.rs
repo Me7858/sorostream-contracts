@@ -103,12 +103,12 @@ fn test_metadata_is_stored_and_updatable() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
     c.update_metadata(&t.sender, &stream_id, &metadata);
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.metadata, metadata);
+    assert_eq!(stream.options.metadata, metadata);
 
     let updated = Bytes::from_array(&t.env, &[9u8, 9u8, 9u8]);
     c.update_metadata(&t.sender, &stream_id, &updated);
     let updated_stream = c.get_stream(&stream_id);
-    assert_eq!(updated_stream.metadata, updated);
+    assert_eq!(updated_stream.options.metadata, updated);
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn test_auto_renew_respects_renew_count_limit() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.renewals_used, 1);
+    assert_eq!(stream.options.renewals_used, 1);
     assert_eq!(stream.start_time, 1000);
     assert_eq!(stream.end_time, 2000);
 
@@ -389,7 +389,7 @@ fn test_auto_renew_respects_renew_count_limit() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.renewals_used, 2);
+    assert_eq!(stream.options.renewals_used, 2);
     assert_eq!(stream.start_time, 2000);
     assert_eq!(stream.end_time, 3000);
 
@@ -449,7 +449,7 @@ fn test_auto_renew_without_renew_count_unlimited() {
 
         let stream = c.get_stream(&stream_id);
         assert_eq!(stream.status, StreamStatus::Active);
-        assert_eq!(stream.renewals_used, i as u32);
+        assert_eq!(stream.options.renewals_used, i as u32);
     }
 }
 
@@ -2185,7 +2185,7 @@ fn test_pause_resume() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Paused);
-    assert_eq!(stream.last_pause_time, 200);
+    assert_eq!(stream.options.last_pause_time, 200);
 
     // Get claimable while paused should be for 200s (20_000 tokens)
     t.env.ledger().set_timestamp(500);
@@ -2554,7 +2554,7 @@ fn test_withdraw_after_top_up() {
     assert_eq!(bal, 60_000);
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.total_withdrawn, 60_000);
+    assert_eq!(stream.options.total_withdrawn, 60_000);
 
     t.env.ledger().set_timestamp(1500);
     c.withdraw(&stream_id, &t.recipient);
@@ -3339,8 +3339,8 @@ fn test_holdback_deducted_from_deposit() {
     let stream = client(&t).get_stream(&stream_id);
 
     assert_eq!(stream.deposit, total - holdback, "deposit should be streaming portion only");
-    assert_eq!(stream.holdback_amount, holdback);
-    assert!(!stream.holdback_claimed);
+    assert_eq!(stream.options.holdback_amount, holdback);
+    assert!(!stream.options.holdback_claimed);
     assert_eq!(stream.flow_rate, (total - holdback) / duration as i128);
 }
 
@@ -3382,7 +3382,7 @@ fn test_release_holdback_transfers_to_recipient() {
     assert_eq!(after - before, holdback, "recipient should receive the holdback amount");
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.holdback_claimed, "holdback_claimed must be true after release");
+    assert!(stream.options.holdback_claimed, "holdback_claimed must be true after release");
 }
 
 /// Sender can claw back the holdback before recipient claims it.
@@ -3404,7 +3404,7 @@ fn test_claw_back_holdback_returns_to_sender() {
     assert_eq!(after - before, holdback, "sender should receive the clawed-back holdback");
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.holdback_claimed, "holdback_claimed must be true after claw-back");
+    assert!(stream.options.holdback_claimed, "holdback_claimed must be true after claw-back");
 }
 
 /// Double-release is rejected (holdback already settled).
@@ -4354,7 +4354,7 @@ fn test_steps_withdraw_at_first_boundary() {
 
     // current_step should now be 1.
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.current_step, 1u32, "current_step should advance to 1 after first withdrawal");
+    assert_eq!(stream.options.current_step, 1u32, "current_step should advance to 1 after first withdrawal");
 }
 
 /// Withdrawal between step 1 and step 2 is rejected.
@@ -4403,7 +4403,7 @@ fn test_steps_correct_amount_at_each_boundary() {
 
     // Verify current_step after 3 withdrawals.
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.current_step, 3u32);
+    assert_eq!(stream.options.current_step, 3u32);
 }
 
 /// Final step releases the full remaining balance (handles rounding dust).
@@ -4648,7 +4648,7 @@ fn test_min_withdrawal_persisted_on_stream() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(
-        stream.min_withdrawal_amount,
+        stream.options.min_withdrawal_amount,
         Some(floor),
         "min_withdrawal_amount must be stored on the stream",
     );
@@ -5101,7 +5101,7 @@ fn test_non_transferable_stream_flag_is_stored() {
     );
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.non_transferable, "non_transferable flag must be persisted as true");
+    assert!(stream.options.non_transferable, "non_transferable flag must be persisted as true");
 }
 
 #[test]
@@ -5117,7 +5117,7 @@ fn test_transferable_stream_flag_is_false_by_default() {
     );
 
     let stream = c.get_stream(&stream_id);
-    assert!(!stream.non_transferable, "non_transferable must be false when not set");
+    assert!(!stream.options.non_transferable, "non_transferable must be false when not set");
 }
 
 #[test]
@@ -5196,8 +5196,8 @@ fn test_pending_approval_stream_created_in_pending_state() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::PendingApproval);
-    assert_eq!(stream.approval_timestamp, 0u64);
-    assert!(stream.requires_recipient_approval);
+    assert_eq!(stream.options.approval_timestamp, 0u64);
+    assert!(stream.options.requires_recipient_approval);
 }
 
 #[test]
@@ -5235,7 +5235,7 @@ fn test_approve_stream_transitions_to_active() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.approval_timestamp, 200u64);
+    assert_eq!(stream.options.approval_timestamp, 200u64);
 }
 
 #[test]
@@ -5319,9 +5319,9 @@ fn test_lock_stream_sets_sender_locked_flag() {
         &None::<u32>, &None::<i128>, &false, &false,
     );
 
-    assert!(!c.get_stream(&stream_id).sender_locked);
+    assert!(!c.get_stream(&stream_id).options.sender_locked);
     c.lock_stream(&stream_id, &t.sender);
-    assert!(c.get_stream(&stream_id).sender_locked);
+    assert!(c.get_stream(&stream_id).options.sender_locked);
 }
 
 #[test]
@@ -5360,7 +5360,7 @@ fn test_recipient_can_withdraw_from_locked_stream() {
     // Should succeed — lock only prevents sender cancellation.
     c.withdraw(&stream_id, &t.recipient);
     let stream = c.get_stream(&stream_id);
-    assert!(stream.total_withdrawn > 0);
+    assert!(stream.options.total_withdrawn > 0);
 }
 
 #[test]
@@ -6011,7 +6011,7 @@ fn test_token_whitelist_prevents_spam_tokens() {
 
     // Lock the stream first
     c.lock_stream(&stream_id, &t.sender);
-    assert!(c.get_stream(&stream_id).sender_locked);
+    assert!(c.get_stream(&stream_id).options.sender_locked);
     
     // Attempt to top_up should be rejected
     let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000i128);
@@ -6156,7 +6156,7 @@ fn test_update_stream_rate_settles_balance() {
 
     // But total_withdrawn should reflect the settled amount
     let stream = c.get_stream(&stream_id);
-    assert!(stream.total_withdrawn >= claimable_before - 1000, "settled balance should be recorded");
+    assert!(stream.options.total_withdrawn >= claimable_before - 1000, "settled balance should be recorded");
 }
 
 /// Test that rate update is only callable by sender.
@@ -6369,7 +6369,7 @@ fn test_update_stream_rate_doesnt_break_withdrawals() {
     c.withdraw(&stream_id, &t.recipient);
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.total_withdrawn > 0, "withdrawal should succeed after rate update");
+    assert!(stream.options.total_withdrawn > 0, "withdrawal should succeed after rate update");
 }
 
 /// Test multiple rate updates in sequence.
@@ -6473,11 +6473,11 @@ fn test_update_stream_rate_updates_deposit() {
     // Verify end_time was extended
     assert!(stream_after_topup.end_time > original_end, 
         "end_time should be extended after top_up");
-    assert!(!stream_after_topup.sender_locked, "stream should not be locked yet");
+    assert!(!stream_after_topup.options.sender_locked, "stream should not be locked yet");
     
     // Now lock the stream
     c.lock_stream(&stream_id, &t.sender);
-    assert!(c.get_stream(&stream_id).sender_locked);
+    assert!(c.get_stream(&stream_id).options.sender_locked);
     
     // Subsequent top_up should fail
     let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000i128);
@@ -7687,10 +7687,190 @@ fn test_batch_create_multi_token_balance_check() {
         &lock_untils,
         &0u64,
     );
-    
+
     assert!(result.is_err(), "Batch should fail due to insufficient token2 balance");
-    
+
     // No streams should be created
     let all_stream_ids = c.get_all_stream_ids(&0u64, &1000u32);
     assert_eq!(all_stream_ids.len(), 0, "No streams when any token has insufficient balance");
+}
+
+// Issue #489: splitStream closes parent stream and distributes deposit to children
+#[test]
+fn test_split_stream_closes_parent_stream() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1,000,000 stroops deposit
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Verify parent stream exists and is Active
+    let parent_stream = c.get_stream(&stream_id);
+    assert_eq!(parent_stream.status, StreamStatus::Active);
+    assert_eq!(parent_stream.deposit, 1_000_000);
+
+    // Create recipients for split
+    let recipient1 = Address::generate(&t.env);
+    let recipient2 = Address::generate(&t.env);
+
+    let mut recipients = Vec::new(&t.env);
+    recipients.push_back(recipient1.clone());
+    recipients.push_back(recipient2.clone());
+
+    let mut proportions = Vec::new(&t.env);
+    proportions.push_back(1u128); // 50%
+    proportions.push_back(1u128); // 50%
+
+    // Split the stream
+    let child_stream_ids = c.split_stream(&stream_id, &t.sender, &recipients, &proportions, &0u64);
+    assert_eq!(child_stream_ids.len(), 2);
+
+    // Verify parent stream is closed (should not exist in storage)
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err(), "Parent stream should be closed after split");
+
+    // Verify child streams exist and have correct deposits
+    let child_stream1 = c.get_stream(&child_stream_ids.get(0).unwrap());
+    let child_stream2 = c.get_stream(&child_stream_ids.get(1).unwrap());
+
+    assert_eq!(child_stream1.status, StreamStatus::Active);
+    assert_eq!(child_stream2.status, StreamStatus::Active);
+    assert_eq!(child_stream1.deposit, 500_000);
+    assert_eq!(child_stream2.deposit, 500_000);
+}
+
+// Issue #490: getStream returns Completed status when stream deposit is fully exhausted
+#[test]
+fn test_exhausted_stream_shows_completed_status() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    // Create a stream with 1000 stroops deposit and 100 stroop/sec flow rate
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1000,
+        &100,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Verify initial status is Active
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+
+    // Advance time to allow full amount to be claimable (10 seconds for 1000 stroops at 100/sec)
+    t.env.ledger().set_timestamp(10);
+
+    // Withdraw all available amount
+    c.withdraw(&stream_id, &t.recipient);
+
+    // Check the stream status - should be Completed after full exhaustion
+    let stream_after = c.get_stream(&stream_id);
+    assert_eq!(
+        stream_after.status,
+        StreamStatus::Completed,
+        "Stream should show Completed status when deposit is fully exhausted"
+    );
+}
+
+// Issue #491: execute_admin_override entry point checks timelock before execution
+#[test]
+fn test_admin_override_checks_timelock() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let admin = Address::generate(&t.env);
+    c.initialize(&admin, &soroban_sdk::String::from_str(&t.env, "1.0.0"));
+
+    // Set admin override timelock to 1000 seconds
+    let timelock_seconds = 1000u64;
+    c.set_admin_override_timelock(&timelock_seconds).unwrap();
+
+    // Create a stream
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &100_000,
+        &100,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
+        &0i128,
+        &None::<u32>,
+        &None::<i128>,
+        &None::<u32>,
+    );
+
+    // Initiate an override request
+    let reason = soroban_sdk::String::from_str(&t.env, "test override");
+    let request_id = c.initiate_admin_override(
+        &stream_id,
+        &OverrideAction::Cancel,
+        &reason,
+    ).unwrap();
+
+    // Try to execute override immediately (should fail - timelock not elapsed)
+    let result = c.try_execute_admin_override(&request_id);
+    assert!(result.is_err(), "execute_admin_override should fail before timelock elapsed");
+
+    // Advance time past the timelock
+    t.env.ledger().set_timestamp(timelock_seconds + 1);
+
+    // Now execute override should succeed
+    let result = c.try_execute_admin_override(&request_id);
+    assert!(result.is_ok(), "execute_admin_override should succeed after timelock elapsed");
+}
+
+// Issue #492: Invalid stream ID returns StreamNotFound error, not generic ContractError
+#[test]
+fn test_invalid_stream_id_returns_stream_not_found_error() {
+    let t = setup();
+    let c = client(&t);
+
+    // Try to get a stream that doesn't exist
+    let result = c.try_get_stream(&999999u64);
+
+    // Should return an error (StreamError::StreamNotFound)
+    assert!(result.is_err(), "Should error for invalid stream ID");
+
+    // Verify the error is specifically StreamNotFound
+    // The error code 1 corresponds to StreamError::StreamNotFound
+    match result {
+        Err(e) => {
+            // Check that the error code is 1 (StreamNotFound)
+            let error_code = e.code;
+            assert_eq!(error_code, 1, "Error should be StreamNotFound (code 1), not a generic ContractError");
+        }
+        Ok(_) => panic!("Should have returned an error for invalid stream ID"),
+    }
 }

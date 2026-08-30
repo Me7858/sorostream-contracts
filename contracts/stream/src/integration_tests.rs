@@ -272,6 +272,53 @@ fn integration_treasury_fees_on_batch_withdraw() {
 }
 
 #[test]
+fn integration_creation_tax_reduces_stream_deposit() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_treasury_address(&treasury);
+    c.set_creation_tax(&100_000, &0u32);
+
+    let stream_id = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
+        &0u64, &false, &0u64, &false,
+    );
+
+    assert_eq!(balance(&ie, &ie.sender), 0);
+    assert_eq!(balance(&ie, &treasury), 100_000);
+    assert_eq!(balance(&ie, &ie.contract), 900_000);
+    assert_eq!(c.get_stream(&stream_id).deposit, 900_000);
+}
+
+#[test]
+fn integration_creation_tax_bps_reduces_stream_deposit() {
+    let ie = setup_integration();
+    let c = client(&ie);
+    let admin = Address::generate(&ie.env);
+    let treasury = Address::generate(&ie.env);
+    ie.env.ledger().set_timestamp(0);
+    mint(&ie, &ie.sender, &1_000_000);
+
+    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
+    c.set_treasury_address(&treasury);
+    c.set_creation_tax(&0, &250u32);
+
+    let stream_id = c.create_stream(
+        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
+        &0u64, &false, &0u64, &false,
+    );
+
+    assert_eq!(balance(&ie, &treasury), 25_000);
+    assert_eq!(balance(&ie, &ie.contract), 975_000);
+    assert_eq!(c.get_stream(&stream_id).deposit, 975_000);
+}
+
+#[test]
 fn integration_zero_fee_no_treasury_deduction() {
     let ie = setup_integration();
     let c = client(&ie);
