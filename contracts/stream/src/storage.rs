@@ -540,6 +540,37 @@ pub fn remove_stream_manager(env: &Env, stream_id: u64) {
     env.storage().persistent().remove(&stream_manager_key(env, stream_id));
 }
 
+// --- Subscription mode (Issue #466) ---
+//
+// A subscription is an auto_renew stream whose renewals draw from a SAC
+// allowance the sender pre-approved once (via the token's `approve`), using
+// `transfer_from`, rather than requiring the sender to be a live signer on
+// whatever transaction happens to trigger the renewal (which the original
+// auto_renew mechanism required, and which — since renewals are normally
+// triggered by a *recipient's* withdraw call — makes genuine unattended
+// auto-renewal impractical). This flag selects that funding path; the rest
+// of a subscription's fields (auto_renew, renew_count, renewals_used) are
+// the ordinary ones already on `Stream`.
+
+fn subscription_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
+    (Symbol::new(env, "sub"), stream_id)
+}
+
+/// Returns whether `stream_id` is a subscription (allowance-funded renewals).
+pub fn is_subscription(env: &Env, stream_id: u64) -> bool {
+    env.storage().persistent().get(&subscription_key(env, stream_id)).unwrap_or(false)
+}
+
+/// Marks `stream_id` as a subscription.
+pub fn set_subscription(env: &Env, stream_id: u64) {
+    env.storage().persistent().set(&subscription_key(env, stream_id), &true);
+}
+
+/// Clears the subscription flag for `stream_id`.
+pub fn remove_subscription(env: &Env, stream_id: u64) {
+    env.storage().persistent().remove(&subscription_key(env, stream_id));
+}
+
 // --- Version tracking ---
 
 /// Stores the contract version string.

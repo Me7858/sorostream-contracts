@@ -24,6 +24,7 @@ pub use oracle::IPriceOracle;
 #[cfg(test)] mod sender_whitelist_tests;
 #[cfg(test)] mod stream_analytics_tests;
 #[cfg(test)] mod stream_manager_tests;
+#[cfg(test)] mod subscription_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -42,6 +43,7 @@ use storage::{
     get_analytics_value_streamed, get_analytics_streams_created, get_analytics_streams_cancelled,
     record_value_streamed, record_stream_created, record_stream_cancelled,
     get_stream_manager, set_stream_manager, remove_stream_manager,
+    is_subscription, set_subscription, remove_subscription,
     get_fees_collected, get_global_stream_at, get_global_stream_count,
     get_grace_period_ledgers, get_holdback, get_ids_by_recipient,
     get_ids_by_sender, get_ids_by_tag, get_max_deposit_per_token, get_max_streams_per_token, get_new_sender_stream_cap,
@@ -431,6 +433,7 @@ impl SoroStreamContract {
         if get_delegate(&env, stream_id).is_some() { remove_delegate(&env, stream_id); }
         if get_on_complete(&env, stream_id).is_some() { remove_on_complete(&env, stream_id); }
         if get_stream_manager(&env, stream_id).is_some() { remove_stream_manager(&env, stream_id); }
+        if is_subscription(&env, stream_id) { remove_subscription(&env, stream_id); }
         events::stream_archived(&env, stream_id, &stream.sender, &stream.recipient, stream.deposit);
         Ok(())
     }
@@ -438,9 +441,12 @@ impl SoroStreamContract {
     // ─────────────────────────────────────────────────────────────────────────
     // Feature (a): Expiry warning window config
     // ─────────────────────────────────────────────────────────────────────────
-    /// Creates a new payment stream.
+    /// Internal creation path shared by `create_stream` and `create_subscription`.
+    /// Kept private (and so exempt from Soroban's 10-parameter contract-entry
+    /// limit) purely so the `renew_count` knob doesn't need its own public
+    /// entry point.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_stream(
+    fn create_stream_internal(
         env: Env,
         sender: Address,
         recipient: Address,
@@ -450,10 +456,10 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        renew_count: Option<u32>,
         lock_until: u64,
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError> {
-        let renew_count: Option<u32> = None;
         let non_transferable = false;
         let holdback_amount = 0i128;
         let withdrawal_steps: Option<u32> = None;
@@ -714,6 +720,105 @@ impl SoroStreamContract {
         }
 
         Ok(stream_id)
+    }
+
+    /// Creates a new payment stream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+        allow_recipient_termination: bool,
+    ) -> Result<u64, StreamError> {
+        Self::create_stream_internal(
+            env, sender, recipient, token, amount, duration_seconds, cliff_seconds,
+            nonce, auto_renew, None, lock_until, allow_recipient_termination,
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Issue #466: Subscription mode
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // A subscription is an auto-renewing stream whose renewals draw from a
+    // SAC allowance the sender pre-approves once (`token.approve(contract,
+    // allowance, expiration_ledger)`) rather than requiring the sender to be
+    // a live signer on whatever transaction happens to trigger the renewal.
+    // See storage::is_subscription for why that distinction matters, and the
+    // renewal branch in `withdraw`/`batch_withdraw` for the funding logic.
+
+    /// Creates a subscription: a stream that automatically starts a new
+    /// cycle of the same rate and duration when the current one completes,
+    /// drawing the next cycle's deposit from the sender's SAC allowance to
+    /// this contract (`token.approve(contract_address, allowance, ledger)`)
+    /// instead of requiring an interactive re-approval at renewal time.
+    ///
+    /// `renew_count` optionally caps the number of renewals (`None` =
+    /// unlimited, until the sender's allowance is exhausted or the
+    /// subscription is cancelled).
+    ///
+    /// # Errors
+    /// Same as `create_stream`. Renewal itself may later fail (ending the
+    /// subscription) if the sender's allowance is insufficient — see
+    /// `SubscriptionFundingExhausted`.
+    pub fn create_subscription(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        renew_count: Option<u32>,
+        lock_until: u64,
+    ) -> Result<u64, StreamError> {
+        let stream_id = Self::create_stream_internal(
+            env.clone(), sender.clone(), recipient.clone(), token, amount, duration_seconds,
+            cliff_seconds, nonce, true, renew_count, lock_until, false,
+        )?;
+        set_subscription(&env, stream_id);
+        events::subscription_created(&env, stream_id, &sender, &recipient, amount);
+        Ok(stream_id)
+    }
+
+    /// Cancels a subscription, refunding the sender's unused (unstreamed)
+    /// deposit for the current billing cycle, settling the recipient's
+    /// already-earned portion, and permanently ending future renewals.
+    ///
+    /// Only the stream's sender may call this (enforced by the underlying
+    /// `cancel_stream`).
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — no such stream.
+    /// - `NotSubscription` — `stream_id` was not created via `create_subscription`.
+    pub fn cancel_subscription(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError> {
+        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        if !is_subscription(&env, stream_id) {
+            return Err(StreamError::NotSubscription);
+        }
+        if stream.sender != sender {
+            return Err(StreamError::NotSender);
+        }
+        remove_subscription(&env, stream_id);
+        // cancel_stream computes and emits the exact refund/earned split as
+        // part of its own StreamCancelled event; this event just marks that
+        // the termination was a subscription cancellation.
+        Self::cancel_stream(env.clone(), stream_id, sender.clone())?;
+        events::subscription_cancelled(&env, stream_id, &sender);
+        Ok(())
+    }
+
+    /// Returns whether `stream_id` is a subscription (Issue #466).
+    pub fn is_subscription(env: Env, stream_id: u64) -> bool {
+        is_subscription(&env, stream_id)
     }
 
     /// Creates a new payment stream using a federation name (Issue #238).
@@ -2726,10 +2831,18 @@ impl SoroStreamContract {
                     // Invoke on_complete callback if configured
                     Self::invoke_on_complete(&env, &stream);
                 } else {
-                    // Check sender balance for renewal
+                    // Check funding availability for renewal. Subscriptions
+                    // (Issue #466) draw from a pre-approved SAC allowance and
+                    // need no interactive re-auth; legacy auto_renew streams
+                    // require the sender's live balance *and* signature.
+                    let is_sub = is_subscription(&env, stream_id);
                     let token_client = token::Client::new(&env, &stream.token);
-                    let sender_balance = token_client.balance(&stream.sender);
-                    if sender_balance < stream.deposit {
+                    let renewal_funded = if is_sub {
+                        token_client.allowance(&stream.sender, &env.current_contract_address()) >= stream.deposit
+                    } else {
+                        token_client.balance(&stream.sender) >= stream.deposit
+                    };
+                    if !renewal_funded {
                         stream.status = StreamStatus::Completed;
                         stream.locked = false;
                         save_stream(&env, &stream);
@@ -2751,13 +2864,20 @@ impl SoroStreamContract {
                                 &dust,
                             );
                         }
-                        events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
+                        if is_sub {
+                            remove_subscription(&env, stream_id);
+                            events::subscription_funding_exhausted(&env, stream_id, &stream.sender, stream.deposit);
+                        } else {
+                            events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
+                        }
                         events::stream_completed(&env, stream_id);
                         // Invoke on_complete callback if configured
                         Self::invoke_on_complete(&env, &stream);
                     } else {
                         // Proceed with renewal and increment renewals_used
-                        stream.sender.require_auth();
+                        if !is_sub {
+                            stream.sender.require_auth();
+                        }
                         let new_end = stream
                             .end_time
                             .checked_add(duration)
@@ -2779,11 +2899,21 @@ impl SoroStreamContract {
                                 &recipient_amount,
                             );
                         }
-                        token_client.transfer(
-                            &stream.sender,
-                            &env.current_contract_address(),
-                            &stream.deposit,
-                        );
+                        if is_sub {
+                            token_client.transfer_from(
+                                &env.current_contract_address(),
+                                &stream.sender,
+                                &env.current_contract_address(),
+                                &stream.deposit,
+                            );
+                            events::subscription_renewed(&env, stream_id, &stream.sender, stream.deposit, stream.renewals_used);
+                        } else {
+                            token_client.transfer(
+                                &stream.sender,
+                                &env.current_contract_address(),
+                                &stream.deposit,
+                            );
+                        }
                     }
                 }
             } else {
@@ -5052,15 +5182,23 @@ impl SoroStreamContract {
                         true  // No limit set, can always renew
                     };
 
-                    if !can_renew {
-                        // Renewal limit reached, mark as completed
+                    let is_sub = is_subscription(&env, stream_id);
+                    let token_client = token::Client::new(&env, &stream.token);
+                    let renewal_funded = if is_sub {
+                        token_client.allowance(&stream.sender, &env.current_contract_address()) >= stream.deposit
+                    } else {
+                        token_client.balance(&stream.sender) >= stream.deposit
+                    };
+
+                    if !can_renew || !renewal_funded {
+                        // Renewal limit reached (or, for subscriptions/renewing
+                        // streams, funding is no longer sufficient): mark completed.
                         decrement_active_stream_count(&env);
                         decrement_token_stream_count(&env, &stream.token);
                         remove_stream(&env, stream_id);
                         unindex_by_sender(&env, &stream.sender, stream_id);
                         unindex_by_recipient(&env, &stream.recipient, stream_id);
 
-                        let token_client = token::Client::new(&env, &stream.token);
                         if recipient_amount > 0 {
                             token_client.transfer(
                                 &env.current_contract_address(),
@@ -5076,10 +5214,19 @@ impl SoroStreamContract {
                             );
                         }
 
-                        events::renewal_limit_reached(&env, stream_id, &stream.sender, stream.renewals_used);
+                        if !can_renew {
+                            events::renewal_limit_reached(&env, stream_id, &stream.sender, stream.renewals_used);
+                        } else if is_sub {
+                            remove_subscription(&env, stream_id);
+                            events::subscription_funding_exhausted(&env, stream_id, &stream.sender, stream.deposit);
+                        } else {
+                            events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
+                        }
                         events::stream_completed(&env, stream_id);
                     } else {
-                        stream.sender.require_auth();
+                        if !is_sub {
+                            stream.sender.require_auth();
+                        }
                         let new_end = stream
                             .end_time
                             .checked_add(duration)
@@ -5092,7 +5239,6 @@ impl SoroStreamContract {
                         save_stream(&env, &stream);
 
                         // INTERACTIONS
-                        let token_client = token::Client::new(&env, &stream.token);
                         if recipient_amount > 0 {
                             token_client.transfer(
                                 &env.current_contract_address(),
@@ -5100,11 +5246,21 @@ impl SoroStreamContract {
                                 &recipient_amount,
                             );
                         }
-                        token_client.transfer(
-                            &stream.sender,
-                            &env.current_contract_address(),
-                            &stream.deposit,
-                        );
+                        if is_sub {
+                            token_client.transfer_from(
+                                &env.current_contract_address(),
+                                &stream.sender,
+                                &env.current_contract_address(),
+                                &stream.deposit,
+                            );
+                            events::subscription_renewed(&env, stream_id, &stream.sender, stream.deposit, stream.renewals_used);
+                        } else {
+                            token_client.transfer(
+                                &stream.sender,
+                                &env.current_contract_address(),
+                                &stream.deposit,
+                            );
+                        }
                     }
                 } else {
                     decrement_active_stream_count(&env);

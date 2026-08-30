@@ -434,6 +434,45 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, sender: &Address) {
         sender.clone(),
     );
 }
+// ── Issue #466: Subscription mode ────────────────────────────────────────────
+
+/// Emitted when a subscription stream is created.
+pub fn subscription_created(env: &Env, stream_id: u64, sender: &Address, recipient: &Address, deposit: i128) {
+    env.events().publish(
+        (Symbol::new(env, "SubscriptionCreated"), stream_id),
+        (sender.clone(), recipient.clone(), deposit),
+    );
+}
+
+/// Emitted each time a subscription successfully renews by drawing from the
+/// sender's pre-approved allowance.
+pub fn subscription_renewed(env: &Env, stream_id: u64, sender: &Address, amount_drawn: i128, renewals_used: u32) {
+    env.events().publish(
+        (Symbol::new(env, "SubscriptionRenewed"), stream_id),
+        (sender.clone(), amount_drawn, renewals_used),
+    );
+}
+
+/// Emitted when a subscription's renewal fails because the sender's SAC
+/// allowance to this contract is no longer sufficient to cover the next cycle.
+pub fn subscription_funding_exhausted(env: &Env, stream_id: u64, sender: &Address, required: i128) {
+    env.events().publish(
+        (Symbol::new(env, "SubscriptionFundingExhausted"), stream_id),
+        (sender.clone(), required),
+    );
+}
+
+/// Emitted when the sender cancels a subscription. The exact refund/earned
+/// split is emitted separately by the underlying `cancel_stream` call as its
+/// own `StreamCancelled` event; this just marks the termination as a
+/// subscription cancellation.
+pub fn subscription_cancelled(env: &Env, stream_id: u64, sender: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "SubscriptionCancelled"), stream_id),
+        sender.clone(),
+    );
+}
+
 // ── Issue #467: Stream manager delegation ────────────────────────────────────
 
 /// Emitted when a restricted manager is set for a stream.

@@ -35,6 +35,33 @@ pub trait SoroStreamInterface {
         allow_recipient_termination: bool,
     ) -> Result<u64, StreamError>;
 
+    // ── Issue #466: Subscription mode ───────────────────────────────────────
+
+    /// Creates a subscription: an auto-renewing stream that draws each
+    /// renewal's deposit from the sender's pre-approved SAC allowance to
+    /// this contract, rather than requiring an interactive re-approval.
+    #[allow(clippy::too_many_arguments)]
+    fn create_subscription(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        renew_count: Option<u32>,
+        lock_until: u64,
+    ) -> Result<u64, StreamError>;
+
+    /// Cancels a subscription: refunds the sender's unused deposit for the
+    /// current cycle, settles the recipient's earned portion, and ends
+    /// future renewals. Only the stream's sender may call this.
+    fn cancel_subscription(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
+
+    /// Returns whether `stream_id` is a subscription.
+    fn is_subscription(env: Env, stream_id: u64) -> bool;
+
     fn create_stream_with_federation(
         env: Env,
         sender: Address,
