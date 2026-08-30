@@ -1557,3 +1557,148 @@ pub fn remove_stream_tag(env: &Env, stream_id: u64) {
         .persistent()
         .remove(&stream_tag_key(env, stream_id));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cancellation fee (issue #288)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CANCEL_FEE_BPS_KEY: &str = "cf_bps";
+
+/// Gets the cancellation fee in basis points (0 = no fee, max 10_000 = 100%).
+///
+/// This fee is deducted from the **sender's refund portion** when they cancel an
+/// active stream early. The fee is accumulated in the protocol treasury (same
+/// bucket as the stream creation fee) and swept by the admin via `sweep_fees`.
+pub fn get_cancellation_fee_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, CANCEL_FEE_BPS_KEY))
+        .unwrap_or(0u32)
+}
+
+/// Sets the cancellation fee in basis points. Must be <= 10_000 (100%).
+/// Only callable by the admin.
+pub fn set_cancellation_fee_bps(env: &Env, fee_bps: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, CANCEL_FEE_BPS_KEY), &fee_bps);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sender collateral / stake mechanism (issue #293)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Senders may voluntarily stake a token to unlock the right to create streams.
+// An admin-configurable minimum-stake threshold can be set per-token; senders
+// below that threshold are blocked from creating new streams with that token.
+//
+// Staked funds are held in the contract and can be slashed by the admin to
+// penalise spam or bad-actor behaviour.  Senders must wait `STAKE_UNLOCK_DELAY`
+// seconds after calling `initiate_unstake` before their stake can be withdrawn
+// (cooldown discourages quick deposit-and-withdraw tactics).
+
+/// Lock period (seconds) between initiating and completing an unstake.
+/// Default: 24 hours.
+pub const STAKE_UNLOCK_DELAY: u64 = 24 * 60 * 60;
+
+fn stake_balance_key(env: &Env, sender: &Address, token: &Address) -> (Symbol, Address, Address) {
+    (Symbol::new(env, "stk_b"), sender.clone(), token.clone())
+}
+
+fn stake_unlock_at_key(env: &Env, sender: &Address, token: &Address) -> (Symbol, Address, Address) {
+    (Symbol::new(env, "stk_u"), sender.clone(), token.clone())
+}
+
+fn min_stake_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "stk_min"), token.clone())
+}
+
+// ── Per-sender stake balance ──────────────────────────────────────────────────
+
+/// Returns the staked balance for `sender` in `token` (0 if none).
+pub fn get_stake_balance(env: &Env, sender: &Address, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&stake_balance_key(env, sender, token))
+        .unwrap_or(0i128)
+}
+
+/// Adds `amount` to the staked balance for `sender` in `token`.
+pub fn add_stake_balance(env: &Env, sender: &Address, token: &Address, amount: i128) {
+    let current = get_stake_balance(env, sender, token);
+    env.storage()
+        .persistent()
+        .set(&stake_balance_key(env, sender, token), &current.saturating_add(amount));
+}
+
+/// Subtracts `amount` from the staked balance for `sender` in `token`.
+/// Saturates at zero (never goes negative).
+pub fn sub_stake_balance(env: &Env, sender: &Address, token: &Address, amount: i128) {
+    let current = get_stake_balance(env, sender, token);
+    let next = current.saturating_sub(amount);
+    if next == 0 {
+        env.storage()
+            .persistent()
+            .remove(&stake_balance_key(env, sender, token));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&stake_balance_key(env, sender, token), &next);
+    }
+}
+
+/// Sets the staked balance for `sender` in `token` to an exact value.
+pub fn set_stake_balance(env: &Env, sender: &Address, token: &Address, amount: i128) {
+    if amount <= 0 {
+        env.storage()
+            .persistent()
+            .remove(&stake_balance_key(env, sender, token));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&stake_balance_key(env, sender, token), &amount);
+    }
+}
+
+// ── Unstake cooldown ──────────────────────────────────────────────────────────
+
+/// Returns the timestamp after which a pending unstake may be finalised (0 = no pending unstake).
+pub fn get_stake_unlock_at(env: &Env, sender: &Address, token: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&stake_unlock_at_key(env, sender, token))
+        .unwrap_or(0u64)
+}
+
+/// Records the unlock timestamp for a pending unstake request.
+pub fn set_stake_unlock_at(env: &Env, sender: &Address, token: &Address, unlock_at: u64) {
+    env.storage()
+        .persistent()
+        .set(&stake_unlock_at_key(env, sender, token), &unlock_at);
+}
+
+/// Clears the pending unstake unlock timestamp.
+pub fn clear_stake_unlock_at(env: &Env, sender: &Address, token: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&stake_unlock_at_key(env, sender, token));
+}
+
+// ── Per-token minimum stake threshold ────────────────────────────────────────
+
+/// Returns the minimum stake required for a sender to create streams with `token` (0 = no requirement).
+pub fn get_min_stake(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&min_stake_key(env, token))
+        .unwrap_or(0i128)
+}
+
+/// Sets the minimum stake threshold for `token`.
+pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
+    if amount <= 0 {
+        env.storage().persistent().remove(&min_stake_key(env, token));
+    } else {
+        env.storage().persistent().set(&min_stake_key(env, token), &amount);
+    }
+}

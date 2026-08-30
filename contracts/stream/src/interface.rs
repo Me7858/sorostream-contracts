@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter};
+use crate::types::{AuditEntry, ProtocolStats, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -28,19 +28,8 @@ pub trait SoroStreamInterface {
         token: Address,
         amount: i128,
         duration_seconds: u64,
-        cliff_seconds: u64,
-        nonce: u64,
         auto_renew: bool,
-        renew_count: Option<u32>,
-        lock_until: u64,
-        allow_recipient_termination: bool,
-        non_transferable: bool,
-        holdback_amount: i128,
-        withdrawal_steps: Option<u32>,
-        min_withdrawal_amount: Option<i128>,
-        non_transferable: bool,
-        requires_recipient_approval: bool,
-        enforce_recipient_allowlist: bool,
+        params: crate::types::CreateStreamParams,
     ) -> Result<u64, StreamError>;
 
     fn create_stream_with_federation(

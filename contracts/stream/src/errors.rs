@@ -1,6 +1,6 @@
 use soroban_sdk::contracterror;
 
-/// Custom errors for the SoroStream contract (≤50 variants for Soroban XDR).
+/// Custom errors for the SoroStream contract (≤50 variants, Soroban XDR limit).
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -19,7 +19,6 @@ pub enum StreamError {
     Overflow = 15,
     ZeroFlowRate = 16,
     BatchLengthMismatch = 17,
-    TokenMismatch = 18,
     StreamLocked = 19,
     NotAuthorized = 20,
     StreamNotPaused = 21,
@@ -38,7 +37,6 @@ pub enum StreamError {
     RateLimitExceeded = 41,
     InvalidSlippage = 43,
     DurationExceedsMax = 44,
-    InvalidTokenAddress = 45,
     StartTimeTooFar = 46,
     IDCollision = 47,
     NextStepNotReached = 48,
@@ -50,28 +48,20 @@ pub enum StreamError {
     RedirectRecipientMismatch = 54,
     /// Dual stream requires both token addresses to be distinct.
     DuplicateTokenInDualStream = 55,
-    /// Operation requires a dual-token stream but the stream only has one token.
-    NotDualStream = 56,
-    /// Operation requires a single-token stream but the stream is dual-token.
-    IsDualStream = 57,
     /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
     StreamNonTransferable = 58,
     /// `withdraw` was called on a stream still in `PendingApproval` state.
-    /// The recipient must call `approve_stream` first.
     AwaitingApproval = 59,
-    /// `cancel_stream` was called by the sender on a stream they have irrevocably
-    /// locked via `lock_stream`.
+    /// `cancel_stream` was called on a sender-locked stream.
     StreamIsLocked = 60,
-    /// Recipient is not on the admin-managed recipient allowlist, and the stream
-    /// requires allowlist enforcement.
+    /// Recipient is not on the admin-managed recipient allowlist.
     RecipientNotAllowed = 61,
-    PriceDeviationTooHigh = 56,
-    TokenStreamCapExceeded = 57,
-    AddressBlocked = 58,
-    StreamNonTransferable = 59,
-    /// The stream's end_time has passed but the grace period is still active.
-    GracePeriodActive = 60,
-    AwaitingApproval = 61,
-    InvalidPartialCancel = 63,
+    /// Per-asset maximum deposit exceeded.
     MaxDepositExceeded = 64,
+    /// Sender's staked collateral is below the minimum required for this token.
+    InsufficientStake = 66,
+    /// Unstake cooldown has not yet elapsed.
+    StakeStillLocked = 67,
+    /// No pending unstake to complete.
+    NoPendingUnstake = 68,
 }

@@ -85,6 +85,24 @@ pub struct Milestone {
     pub status: MilestoneStatus,
 }
 
+/// Per-stream lifecycle counters and guards, factored out to keep `Stream`
+/// within the Soroban XDR 40-field limit for `#[contracttype]` structs.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamMeta {
+    /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
+    pub locked: bool,
+    /// Index of the last completed withdrawal step (0-based).
+    /// Starts at 0; incremented each time a step boundary is crossed.
+    /// Only meaningful when `withdrawal_steps` is `Some`.
+    pub current_step: u32,
+    /// Ledger timestamp at which the recipient approved the stream.
+    /// `0` while the stream is in `PendingApproval` state.
+    pub approval_timestamp: u64,
+    /// Number of times this stream has been renewed so far.
+    pub renewals_used: u32,
+}
+
 /// Represents a single payment stream.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -119,9 +137,6 @@ pub struct Stream {
     /// renew up to this many times. Once reached, the stream will complete permanently and not renew.
     /// `None` means unlimited auto-renewals (default behaviour when auto_renew is true).
     pub renew_count: Option<u32>,
-    /// Number of times this stream has been renewed so far. Starts at 0 and increments each time
-    /// the stream auto-renews. Only meaningful when `auto_renew` is true.
-    pub renewals_used: u32,
     /// Whether the recipient is allowed to terminate the stream early.
     pub allow_recipient_termination: bool,
     /// Ledger timestamp of when the stream was last paused (0 if never paused).
@@ -138,8 +153,8 @@ pub struct Stream {
     /// When true, milestones unlock automatically at their unlock_time (no sender approval needed).
     /// When false, milestones require sender approval via release_milestone().
     pub milestone_release_mode: bool,
-    /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
-    pub locked: bool,
+    /// Lifecycle counters and reentrancy guard (factored into sub-struct for XDR field limit).
+    pub meta: StreamMeta,
     /// Optional holdback amount kept in escrow until explicitly released (in stroops).
     /// Deducted from the streaming portion at creation time.
     pub holdback_amount: i128,
@@ -183,11 +198,6 @@ pub struct Stream {
     /// `None` means free-form withdrawal (default behaviour).
     pub withdrawal_steps: Option<u32>,
 
-    /// Index of the last completed withdrawal step (0-based).
-    /// Starts at 0; incremented each time a step boundary is crossed.
-    /// Only meaningful when `withdrawal_steps` is `Some`.
-    pub current_step: u32,
-
     // ── Minimum withdrawal amount ─────────────────────────────────────────────
 
     /// Optional minimum claimable amount required before a withdrawal is accepted.
@@ -219,14 +229,6 @@ pub struct Stream {
     /// sender may cancel at zero cost (full deposit refunded).
     /// Set at creation time and immutable thereafter.
     pub requires_recipient_approval: bool,
-
-    /// Ledger timestamp at which the recipient approved the stream.
-    ///
-    /// `0` while the stream is in `PendingApproval` state.
-    /// Set by `approve_stream` and used as the effective `start_time` for all
-    /// claimable-balance calculations so that no tokens accrue during the
-    /// pending window.
-    pub approval_timestamp: u64,
 
     // ── Sender-initiated irrevocable lock ─────────────────────────────────────
 
@@ -410,6 +412,21 @@ pub struct AdminOverrideRequest {
     pub reason: String,
 }
 
+/// Optional status wrapper for `StreamQueryFilter`.
+///
+/// Soroban's `#[contracttype]` macro does not support `Option<EnumType>` directly
+/// in struct fields because the generated XDR serialization requires a concrete
+/// `From<StreamStatus>` impl for `ScVal`.  This newtype wraps the optional status
+/// so it is serialised as a union variant instead.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OptionalStreamStatus {
+    /// No status filter — match all statuses.
+    None,
+    /// Filter by this specific status.
+    Some(StreamStatus),
+}
+
 /// Optional filter struct for querying streams efficiently without iterating all records.
 ///
 /// All fields are optional; a `None` value means no filtering on that criterion.
@@ -417,12 +434,42 @@ pub struct AdminOverrideRequest {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct StreamQueryFilter {
-    /// Optional status filter. If set, only streams with this status are returned.
-    pub status: Option<StreamStatus>,
+    /// Optional status filter. If set to `OptionalStreamStatus::Some(s)`, only streams
+    /// with status `s` are returned.  Use `OptionalStreamStatus::None` to skip the filter.
+    pub status: OptionalStreamStatus,
     /// Optional asset (token) filter. If set, only streams using this token are returned.
     pub asset: Option<Address>,
     /// Optional sender filter. If set, only streams created by this address are returned.
     pub sender: Option<Address>,
     /// Optional recipient filter. If set, only streams targeting this address are returned.
     pub recipient: Option<Address>,
+}
+
+/// Optional parameters for `create_stream`.
+///
+/// Groups the less-frequently-specified parameters into a single struct
+/// to keep `create_stream` within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreateStreamParams {
+    /// Seconds after stream start during which the recipient cannot withdraw.
+    pub cliff_seconds: u64,
+    /// Nonce for deduplication. Must be unique per sender.
+    pub nonce: u64,
+    /// Optional maximum number of auto-renewals allowed.
+    pub renew_count: Option<u32>,
+    /// Timestamp before which funds are locked (cannot be withdrawn by recipient).
+    pub lock_until: u64,
+    /// Whether the recipient can terminate the stream early.
+    pub allow_recipient_termination: bool,
+    /// Whether the recipient role is non-transferable.
+    pub non_transferable: bool,
+    /// Tokens held back in escrow, not included in the stream flow.
+    pub holdback_amount: i128,
+    /// Number of withdrawal steps to divide the stream into.
+    pub withdrawal_steps: Option<u32>,
+    /// Minimum claimable amount required per withdrawal.
+    pub min_withdrawal_amount: Option<i128>,
+    /// Whether the recipient must approve before tokens start accruing.
+    pub requires_recipient_approval: bool,
 }
