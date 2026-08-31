@@ -37,7 +37,7 @@ pub struct VestingTranche {
 
 /// Status of a payment stream.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum StreamStatus {
     /// Stream is currently active and tokens are flowing.
     Active,
@@ -451,6 +451,44 @@ pub struct AdminOverrideRequest {
     pub status: OverrideRequestStatus,
     /// Reason/description for the override.
     pub reason: String,
+}
+
+/// Status filter for `query_streams`.
+///
+/// A dedicated enum (rather than `Option<StreamStatus>`) sidesteps a
+/// soroban-sdk 22.x limitation: `#[contracttype]` unit enums nested inside
+/// an `Option<_>` field don't get the XDR `Into<ScVal>` conversion the SDK's
+/// `testutils` machinery needs, which breaks the test build even though the
+/// contract itself builds fine.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StatusFilter {
+    /// No filtering on status.
+    Any,
+    /// Only streams with this exact status.
+    Only(StreamStatus),
+}
+
+/// Per-asset on-chain analytics snapshot (Issue #468).
+///
+/// Unlike [`ProtocolStats`], which is recomputed by scanning every stream on
+/// each call, these counters are maintained incrementally at the storage
+/// mutation points (stream creation, withdrawal, cancellation) so a snapshot
+/// is a handful of storage reads rather than an O(n) scan — cheap enough for
+/// dashboards/indexers to poll directly instead of replaying events.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetAnalytics {
+    /// The asset (token) this snapshot is for.
+    pub token: Address,
+    /// Cumulative amount of `token` ever paid out to recipients (via
+    /// withdrawals and cancellation payouts), in stroops.
+    pub total_value_streamed: i128,
+    /// Total number of streams ever created using `token`.
+    pub total_streams_created: u64,
+    /// Total number of streams using `token` that were cancelled
+    /// (cancel_stream / stop_stream / batch_cancel_stream / recipient_terminate).
+    pub total_streams_cancelled: u64,
 }
 
 /// Optional filter struct for querying streams efficiently without iterating all records.
