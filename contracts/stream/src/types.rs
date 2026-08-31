@@ -117,11 +117,6 @@ pub struct StreamOptions {
     pub milestone_release_mode: bool,
     /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
     pub locked: bool,
-    /// Optional holdback amount kept in escrow until explicitly released (in stroops).
-    /// Deducted from the streaming portion at creation time.
-    pub holdback_amount: i128,
-    /// Whether the holdback has been settled (released to recipient or clawed back to sender).
-    pub holdback_claimed: bool,
 
     // ── Step-vesting (tranche) fields ────────────────────────────────────────
 
@@ -217,8 +212,6 @@ pub struct StreamOptions {
 
     /// Optional redirect target stream ID.
     pub redirect_to_stream_id: Option<u64>,
-    /// Whether this stream is a dual-token stream.
-    pub is_dual_stream: bool,
 
     // ── On-complete callback (composable DeFi) ──────────────────────────────
 
@@ -301,6 +294,7 @@ pub struct CreateStreamOptions {
     /// Optional human-readable payment reference (UTF-8, at most 256 bytes).
     pub comment: Option<String>,
 }
+
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
 ///
