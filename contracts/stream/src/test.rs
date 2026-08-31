@@ -103,12 +103,12 @@ fn test_metadata_is_stored_and_updatable() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64, &false, &0i128, &None::<u32>, &None::<i128>, &None::<u32>);
     c.update_metadata(&t.sender, &stream_id, &metadata);
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.metadata, metadata);
+    assert_eq!(stream.options.metadata, metadata);
 
     let updated = Bytes::from_array(&t.env, &[9u8, 9u8, 9u8]);
     c.update_metadata(&t.sender, &stream_id, &updated);
     let updated_stream = c.get_stream(&stream_id);
-    assert_eq!(updated_stream.metadata, updated);
+    assert_eq!(updated_stream.options.metadata, updated);
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn test_auto_renew_respects_renew_count_limit() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.renewals_used, 1);
+    assert_eq!(stream.options.renewals_used, 1);
     assert_eq!(stream.start_time, 1000);
     assert_eq!(stream.end_time, 2000);
 
@@ -389,7 +389,7 @@ fn test_auto_renew_respects_renew_count_limit() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.renewals_used, 2);
+    assert_eq!(stream.options.renewals_used, 2);
     assert_eq!(stream.start_time, 2000);
     assert_eq!(stream.end_time, 3000);
 
@@ -449,7 +449,7 @@ fn test_auto_renew_without_renew_count_unlimited() {
 
         let stream = c.get_stream(&stream_id);
         assert_eq!(stream.status, StreamStatus::Active);
-        assert_eq!(stream.renewals_used, i as u32);
+        assert_eq!(stream.options.renewals_used, i as u32);
     }
 }
 
@@ -2185,7 +2185,7 @@ fn test_pause_resume() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Paused);
-    assert_eq!(stream.last_pause_time, 200);
+    assert_eq!(stream.options.last_pause_time, 200);
 
     // Get claimable while paused should be for 200s (20_000 tokens)
     t.env.ledger().set_timestamp(500);
@@ -2554,7 +2554,7 @@ fn test_withdraw_after_top_up() {
     assert_eq!(bal, 60_000);
 
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.total_withdrawn, 60_000);
+    assert_eq!(stream.options.total_withdrawn, 60_000);
 
     t.env.ledger().set_timestamp(1500);
     c.withdraw(&stream_id, &t.recipient);
@@ -3339,8 +3339,8 @@ fn test_holdback_deducted_from_deposit() {
     let stream = client(&t).get_stream(&stream_id);
 
     assert_eq!(stream.deposit, total - holdback, "deposit should be streaming portion only");
-    assert_eq!(stream.holdback_amount, holdback);
-    assert!(!stream.holdback_claimed);
+    assert_eq!(stream.options.holdback_amount, holdback);
+    assert!(!stream.options.holdback_claimed);
     assert_eq!(stream.flow_rate, (total - holdback) / duration as i128);
 }
 
@@ -3382,7 +3382,7 @@ fn test_release_holdback_transfers_to_recipient() {
     assert_eq!(after - before, holdback, "recipient should receive the holdback amount");
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.holdback_claimed, "holdback_claimed must be true after release");
+    assert!(stream.options.holdback_claimed, "holdback_claimed must be true after release");
 }
 
 /// Sender can claw back the holdback before recipient claims it.
@@ -3404,7 +3404,7 @@ fn test_claw_back_holdback_returns_to_sender() {
     assert_eq!(after - before, holdback, "sender should receive the clawed-back holdback");
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.holdback_claimed, "holdback_claimed must be true after claw-back");
+    assert!(stream.options.holdback_claimed, "holdback_claimed must be true after claw-back");
 }
 
 /// Double-release is rejected (holdback already settled).
@@ -4354,7 +4354,7 @@ fn test_steps_withdraw_at_first_boundary() {
 
     // current_step should now be 1.
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.current_step, 1u32, "current_step should advance to 1 after first withdrawal");
+    assert_eq!(stream.options.current_step, 1u32, "current_step should advance to 1 after first withdrawal");
 }
 
 /// Withdrawal between step 1 and step 2 is rejected.
@@ -4403,7 +4403,7 @@ fn test_steps_correct_amount_at_each_boundary() {
 
     // Verify current_step after 3 withdrawals.
     let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.current_step, 3u32);
+    assert_eq!(stream.options.current_step, 3u32);
 }
 
 /// Final step releases the full remaining balance (handles rounding dust).
@@ -4648,7 +4648,7 @@ fn test_min_withdrawal_persisted_on_stream() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(
-        stream.min_withdrawal_amount,
+        stream.options.min_withdrawal_amount,
         Some(floor),
         "min_withdrawal_amount must be stored on the stream",
     );
@@ -5101,7 +5101,7 @@ fn test_non_transferable_stream_flag_is_stored() {
     );
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.non_transferable, "non_transferable flag must be persisted as true");
+    assert!(stream.options.non_transferable, "non_transferable flag must be persisted as true");
 }
 
 #[test]
@@ -5117,7 +5117,7 @@ fn test_transferable_stream_flag_is_false_by_default() {
     );
 
     let stream = c.get_stream(&stream_id);
-    assert!(!stream.non_transferable, "non_transferable must be false when not set");
+    assert!(!stream.options.non_transferable, "non_transferable must be false when not set");
 }
 
 #[test]
@@ -5196,8 +5196,8 @@ fn test_pending_approval_stream_created_in_pending_state() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::PendingApproval);
-    assert_eq!(stream.approval_timestamp, 0u64);
-    assert!(stream.requires_recipient_approval);
+    assert_eq!(stream.options.approval_timestamp, 0u64);
+    assert!(stream.options.requires_recipient_approval);
 }
 
 #[test]
@@ -5235,7 +5235,7 @@ fn test_approve_stream_transitions_to_active() {
 
     let stream = c.get_stream(&stream_id);
     assert_eq!(stream.status, StreamStatus::Active);
-    assert_eq!(stream.approval_timestamp, 200u64);
+    assert_eq!(stream.options.approval_timestamp, 200u64);
 }
 
 #[test]
@@ -5319,9 +5319,9 @@ fn test_lock_stream_sets_sender_locked_flag() {
         &None::<u32>, &None::<i128>, &false, &false,
     );
 
-    assert!(!c.get_stream(&stream_id).sender_locked);
+    assert!(!c.get_stream(&stream_id).options.sender_locked);
     c.lock_stream(&stream_id, &t.sender);
-    assert!(c.get_stream(&stream_id).sender_locked);
+    assert!(c.get_stream(&stream_id).options.sender_locked);
 }
 
 #[test]
@@ -5360,7 +5360,7 @@ fn test_recipient_can_withdraw_from_locked_stream() {
     // Should succeed — lock only prevents sender cancellation.
     c.withdraw(&stream_id, &t.recipient);
     let stream = c.get_stream(&stream_id);
-    assert!(stream.total_withdrawn > 0);
+    assert!(stream.options.total_withdrawn > 0);
 }
 
 #[test]
@@ -6011,7 +6011,7 @@ fn test_token_whitelist_prevents_spam_tokens() {
 
     // Lock the stream first
     c.lock_stream(&stream_id, &t.sender);
-    assert!(c.get_stream(&stream_id).sender_locked);
+    assert!(c.get_stream(&stream_id).options.sender_locked);
     
     // Attempt to top_up should be rejected
     let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000i128);
@@ -6156,7 +6156,7 @@ fn test_update_stream_rate_settles_balance() {
 
     // But total_withdrawn should reflect the settled amount
     let stream = c.get_stream(&stream_id);
-    assert!(stream.total_withdrawn >= claimable_before - 1000, "settled balance should be recorded");
+    assert!(stream.options.total_withdrawn >= claimable_before - 1000, "settled balance should be recorded");
 }
 
 /// Test that rate update is only callable by sender.
@@ -6369,7 +6369,7 @@ fn test_update_stream_rate_doesnt_break_withdrawals() {
     c.withdraw(&stream_id, &t.recipient);
 
     let stream = c.get_stream(&stream_id);
-    assert!(stream.total_withdrawn > 0, "withdrawal should succeed after rate update");
+    assert!(stream.options.total_withdrawn > 0, "withdrawal should succeed after rate update");
 }
 
 /// Test multiple rate updates in sequence.
@@ -6473,11 +6473,11 @@ fn test_update_stream_rate_updates_deposit() {
     // Verify end_time was extended
     assert!(stream_after_topup.end_time > original_end, 
         "end_time should be extended after top_up");
-    assert!(!stream_after_topup.sender_locked, "stream should not be locked yet");
+    assert!(!stream_after_topup.options.sender_locked, "stream should not be locked yet");
     
     // Now lock the stream
     c.lock_stream(&stream_id, &t.sender);
-    assert!(c.get_stream(&stream_id).sender_locked);
+    assert!(c.get_stream(&stream_id).options.sender_locked);
     
     // Subsequent top_up should fail
     let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &10_000i128);

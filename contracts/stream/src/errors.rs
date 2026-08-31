@@ -62,9 +62,8 @@ pub enum StreamError {
     /// Recipient is not on the admin-managed recipient allowlist, and the stream
     /// requires allowlist enforcement.
     RecipientNotAllowed = 61,
+    /// The stream deposit exceeds the maximum allowed per-token limit.
     MaxDepositExceeded = 64,
-    /// A basis-point value exceeds the maximum of 10_000 (100%).
-    /// Used for per-stream fee overrides (`set_stream_fee_override`) and the
-    /// protocol insurance-reserve rate (`set_insurance_bps`).
-    InvalidFeeRate = 65,
+    /// The comment attached to a stream exceeds the 256-byte limit.
+    CommentTooLong = 65,
 }

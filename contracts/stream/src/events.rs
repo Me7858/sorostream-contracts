@@ -1,6 +1,14 @@
 #![allow(dead_code)]
 use soroban_sdk::{Address, Bytes, Env, String, Symbol};
 
+/// Event schema version for compatibility tracking
+const EVENT_SCHEMA_VERSION: u32 = 1;
+
+/// Returns the current event schema version for off-chain compatibility checking
+pub fn get_event_schema_version() -> u32 {
+    EVENT_SCHEMA_VERSION
+}
+
 /// Emitted when a new stream is created.
 pub fn stream_created(
     env: &Env,
@@ -11,16 +19,19 @@ pub fn stream_created(
     flow_rate: i128,
     end_time: u64,
     non_transferable: bool,
+    comment: &Option<String>,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
         (
+            EVENT_SCHEMA_VERSION,
             sender.clone(),
             recipient.clone(),
             amount,
             flow_rate,
             end_time,
             non_transferable,
+            comment.clone(),
         ),
     );
 }
@@ -40,7 +51,7 @@ pub fn stream_withdrawn(
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamWithdrawn"), stream_id),
-        (recipient.clone(), amount, timestamp, total_withdrawn),
+        (EVENT_SCHEMA_VERSION, recipient.clone(), amount, timestamp, total_withdrawn),
     );
 }
 
@@ -54,7 +65,7 @@ pub fn stream_cancelled(
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCancelled"), stream_id),
-        (sender.clone(), refund_amount, recipient_amount),
+        (EVENT_SCHEMA_VERSION, sender.clone(), refund_amount, recipient_amount),
     );
 }
 
@@ -92,7 +103,7 @@ pub fn renewal_limit_reached(env: &Env, stream_id: u64, sender: &Address, renewa
 pub fn contract_deployed(env: &Env, version: &String, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ContractDeployed"),),
-        (version.clone(), admin.clone()),
+        (EVENT_SCHEMA_VERSION, version.clone(), admin.clone()),
     );
 }
 
@@ -1059,59 +1070,5 @@ pub fn on_complete_failed(
     env.events().publish(
         (Symbol::new(env, "OnCompleteFailed"), stream_id),
         (on_complete_contract.clone(), error_message.clone()),
-    );
-}
-
-// ── Issue #465: Configurable fee recipient ────────────────────────────────
-
-/// Emitted when the admin sets a new protocol fee recipient.
-pub fn fee_recipient_set(env: &Env, recipient: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "FeeRecipientSet"),),
-        recipient.clone(),
-    );
-}
-
-// ── Issue #462: Per-stream fee override ────────────────────────────────────
-
-/// Emitted when the admin sets (or clears, `fee_bps = None`) a per-stream fee override.
-pub fn stream_fee_override_set(env: &Env, stream_id: u64, fee_bps: Option<u32>) {
-    env.events().publish(
-        (Symbol::new(env, "StreamFeeOverrideSet"), stream_id),
-        fee_bps,
-    );
-}
-
-// ── Issue #464: Referral tracking ───────────────────────────────────────────
-
-/// Emitted when a referral address is attributed to a stream.
-pub fn referral_attributed(env: &Env, stream_id: u64, referral: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "ReferralAttributed"), stream_id),
-        referral.clone(),
-    );
-}
-
-/// Emitted when a referral's share of a collected protocol fee is paid out.
-pub fn referral_reward_paid(env: &Env, stream_id: u64, referral: &Address, amount: i128) {
-    env.events().publish(
-        (Symbol::new(env, "ReferralRewardPaid"), stream_id),
-        (referral.clone(), amount),
-    );
-}
-
-// ── Issue #463: Insurance pool ──────────────────────────────────────────────
-
-/// Emitted when the admin sets the insurance contribution rate.
-pub fn insurance_bps_set(env: &Env, bps: u32) {
-    env.events().publish((Symbol::new(env, "InsuranceBpsSet"),), bps);
-}
-
-/// Emitted when an insurance claim is paid out to a stream's recipient to
-/// cover the shortfall from a contract-verified failed-stream cancellation.
-pub fn insurance_claim_paid(env: &Env, stream_id: u64, recipient: &Address, amount: i128) {
-    env.events().publish(
-        (Symbol::new(env, "InsuranceClaimPaid"), stream_id),
-        (recipient.clone(), amount),
     );
 }
