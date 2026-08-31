@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
-use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{Address, Bytes, BytesN, Env, String, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
 const PAUSED_KEY: &str = "paused";
@@ -1281,7 +1281,7 @@ pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
 // Feature (c): Stream redirect
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
+// Redirect target is stored in Stream.options.redirect_to_stream_id (no separate storage key needed).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (f): Instance TTL extension
@@ -1559,146 +1559,88 @@ pub fn remove_stream_tag(env: &Env, stream_id: u64) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Cancellation fee (issue #288)
+// WASM Upgrade Proposal Queue (Issue #497)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CANCEL_FEE_BPS_KEY: &str = "cf_bps";
+fn upgrade_proposal_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_prop")
+}
 
-/// Gets the cancellation fee in basis points (0 = no fee, max 10_000 = 100%).
-///
-/// This fee is deducted from the **sender's refund portion** when they cancel an
-/// active stream early. The fee is accumulated in the protocol treasury (same
-/// bucket as the stream creation fee) and swept by the admin via `sweep_fees`.
-pub fn get_cancellation_fee_bps(env: &Env) -> u32 {
+fn upgrade_proposal_expiry_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_exp")
+}
+
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_by: Address,
+    pub created_at: u64,
+}
+
+pub fn propose_upgrade(
+    env: &Env,
+    wasm_hash: BytesN<32>,
+    proposed_by: &Address,
+    expiry_ledger: u64,
+) -> Result<(), String> {
+    if get_pending_upgrade_proposal(env).is_some() {
+        return Err("Upgrade proposal already pending".to_string());
+    }
+
+    let proposal = UpgradeProposal {
+        wasm_hash,
+        proposed_by: proposed_by.clone(),
+        created_at: env.ledger().timestamp(),
+    };
+
     env.storage()
         .instance()
-        .get(&Symbol::new(env, CANCEL_FEE_BPS_KEY))
-        .unwrap_or(0u32)
-}
-
-/// Sets the cancellation fee in basis points. Must be <= 10_000 (100%).
-/// Only callable by the admin.
-pub fn set_cancellation_fee_bps(env: &Env, fee_bps: u32) {
+        .set(&upgrade_proposal_key(env), &(proposal.wasm_hash.clone(), proposal.proposed_by.clone(), proposal.created_at));
     env.storage()
         .instance()
-        .set(&Symbol::new(env, CANCEL_FEE_BPS_KEY), &fee_bps);
+        .set(&upgrade_proposal_expiry_key(env), &expiry_ledger);
+    Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Sender collateral / stake mechanism (issue #293)
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Senders may voluntarily stake a token to unlock the right to create streams.
-// An admin-configurable minimum-stake threshold can be set per-token; senders
-// below that threshold are blocked from creating new streams with that token.
-//
-// Staked funds are held in the contract and can be slashed by the admin to
-// penalise spam or bad-actor behaviour.  Senders must wait `STAKE_UNLOCK_DELAY`
-// seconds after calling `initiate_unstake` before their stake can be withdrawn
-// (cooldown discourages quick deposit-and-withdraw tactics).
-
-/// Lock period (seconds) between initiating and completing an unstake.
-/// Default: 24 hours.
-pub const STAKE_UNLOCK_DELAY: u64 = 24 * 60 * 60;
-
-fn stake_balance_key(env: &Env, sender: &Address, token: &Address) -> (Symbol, Address, Address) {
-    (Symbol::new(env, "stk_b"), sender.clone(), token.clone())
-}
-
-fn stake_unlock_at_key(env: &Env, sender: &Address, token: &Address) -> (Symbol, Address, Address) {
-    (Symbol::new(env, "stk_u"), sender.clone(), token.clone())
-}
-
-fn min_stake_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "stk_min"), token.clone())
-}
-
-// ── Per-sender stake balance ──────────────────────────────────────────────────
-
-/// Returns the staked balance for `sender` in `token` (0 if none).
-pub fn get_stake_balance(env: &Env, sender: &Address, token: &Address) -> i128 {
+pub fn get_pending_upgrade_proposal(env: &Env) -> Option<(BytesN<32>, Address, u64)> {
     env.storage()
-        .persistent()
-        .get(&stake_balance_key(env, sender, token))
-        .unwrap_or(0i128)
+        .instance()
+        .get(&upgrade_proposal_key(env))
 }
 
-/// Adds `amount` to the staked balance for `sender` in `token`.
-pub fn add_stake_balance(env: &Env, sender: &Address, token: &Address, amount: i128) {
-    let current = get_stake_balance(env, sender, token);
+pub fn get_upgrade_proposal_expiry(env: &Env) -> Option<u64> {
     env.storage()
-        .persistent()
-        .set(&stake_balance_key(env, sender, token), &current.saturating_add(amount));
+        .instance()
+        .get(&upgrade_proposal_expiry_key(env))
 }
 
-/// Subtracts `amount` from the staked balance for `sender` in `token`.
-/// Saturates at zero (never goes negative).
-pub fn sub_stake_balance(env: &Env, sender: &Address, token: &Address, amount: i128) {
-    let current = get_stake_balance(env, sender, token);
-    let next = current.saturating_sub(amount);
-    if next == 0 {
-        env.storage()
-            .persistent()
-            .remove(&stake_balance_key(env, sender, token));
-    } else {
-        env.storage()
-            .persistent()
-            .set(&stake_balance_key(env, sender, token), &next);
+pub fn approve_upgrade_proposal(env: &Env, approver: &Address) -> Result<BytesN<32>, String> {
+    let proposal = get_pending_upgrade_proposal(env)
+        .ok_or("No pending upgrade proposal".to_string())?;
+
+    let expiry = get_upgrade_proposal_expiry(env)
+        .ok_or("Proposal expiry not set".to_string())?;
+
+    if env.ledger().sequence() > expiry {
+        clear_upgrade_proposal(env);
+        return Err("Upgrade proposal expired".to_string());
     }
-}
 
-/// Sets the staked balance for `sender` in `token` to an exact value.
-pub fn set_stake_balance(env: &Env, sender: &Address, token: &Address, amount: i128) {
-    if amount <= 0 {
-        env.storage()
-            .persistent()
-            .remove(&stake_balance_key(env, sender, token));
-    } else {
-        env.storage()
-            .persistent()
-            .set(&stake_balance_key(env, sender, token), &amount);
-    }
-}
-
-// ── Unstake cooldown ──────────────────────────────────────────────────────────
-
-/// Returns the timestamp after which a pending unstake may be finalised (0 = no pending unstake).
-pub fn get_stake_unlock_at(env: &Env, sender: &Address, token: &Address) -> u64 {
     env.storage()
-        .persistent()
-        .get(&stake_unlock_at_key(env, sender, token))
-        .unwrap_or(0u64)
-}
-
-/// Records the unlock timestamp for a pending unstake request.
-pub fn set_stake_unlock_at(env: &Env, sender: &Address, token: &Address, unlock_at: u64) {
+        .instance()
+        .remove(&upgrade_proposal_key(env));
     env.storage()
-        .persistent()
-        .set(&stake_unlock_at_key(env, sender, token), &unlock_at);
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
+
+    Ok(proposal.0)
 }
 
-/// Clears the pending unstake unlock timestamp.
-pub fn clear_stake_unlock_at(env: &Env, sender: &Address, token: &Address) {
+pub fn clear_upgrade_proposal(env: &Env) {
     env.storage()
-        .persistent()
-        .remove(&stake_unlock_at_key(env, sender, token));
-}
-
-// ── Per-token minimum stake threshold ────────────────────────────────────────
-
-/// Returns the minimum stake required for a sender to create streams with `token` (0 = no requirement).
-pub fn get_min_stake(env: &Env, token: &Address) -> i128 {
+        .instance()
+        .remove(&upgrade_proposal_key(env));
     env.storage()
-        .persistent()
-        .get(&min_stake_key(env, token))
-        .unwrap_or(0i128)
-}
-
-/// Sets the minimum stake threshold for `token`.
-pub fn set_min_stake(env: &Env, token: &Address, amount: i128) {
-    if amount <= 0 {
-        env.storage().persistent().remove(&min_stake_key(env, token));
-    } else {
-        env.storage().persistent().set(&min_stake_key(env, token), &amount);
-    }
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
 }

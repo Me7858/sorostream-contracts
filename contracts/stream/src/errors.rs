@@ -48,6 +48,8 @@ pub enum StreamError {
     RedirectRecipientMismatch = 54,
     /// Dual stream requires both token addresses to be distinct.
     DuplicateTokenInDualStream = 55,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 57,
     /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
     StreamNonTransferable = 58,
     /// `withdraw` was called on a stream still in `PendingApproval` state.
@@ -56,12 +58,8 @@ pub enum StreamError {
     StreamIsLocked = 60,
     /// Recipient is not on the admin-managed recipient allowlist.
     RecipientNotAllowed = 61,
-    /// Per-asset maximum deposit exceeded.
+    /// The stream deposit exceeds the maximum allowed per-token limit.
     MaxDepositExceeded = 64,
-    /// Sender's staked collateral is below the minimum required for this token.
-    InsufficientStake = 66,
-    /// Unstake cooldown has not yet elapsed.
-    StakeStillLocked = 67,
-    /// No pending unstake to complete.
-    NoPendingUnstake = 68,
+    /// The comment attached to a stream exceeds the 256-byte limit.
+    CommentTooLong = 65,
 }
