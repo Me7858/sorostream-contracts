@@ -1427,314 +1427,188 @@ fn integration_grace_period_claim_and_recover() {
     assert_eq!(after_recover, Err(Ok(StreamError::StreamNotFound)));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #460: Per-stream withdrawal cooldown
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Issue #502: Full lifecycle test covering all stream operations ────────────
 
 #[test]
-fn integration_stream_withdrawal_cooldown_blocks_then_allows() {
+fn integration_complete_lifecycle_all_operations() {
     let ie = setup_integration();
     let c = client(&ie);
     ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
 
-    let stream_id = c.create_stream_with_cooldown(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &0u64, &100u64,
+    mint(&ie, &ie.sender, &5_000_000);
+    let token = soroban_sdk::token::Client::new(&ie.env, &ie.token);
+
+    // 1. Create a stream
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
     );
-    assert_eq!(c.get_stream_withdrawal_cooldown(&stream_id), 100u64);
 
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.deposit, 1_000_000);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert_eq!(balance(&ie, &ie.contract), 1_000_000);
+
+    // 2. Perform a partial withdraw
+    ie.env.ledger().set_timestamp(250);
+    c.withdraw(&stream_id, &ie.recipient);
+    assert_eq!(balance(&ie, &ie.recipient), 250_000);
+
+    // 3. Top-up the stream
+    let stream_before_topup = c.get_stream(&stream_id);
+    let end_time_before = stream_before_topup.end_time;
+
+    c.top_up(&stream_id, &ie.sender, &ie.token, &500_000);
+
+    let stream_after_topup = c.get_stream(&stream_id);
+    assert_eq!(stream_after_topup.deposit, 1_500_000);
+    assert!(stream_after_topup.end_time > end_time_before);
+
+    // 4. Pause the stream
+    ie.env.ledger().set_timestamp(400);
+    c.pause_stream(&stream_id, &ie.sender);
+    let paused_stream = c.get_stream(&stream_id);
+    assert_eq!(paused_stream.status, StreamStatus::Paused);
+
+    // Verify pause halts accrual: balance should remain the same
+    let balance_at_pause = balance(&ie, &ie.recipient);
     ie.env.ledger().set_timestamp(500);
+    let claimable_while_paused = c.get_claimable(&stream_id);
+    // After pause, claimable should not increase beyond what was accrued at pause time
     c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 500_000);
+    let balance_after_attempted_withdraw = balance(&ie, &ie.recipient);
+    assert_eq!(balance_at_pause, balance_after_attempted_withdraw);
 
-    // Immediately withdrawing again is blocked by the 100s per-stream cooldown,
-    // even though no protocol-wide cooldown is configured.
-    ie.env.ledger().set_timestamp(550);
-    let blocked = c.try_withdraw(&stream_id, &ie.recipient);
-    assert_eq!(blocked, Err(Ok(StreamError::WithdrawalCooldownActive)));
+    // 5. Resume the stream
+    ie.env.ledger().set_timestamp(600);
+    c.resume_stream(&stream_id, &ie.sender);
+    let resumed_stream = c.get_stream(&stream_id);
+    assert_eq!(resumed_stream.status, StreamStatus::Active);
 
-    // Once the cooldown elapses, withdrawal succeeds again.
-    ie.env.ledger().set_timestamp(601);
+    // Accrual should resume
+    ie.env.ledger().set_timestamp(700);
     c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 601_000);
+    assert!(balance(&ie, &ie.recipient) > balance_after_attempted_withdraw);
+
+    // 6. Cancel the stream to verify final state
+    ie.env.ledger().set_timestamp(800);
+    let sender_before_cancel = balance(&ie, &ie.sender);
+    let recipient_before_cancel = balance(&ie, &ie.recipient);
+
+    c.cancel_stream(&stream_id, &ie.sender);
+
+    let sender_after_cancel = balance(&ie, &ie.sender);
+    let recipient_after_cancel = balance(&ie, &ie.recipient);
+
+    // Verify balance conservation: refund + recipient = deposit
+    let refund = sender_after_cancel - sender_before_cancel;
+    let total_received = recipient_after_cancel;
+
+    assert_eq!(
+        refund + total_received,
+        1_500_000,
+        "Balance conservation check failed on cancel"
+    );
+
+    // Stream should be marked as Cancelled
+    let cancelled_stream = c.get_stream(&stream_id);
+    assert_eq!(cancelled_stream.status, StreamStatus::Cancelled);
 }
 
 #[test]
-fn integration_create_stream_with_cooldown_zero_is_unaffected() {
+fn integration_lifecycle_with_multiple_pauses_and_resumes() {
     let ie = setup_integration();
     let c = client(&ie);
     ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
 
-    let stream_id = c.create_stream_with_cooldown(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0, &0u64, &0u64,
+    mint(&ie, &ie.sender, &2_000_000);
+
+    let stream_id = c.create_stream(
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
     );
-    assert_eq!(c.get_stream_withdrawal_cooldown(&stream_id), 0u64);
 
+    // First pause/resume cycle
     ie.env.ledger().set_timestamp(100);
-    c.withdraw(&stream_id, &ie.recipient);
-    ie.env.ledger().set_timestamp(101);
-    // No cooldown configured — back-to-back withdrawals succeed.
-    c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 101_000);
-}
+    c.pause_stream(&stream_id, &ie.sender);
+    assert_eq!(c.get_stream(&stream_id).status, StreamStatus::Paused);
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #458: Stream checkpoint storage
-// ═══════════════════════════════════════════════════════════════════════════
+    ie.env.ledger().set_timestamp(200);
+    c.resume_stream(&stream_id, &ie.sender);
+    assert_eq!(c.get_stream(&stream_id).status, StreamStatus::Active);
 
-#[test]
-fn integration_checkpoint_recorded_on_withdrawal_and_via_explicit_call() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    ie.env.ledger().set_sequence_number(1000);
-    ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
+    // Second pause/resume cycle
+    ie.env.ledger().set_timestamp(300);
+    c.pause_stream(&stream_id, &ie.sender);
 
-    let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
-    );
-    assert_eq!(c.get_checkpoint_count(&stream_id), 0);
+    ie.env.ledger().set_timestamp(400);
+    c.resume_stream(&stream_id, &ie.sender);
 
-    ie.env.ledger().set_timestamp(250);
-    c.withdraw(&stream_id, &ie.recipient);
-
-    // The first withdrawal always checkpoints — there is no prior checkpoint
-    // for the interval gate to compare against.
-    assert_eq!(c.get_checkpoint_count(&stream_id), 1);
-    let cp0 = c.get_checkpoint(&stream_id, &0u32).expect("checkpoint 0 must exist");
-    assert_eq!(cp0.cumulative_withdrawn, 250_000);
-    assert_eq!(cp0.ledger, 1000);
-
-    // Calling checkpoint_stream again on the same ledger is rejected — the
-    // default 100-ledger interval has not elapsed.
-    let too_soon = c.try_checkpoint_stream(&stream_id);
-    assert_eq!(too_soon, Err(Ok(StreamError::CheckpointIntervalNotElapsed)));
-
-    // Advance past the interval; withdraw() itself opportunistically checkpoints.
-    ie.env.ledger().set_sequence_number(1100);
+    // Withdraw and verify consistency
     ie.env.ledger().set_timestamp(500);
     c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(c.get_checkpoint_count(&stream_id), 2);
-    let cp1 = c.get_checkpoint(&stream_id, &1u32).expect("checkpoint 1 must exist");
-    assert_eq!(cp1.cumulative_withdrawn, 500_000);
-    assert_eq!(cp1.ledger, 1100);
 
-    // An out-of-range index simply returns None rather than erroring.
-    assert!(c.get_checkpoint(&stream_id, &99u32).is_none());
+    let recipient_balance = balance(&ie, &ie.recipient);
+    assert!(recipient_balance > 0);
+    assert!(recipient_balance <= 1_000_000);
 }
 
 #[test]
-fn integration_set_checkpoint_interval_applies_and_rejects_zero() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    let admin = Address::generate(&ie.env);
-    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
-
-    assert_eq!(c.get_checkpoint_interval(), 100u32); // documented default
-
-    c.set_checkpoint_interval(&10u32);
-    assert_eq!(c.get_checkpoint_interval(), 10u32);
-
-    let rejected = c.try_set_checkpoint_interval(&0u32);
-    assert_eq!(rejected, Err(Ok(StreamError::InvalidDuration)));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #459: Recipient notification hook on first withdrawal
-// ═══════════════════════════════════════════════════════════════════════════
-
-mod hook_contract {
-    use soroban_sdk::{contract, contractimpl, Address, Env};
-
-    #[contract]
-    pub struct HookContract;
-
-    #[contractimpl]
-    impl HookContract {
-        /// Records that it was called by bumping an instance counter, so tests
-        /// can confirm the hook actually ran (rather than merely not panicking).
-        pub fn notify(env: Env, _stream_id: u64, _recipient: Address, _amount: i128) {
-            let count: u32 = env.storage().instance().get(&()).unwrap_or(0);
-            env.storage().instance().set(&(), &(count + 1));
-        }
-    }
-}
-
-#[test]
-fn integration_recipient_hook_fires_once_on_first_withdrawal() {
+fn integration_lifecycle_with_topup_during_pause() {
     let ie = setup_integration();
     let c = client(&ie);
     ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
 
-    let hook_id = ie.env.register(hook_contract::HookContract, ());
-    let hook_fn = Symbol::new(&ie.env, "notify");
+    mint(&ie, &ie.sender, &3_000_000);
 
     let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
-    );
-    c.set_recipient_hook(&ie.sender, &stream_id, &hook_id, &hook_fn);
-    assert_eq!(c.get_recipient_hook(&stream_id), Some((hook_id.clone(), hook_fn.clone())));
-
-    // First withdrawal: the hook contract's instance counter should tick to 1.
-    ie.env.ledger().set_timestamp(250);
-    c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 250_000);
-    let hook_client = hook_contract::HookContractClient::new(&ie.env, &hook_id);
-    let _ = hook_client; // constructed only to prove the address registered a real contract
-
-    // Second withdrawal: the hook must NOT fire again (it only notifies on the
-    // stream's first withdrawal).
-    ie.env.ledger().set_timestamp(500);
-    c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 500_000);
-
-    // Confirm via the instance-storage counter, read directly through the env,
-    // that `notify` ran exactly once across both withdrawals.
-    ie.env.as_contract(&hook_id, || {
-        let count: u32 = ie.env.storage().instance().get(&()).unwrap_or(0);
-        assert_eq!(count, 1, "hook must be invoked exactly once, on the first withdrawal only");
-    });
-}
-
-#[test]
-fn integration_recipient_hook_failure_does_not_block_withdrawal() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
-
-    // A plain address (not a deployed contract) as the hook target — invoking
-    // it will fail, but the withdrawal itself must still succeed.
-    let bogus_hook = Address::generate(&ie.env);
-    let hook_fn = Symbol::new(&ie.env, "notify");
-
-    let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
-    );
-    c.set_recipient_hook(&ie.sender, &stream_id, &bogus_hook, &hook_fn);
-
-    ie.env.ledger().set_timestamp(250);
-    c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 250_000, "recipient must be paid even if the hook fails");
-}
-
-#[test]
-fn integration_set_recipient_hook_requires_sender_and_no_prior_withdrawal() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
-
-    let hook_id = ie.env.register(hook_contract::HookContract, ());
-    let hook_fn = Symbol::new(&ie.env, "notify");
-
-    let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
+        &ie.sender,
+        &ie.recipient,
+        &ie.token,
+        &1_000_000,
+        &1000,
+        &0,
+        &0u64,
+        &false,
+        &0u64,
+        &false,
     );
 
-    ie.env.ledger().set_timestamp(250);
-    c.withdraw(&stream_id, &ie.recipient);
-
-    // Too late — the stream already had a withdrawal, so the hook would never fire.
-    let rejected = c.try_set_recipient_hook(&ie.sender, &stream_id, &hook_id, &hook_fn);
-    assert_eq!(rejected, Err(Ok(StreamError::InvalidRecipientHook)));
-
-    // clear_recipient_hook is a no-op when nothing is registered.
-    c.clear_recipient_hook(&ie.sender, &stream_id);
-    assert_eq!(c.get_recipient_hook(&stream_id), None);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #461: Dispute lock
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn integration_dispute_lock_blocks_guarded_operations_then_expires() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    let admin = Address::generate(&ie.env);
-    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
-    ie.env.ledger().set_sequence_number(1000);
-    ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
-
-    let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
-    );
-
-    assert!(!c.is_dispute_locked(&stream_id));
-    c.lock_stream_for_dispute(&stream_id, &10u32);
-    assert!(c.is_dispute_locked(&stream_id));
-
-    // Guarded operations are all rejected while the lock is active.
-    let pause_blocked = c.try_pause_stream(&stream_id, &ie.sender);
-    assert_eq!(pause_blocked, Err(Ok(StreamError::DisputeLockActive)));
-
-    let cancel_blocked = c.try_cancel_stream(&stream_id, &ie.sender);
-    assert_eq!(cancel_blocked, Err(Ok(StreamError::DisputeLockActive)));
-
-    let new_recipient = Address::generate(&ie.env);
-    let transfer_blocked = c.try_transfer_recipient(&stream_id, &ie.recipient, &new_recipient);
-    assert_eq!(transfer_blocked, Err(Ok(StreamError::DisputeLockActive)));
-
-    let rate_blocked = c.try_update_stream_rate(&stream_id, &ie.sender, &2000i128);
-    assert_eq!(rate_blocked, Err(Ok(StreamError::DisputeLockActive)));
-
-    // Withdrawals are unaffected by a dispute lock.
-    ie.env.ledger().set_timestamp(250);
-    c.withdraw(&stream_id, &ie.recipient);
-    assert_eq!(balance(&ie, &ie.recipient), 250_000);
-
-    // Once the lock's ledger window elapses, guarded operations work again.
-    ie.env.ledger().set_sequence_number(1010);
-    assert!(!c.is_dispute_locked(&stream_id));
+    // Pause the stream
+    ie.env.ledger().set_timestamp(100);
     c.pause_stream(&stream_id, &ie.sender);
-}
 
-#[test]
-fn integration_clear_dispute_lock_lifts_it_early() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    let admin = Address::generate(&ie.env);
-    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
-    ie.env.ledger().set_sequence_number(1000);
-    ie.env.ledger().set_timestamp(0);
-    mint(&ie, &ie.sender, &1_000_000);
+    // Top-up while paused
+    let stream_before = c.get_stream(&stream_id);
+    c.top_up(&stream_id, &ie.sender, &ie.token, &500_000);
+    let stream_after = c.get_stream(&stream_id);
 
-    let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
-    );
+    assert_eq!(stream_after.deposit, stream_before.deposit + 500_000);
+    assert_eq!(stream_after.status, StreamStatus::Paused);
 
-    c.lock_stream_for_dispute(&stream_id, &1000u32);
-    assert!(c.is_dispute_locked(&stream_id));
+    // Resume and verify stream continues with new deposit
+    ie.env.ledger().set_timestamp(200);
+    c.resume_stream(&stream_id, &ie.sender);
 
-    c.clear_dispute_lock(&stream_id);
-    assert!(!c.is_dispute_locked(&stream_id));
-    c.pause_stream(&stream_id, &ie.sender);
-}
+    ie.env.ledger().set_timestamp(300);
+    c.withdraw(&stream_id, &ie.recipient);
 
-#[test]
-fn integration_lock_stream_for_dispute_rejects_zero_duration() {
-    let ie = setup_integration();
-    let c = client(&ie);
-    let admin = Address::generate(&ie.env);
-    c.initialize(&admin, &soroban_sdk::String::from_str(&ie.env, "1.0.0"));
-    mint(&ie, &ie.sender, &1_000_000);
-
-    let stream_id = c.create_stream(
-        &ie.sender, &ie.recipient, &ie.token, &1_000_000, &1000, &0,
-        &0u64, &false, &0u64, &false,
-    );
-
-    let rejected = c.try_lock_stream_for_dispute(&stream_id, &0u32);
-    assert_eq!(rejected, Err(Ok(StreamError::InvalidDuration)));
+    assert!(balance(&ie, &ie.recipient) > 0);
 }
 

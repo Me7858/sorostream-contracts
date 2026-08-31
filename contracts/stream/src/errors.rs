@@ -47,6 +47,10 @@ pub enum StreamError {
     InvalidRedirectTarget = 52,
     CircularRedirect = 53,
     RedirectRecipientMismatch = 54,
+    /// Dual stream requires both token addresses to be distinct.
+    DuplicateTokenInDualStream = 55,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 57,
     /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
     StreamNonTransferable = 58,
     /// `withdraw` was called on a stream still in `PendingApproval` state.
@@ -58,14 +62,8 @@ pub enum StreamError {
     /// Recipient is not on the admin-managed recipient allowlist, and the stream
     /// requires allowlist enforcement.
     RecipientNotAllowed = 61,
+    /// The stream deposit exceeds the maximum allowed per-token limit.
     MaxDepositExceeded = 64,
-    /// `lock_stream_for_dispute` (or an action it guards) was called while a
-    /// dispute lock is still active on the stream.
-    DisputeLockActive = 69,
-    /// `set_recipient_hook` was called with an invalid configuration, or the
-    /// hook could not be registered (e.g. after the first withdrawal already occurred).
-    InvalidRecipientHook = 70,
-    /// A checkpoint was requested before the configured checkpoint interval
-    /// has elapsed since the stream's last recorded checkpoint.
-    CheckpointIntervalNotElapsed = 71,
+    /// The comment attached to a stream exceeds the 256-byte limit.
+    CommentTooLong = 65,
 }

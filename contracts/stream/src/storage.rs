@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
-use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{Address, Bytes, BytesN, Env, String, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
 const PAUSED_KEY: &str = "paused";
@@ -1281,7 +1281,7 @@ pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
 // Feature (c): Stream redirect
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
+// Redirect target is stored in Stream.options.redirect_to_stream_id (no separate storage key needed).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (f): Instance TTL extension
@@ -1559,169 +1559,88 @@ pub fn remove_stream_tag(env: &Env, stream_id: u64) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Issue #460: Per-stream withdrawal cooldown
+// WASM Upgrade Proposal Queue (Issue #497)
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// This is distinct from the protocol-wide `WITHDRAWAL_COOLDOWN_KEY` above:
-// that one is a single global value set by the admin, whereas this lets each
-// stream opt into its own minimum ledger-time gap between withdrawals by its
-// recipient (e.g. for payroll-style streams that want to discourage overly
-// frequent micro-withdrawals). The stricter (larger) of the two cooldowns
-// applies to any given withdrawal.
 
-fn stream_withdrawal_cooldown_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "swcd"), stream_id)
+fn upgrade_proposal_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_prop")
 }
 
-/// Gets the per-stream withdrawal cooldown in seconds (default: 0, i.e. none).
-pub fn get_stream_withdrawal_cooldown(env: &Env, stream_id: u64) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&stream_withdrawal_cooldown_key(env, stream_id))
-        .unwrap_or(0u64)
+fn upgrade_proposal_expiry_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_exp")
 }
 
-/// Sets the per-stream withdrawal cooldown in seconds.
-pub fn set_stream_withdrawal_cooldown(env: &Env, stream_id: u64, cooldown_seconds: u64) {
-    env.storage()
-        .persistent()
-        .set(&stream_withdrawal_cooldown_key(env, stream_id), &cooldown_seconds);
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_by: Address,
+    pub created_at: u64,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #459: Recipient notification hook on first withdrawal
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Stored outside the `Stream` struct (which is already at the 40-field cap
-// for `#[contracttype]` structs) as a `(contract, function)` pair, keyed by
-// stream ID, mirroring the existing `delegate` storage pattern.
+pub fn propose_upgrade(
+    env: &Env,
+    wasm_hash: BytesN<32>,
+    proposed_by: &Address,
+    expiry_ledger: u64,
+) -> Result<(), String> {
+    if get_pending_upgrade_proposal(env).is_some() {
+        return Err("Upgrade proposal already pending".to_string());
+    }
 
-fn recipient_hook_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "rhook"), stream_id)
-}
+    let proposal = UpgradeProposal {
+        wasm_hash,
+        proposed_by: proposed_by.clone(),
+        created_at: env.ledger().timestamp(),
+    };
 
-/// Gets the registered recipient-notification hook for a stream, if any.
-pub fn get_recipient_hook(env: &Env, stream_id: u64) -> Option<(Address, Symbol)> {
-    env.storage().persistent().get(&recipient_hook_key(env, stream_id))
-}
-
-/// Sets the recipient-notification hook for a stream.
-pub fn set_recipient_hook(env: &Env, stream_id: u64, hook_contract: &Address, hook_function: &Symbol) {
-    env.storage()
-        .persistent()
-        .set(&recipient_hook_key(env, stream_id), &(hook_contract.clone(), hook_function.clone()));
-}
-
-/// Removes the recipient-notification hook for a stream.
-pub fn remove_recipient_hook(env: &Env, stream_id: u64) {
-    env.storage().persistent().remove(&recipient_hook_key(env, stream_id));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #458: Stream checkpoint storage
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Periodically records `(ledger, timestamp, cumulative_withdrawn)` snapshots
-// for a stream so that accrued-balance history can be audited or recomputed
-// without replaying every withdrawal event. Checkpoints are append-only and
-// indexed by a per-stream counter, the same counter+slot pattern used by the
-// sender/recipient stream indices above.
-
-const CHECKPOINT_INTERVAL_KEY: &str = "cp_int";
-/// Default minimum ledger gap between automatic/permissionless checkpoints (~500s at 5s/ledger).
-pub const DEFAULT_CHECKPOINT_INTERVAL_LEDGERS: u32 = 100;
-
-/// Gets the configured checkpoint interval in ledgers.
-pub fn get_checkpoint_interval_ledgers(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&Symbol::new(env, CHECKPOINT_INTERVAL_KEY))
-        .unwrap_or(DEFAULT_CHECKPOINT_INTERVAL_LEDGERS)
-}
-
-/// Sets the checkpoint interval in ledgers. Admin only (enforced by the caller).
-pub fn set_checkpoint_interval_ledgers(env: &Env, ledgers: u32) {
+        .set(&upgrade_proposal_key(env), &(proposal.wasm_hash.clone(), proposal.proposed_by.clone(), proposal.created_at));
     env.storage()
         .instance()
-        .set(&Symbol::new(env, CHECKPOINT_INTERVAL_KEY), &ledgers);
+        .set(&upgrade_proposal_expiry_key(env), &expiry_ledger);
+    Ok(())
 }
 
-fn checkpoint_count_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "cpc"), stream_id)
-}
-
-fn checkpoint_slot_key(env: &Env, stream_id: u64, idx: u32) -> (Symbol, u64, u32) {
-    (Symbol::new(env, "cps"), stream_id, idx)
-}
-
-fn last_checkpoint_ledger_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "cpl"), stream_id)
-}
-
-/// Returns the number of checkpoints recorded for a stream.
-pub fn get_checkpoint_count(env: &Env, stream_id: u64) -> u32 {
+pub fn get_pending_upgrade_proposal(env: &Env) -> Option<(BytesN<32>, Address, u64)> {
     env.storage()
-        .persistent()
-        .get(&checkpoint_count_key(env, stream_id))
-        .unwrap_or(0u32)
+        .instance()
+        .get(&upgrade_proposal_key(env))
 }
 
-/// Returns the checkpoint at `index` for a stream, if it exists.
-pub fn get_checkpoint(env: &Env, stream_id: u64, index: u32) -> Option<crate::types::Checkpoint> {
-    env.storage().persistent().get(&checkpoint_slot_key(env, stream_id, index))
+pub fn get_upgrade_proposal_expiry(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&upgrade_proposal_expiry_key(env))
 }
 
-/// Returns the ledger sequence at which the last checkpoint was recorded (0 if none yet).
-pub fn get_last_checkpoint_ledger(env: &Env, stream_id: u64) -> u32 {
+pub fn approve_upgrade_proposal(env: &Env, approver: &Address) -> Result<BytesN<32>, String> {
+    let proposal = get_pending_upgrade_proposal(env)
+        .ok_or("No pending upgrade proposal".to_string())?;
+
+    let expiry = get_upgrade_proposal_expiry(env)
+        .ok_or("Proposal expiry not set".to_string())?;
+
+    if env.ledger().sequence() > expiry {
+        clear_upgrade_proposal(env);
+        return Err("Upgrade proposal expired".to_string());
+    }
+
     env.storage()
-        .persistent()
-        .get(&last_checkpoint_ledger_key(env, stream_id))
-        .unwrap_or(0u32)
+        .instance()
+        .remove(&upgrade_proposal_key(env));
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
+
+    Ok(proposal.0)
 }
 
-/// Appends a new checkpoint for a stream and returns its index.
-pub fn append_checkpoint(env: &Env, stream_id: u64, checkpoint: &crate::types::Checkpoint) -> u32 {
-    let idx = get_checkpoint_count(env, stream_id);
+pub fn clear_upgrade_proposal(env: &Env) {
     env.storage()
-        .persistent()
-        .set(&checkpoint_slot_key(env, stream_id, idx), checkpoint);
+        .instance()
+        .remove(&upgrade_proposal_key(env));
     env.storage()
-        .persistent()
-        .set(&checkpoint_count_key(env, stream_id), &(idx + 1));
-    env.storage()
-        .persistent()
-        .set(&last_checkpoint_ledger_key(env, stream_id), &checkpoint.ledger);
-    idx
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Issue #461: Dispute lock
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// A time-bounded lock that temporarily blocks pause/transfer/cancel/rate-update
-// operations on a stream, for use during dispute resolution windows. Stored as
-// the ledger sequence number at which the lock expires (0 = never locked); it
-// "expires automatically" simply because callers compare against
-// `env.ledger().sequence()` rather than requiring an explicit unlock transaction.
-
-fn dispute_lock_expiry_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "dlock"), stream_id)
-}
-
-/// Returns the ledger sequence number at which the dispute lock on a stream
-/// expires (0 if the stream has never been locked). Callers should compare
-/// against the current ledger sequence rather than relying on this being reset
-/// to 0 once the lock lapses — it isn't, since expiry is purely comparative.
-pub fn get_dispute_lock_expiry(env: &Env, stream_id: u64) -> u32 {
-    env.storage()
-        .persistent()
-        .get(&dispute_lock_expiry_key(env, stream_id))
-        .unwrap_or(0u32)
-}
-
-/// Sets the dispute lock expiry ledger for a stream.
-pub fn set_dispute_lock_expiry(env: &Env, stream_id: u64, expiry_ledger: u32) {
-    env.storage()
-        .persistent()
-        .set(&dispute_lock_expiry_key(env, stream_id), &expiry_ledger);
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
 }

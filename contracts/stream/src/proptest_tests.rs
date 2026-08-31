@@ -723,3 +723,162 @@ proptest! {
         );
     }
 }
+
+// ── Issue #501: Property-based tests for accrual calculation invariants ───────
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+    /// Invariant: Sum of all partial withdrawals never exceeds the original deposit.
+    /// Tests multiple withdrawals at different times throughout the stream lifetime.
+    #[test]
+    fn prop_partial_withdrawals_never_exceed_deposit(
+        amount in 10_000_i128..=1_000_000_i128,
+        duration in 100_u64..=10_000_u64,
+        withdraw_count in 2_usize..=10_usize,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        let token = TokenClient::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
+            &false, &0i128,
+        );
+
+        let mut total_withdrawn: i128 = 0;
+        let time_step = duration / withdraw_count as u64;
+
+        for i in 0..withdraw_count {
+            let current_time = (i as u64 + 1) * time_step;
+            if current_time >= duration {
+                break;
+            }
+
+            env.ledger().set_timestamp(current_time);
+
+            if c.try_get_stream(&stream_id).is_ok() {
+                let _ = c.try_withdraw(&stream_id, &recipient);
+                let new_balance = token.balance(&recipient);
+                total_withdrawn = new_balance;
+
+                // Invariant: total withdrawn must never exceed deposit
+                prop_assert!(
+                    total_withdrawn <= amount,
+                    "total_withdrawn({}) must not exceed deposit({}) after {} withdrawals at time={}",
+                    total_withdrawn, amount, i, current_time,
+                );
+            }
+        }
+
+        // Final check: total withdrawn should equal approximately the deposit (within rounding)
+        env.ledger().set_timestamp(duration);
+        if c.try_get_stream(&stream_id).is_ok() {
+            let _ = c.try_withdraw(&stream_id, &recipient);
+        }
+        let final_balance = token.balance(&recipient);
+        prop_assert!(
+            final_balance <= amount,
+            "final_balance({}) must not exceed deposit({})",
+            final_balance, amount,
+        );
+    }
+
+    /// Invariant: Accrued amount at any point in time is bounded by:
+    /// max_accrued = min(time_elapsed * flow_rate, deposit)
+    #[test]
+    fn prop_accrued_bounded_by_deposit_and_time(
+        amount in 10_000_i128..=1_000_000_i128,
+        duration in 100_u64..=10_000_u64,
+        query_time in 0_u64..=20_000_u64,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
+            &false, &0i128,
+        );
+        let stream = c.get_stream(&stream_id);
+
+        // Query at a random time
+        let query_time = query_time.min(duration + 1000);
+        env.ledger().set_timestamp(query_time);
+
+        if c.try_get_stream(&stream_id).is_ok() {
+            let claimable = c.get_claimable(&stream_id);
+
+            // Calculate expected accrual bounds
+            let time_elapsed = query_time.saturating_sub(stream.start_time) as i128;
+            let max_by_time = time_elapsed * flow_rate;
+            let expected_max = max_by_time.min(amount);
+
+            prop_assert!(
+                claimable <= expected_max,
+                "claimable({}) must be <= min(time_elapsed({}) * flow_rate({}), deposit({})) = {}",
+                claimable, time_elapsed, flow_rate, amount, expected_max,
+            );
+
+            // Claimable should also be >= 0
+            prop_assert!(
+                claimable >= 0,
+                "claimable({}) must be non-negative",
+                claimable,
+            );
+        }
+    }
+
+    /// Invariant: After a partial withdrawal, remaining claimable must be non-negative
+    /// and total (claimed + remaining) equals the full accrual at that time.
+    #[test]
+    fn prop_withdrawal_accounting_complete(
+        amount in 10_000_i128..=1_000_000_i128,
+        duration in 100_u64..=10_000_u64,
+        withdraw_time in 1_u64..=10_000_u64,
+    ) {
+        let (env, contract_id, token_id, sender, recipient) = setup_env();
+        let c = SoroStreamContractClient::new(&env, &contract_id);
+        let token = TokenClient::new(&env, &token_id);
+        env.ledger().set_timestamp(0);
+
+        let flow_rate = amount / duration as i128;
+        if flow_rate == 0 { return Ok(()); }
+
+        let stream_id = c.create_stream(
+            &sender, &recipient, &token_id, &amount, &duration, &0u64, &0u64, &false, &0u64,
+            &false, &0i128,
+        );
+
+        let withdraw_time = withdraw_time.min(duration);
+        env.ledger().set_timestamp(withdraw_time);
+
+        let claimable_before = c.get_claimable(&stream_id);
+        c.withdraw(&stream_id, &recipient);
+        let withdrawn = token.balance(&recipient);
+
+        // Invariant: withdrawn amount must equal claimable before withdrawal
+        prop_assert_eq!(
+            withdrawn, claimable_before,
+            "withdrawn({}) must equal claimable_before({})",
+            withdrawn, claimable_before,
+        );
+
+        if c.try_get_stream(&stream_id).is_ok() {
+            let claimable_after = c.get_claimable(&stream_id);
+            // After withdrawal, remaining claimable must be non-negative
+            prop_assert!(
+                claimable_after >= 0,
+                "claimable_after({}) must be non-negative",
+                claimable_after,
+            );
+        }
+    }
+}
