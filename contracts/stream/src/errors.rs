@@ -47,6 +47,10 @@ pub enum StreamError {
     InvalidRedirectTarget = 52,
     CircularRedirect = 53,
     RedirectRecipientMismatch = 54,
+    /// Dual stream requires both token addresses to be distinct.
+    DuplicateTokenInDualStream = 55,
+    /// Operation requires a single-token stream but the stream is dual-token.
+    IsDualStream = 57,
     /// `transfer_recipient` was called on a stream marked as non-transferable at creation.
     StreamNonTransferable = 58,
     /// `withdraw` was called on a stream still in `PendingApproval` state.
@@ -58,20 +62,8 @@ pub enum StreamError {
     /// Recipient is not on the admin-managed recipient allowlist, and the stream
     /// requires allowlist enforcement.
     RecipientNotAllowed = 61,
+    /// The stream deposit exceeds the maximum allowed per-token limit.
     MaxDepositExceeded = 64,
-
-    // ── Issue #469: Sender (creation) whitelist ─────────────────────────────
-    /// `create_stream` (and friends) called by a sender who is not on the
-    /// admin-maintained sender whitelist while sender-whitelist enforcement
-    /// is enabled.
-    SenderNotWhitelisted = 65,
-
-    // ── Issue #466: Subscription mode ───────────────────────────────────────
-    /// A subscription-mode operation was attempted on a stream that is not
-    /// configured as a subscription (or vice versa).
-    NotSubscription = 66,
-
-    // ── Issue #467: Stream manager delegation ───────────────────────────────
-    /// The caller is not the stream's sender nor its authorised manager.
-    NotManager = 67,
+    /// The comment attached to a stream exceeds the 256-byte limit.
+    CommentTooLong = 65,
 }

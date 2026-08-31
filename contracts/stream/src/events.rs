@@ -1,6 +1,14 @@
 #![allow(dead_code)]
 use soroban_sdk::{Address, Bytes, Env, String, Symbol};
 
+/// Event schema version for compatibility tracking
+const EVENT_SCHEMA_VERSION: u32 = 1;
+
+/// Returns the current event schema version for off-chain compatibility checking
+pub fn get_event_schema_version() -> u32 {
+    EVENT_SCHEMA_VERSION
+}
+
 /// Emitted when a new stream is created.
 pub fn stream_created(
     env: &Env,
@@ -11,16 +19,19 @@ pub fn stream_created(
     flow_rate: i128,
     end_time: u64,
     non_transferable: bool,
+    comment: &Option<String>,
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCreated"), stream_id),
         (
+            EVENT_SCHEMA_VERSION,
             sender.clone(),
             recipient.clone(),
             amount,
             flow_rate,
             end_time,
             non_transferable,
+            comment.clone(),
         ),
     );
 }
@@ -40,7 +51,7 @@ pub fn stream_withdrawn(
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamWithdrawn"), stream_id),
-        (recipient.clone(), amount, timestamp, total_withdrawn),
+        (EVENT_SCHEMA_VERSION, recipient.clone(), amount, timestamp, total_withdrawn),
     );
 }
 
@@ -54,7 +65,7 @@ pub fn stream_cancelled(
 ) {
     env.events().publish(
         (Symbol::new(env, "StreamCancelled"), stream_id),
-        (sender.clone(), refund_amount, recipient_amount),
+        (EVENT_SCHEMA_VERSION, sender.clone(), refund_amount, recipient_amount),
     );
 }
 
@@ -92,7 +103,7 @@ pub fn renewal_limit_reached(env: &Env, stream_id: u64, sender: &Address, renewa
 pub fn contract_deployed(env: &Env, version: &String, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ContractDeployed"),),
-        (version.clone(), admin.clone()),
+        (EVENT_SCHEMA_VERSION, version.clone(), admin.clone()),
     );
 }
 
@@ -434,63 +445,6 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, sender: &Address) {
         sender.clone(),
     );
 }
-// ── Issue #466: Subscription mode ────────────────────────────────────────────
-
-/// Emitted when a subscription stream is created.
-pub fn subscription_created(env: &Env, stream_id: u64, sender: &Address, recipient: &Address, deposit: i128) {
-    env.events().publish(
-        (Symbol::new(env, "SubscriptionCreated"), stream_id),
-        (sender.clone(), recipient.clone(), deposit),
-    );
-}
-
-/// Emitted each time a subscription successfully renews by drawing from the
-/// sender's pre-approved allowance.
-pub fn subscription_renewed(env: &Env, stream_id: u64, sender: &Address, amount_drawn: i128, renewals_used: u32) {
-    env.events().publish(
-        (Symbol::new(env, "SubscriptionRenewed"), stream_id),
-        (sender.clone(), amount_drawn, renewals_used),
-    );
-}
-
-/// Emitted when a subscription's renewal fails because the sender's SAC
-/// allowance to this contract is no longer sufficient to cover the next cycle.
-pub fn subscription_funding_exhausted(env: &Env, stream_id: u64, sender: &Address, required: i128) {
-    env.events().publish(
-        (Symbol::new(env, "SubscriptionFundingExhausted"), stream_id),
-        (sender.clone(), required),
-    );
-}
-
-/// Emitted when the sender cancels a subscription. The exact refund/earned
-/// split is emitted separately by the underlying `cancel_stream` call as its
-/// own `StreamCancelled` event; this just marks the termination as a
-/// subscription cancellation.
-pub fn subscription_cancelled(env: &Env, stream_id: u64, sender: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "SubscriptionCancelled"), stream_id),
-        sender.clone(),
-    );
-}
-
-// ── Issue #467: Stream manager delegation ────────────────────────────────────
-
-/// Emitted when a restricted manager is set for a stream.
-pub fn manager_set(env: &Env, stream_id: u64, sender: &Address, manager: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "ManagerSet"), stream_id),
-        (sender.clone(), manager.clone()),
-    );
-}
-
-/// Emitted when a stream's manager is revoked.
-pub fn manager_revoked(env: &Env, stream_id: u64, sender: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "ManagerRevoked"), stream_id),
-        sender.clone(),
-    );
-}
-
 /// Emitted when fees are swept from the contract.
 pub fn fee_swept(env: &Env, token: &Address, amount: i128, destination: &Address) {
     env.events().publish(
@@ -551,32 +505,6 @@ pub fn token_dwhitelisted(env: &Env, token: &Address) {
 pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     env.events().publish(
         (Symbol::new(env, "TokenWhitelistToggled"),),
-        enabled,
-    );
-}
-
-// ── Issue #469: Sender (creation) whitelist ─────────────────────────────────
-
-/// Emitted when a sender is added to the stream-creation whitelist.
-pub fn sender_whitelisted(env: &Env, sender: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "SenderWhitelisted"),),
-        sender.clone(),
-    );
-}
-
-/// Emitted when a sender is removed from the stream-creation whitelist.
-pub fn sender_dewhitelisted(env: &Env, sender: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "SenderDewhitelisted"),),
-        sender.clone(),
-    );
-}
-
-/// Emitted when sender-whitelist enforcement is toggled.
-pub fn sender_whitelist_toggled(env: &Env, enabled: bool) {
-    env.events().publish(
-        (Symbol::new(env, "SenderWhitelistToggled"),),
         enabled,
     );
 }

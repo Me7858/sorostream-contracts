@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, VestingTranche};
-use soroban_sdk::{Address, Bytes, Env, String, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{Address, Bytes, BytesN, Env, String, Symbol, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: &str = "admin";
 const PAUSED_KEY: &str = "paused";
@@ -487,90 +487,6 @@ pub fn remove_delegate(env: &Env, stream_id: u64) {
     env.storage().persistent().remove(&delegate_key(env, stream_id));
 }
 
-// --- On-complete callback helpers ---
-//
-// Kept outside the `Stream` struct itself (rather than as two `Option` fields)
-// to stay under the Soroban `#[contracttype]` struct field cap.
-
-fn on_complete_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "oncmp"), stream_id)
-}
-
-/// Gets the configured on-complete callback `(contract, function)` for a stream, if any.
-pub fn get_on_complete(env: &Env, stream_id: u64) -> Option<(Address, Symbol)> {
-    env.storage().persistent().get(&on_complete_key(env, stream_id))
-}
-
-/// Sets the on-complete callback for a stream.
-pub fn set_on_complete(env: &Env, stream_id: u64, contract: &Address, function: &Symbol) {
-    env.storage()
-        .persistent()
-        .set(&on_complete_key(env, stream_id), &(contract.clone(), function.clone()));
-}
-
-/// Removes the on-complete callback for a stream.
-pub fn remove_on_complete(env: &Env, stream_id: u64) {
-    env.storage().persistent().remove(&on_complete_key(env, stream_id));
-}
-
-// --- Stream manager (Issue #467) ---
-//
-// A restricted counterpart to the delegate above: a manager may pause,
-// resume, and update the flow rate of a stream on the sender's behalf, but
-// (unlike a delegate) may never cancel/stop the stream or redirect its
-// funds. Enforcement of exactly which entry points accept the manager lives
-// in lib.rs; this module only stores the mapping.
-
-fn stream_manager_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "mgr"), stream_id)
-}
-
-/// Gets the authorized manager for a stream, if one has been set.
-pub fn get_stream_manager(env: &Env, stream_id: u64) -> Option<Address> {
-    env.storage().persistent().get(&stream_manager_key(env, stream_id))
-}
-
-/// Sets the authorized manager for a stream.
-pub fn set_stream_manager(env: &Env, stream_id: u64, manager: &Address) {
-    env.storage().persistent().set(&stream_manager_key(env, stream_id), manager);
-}
-
-/// Removes the authorized manager for a stream.
-pub fn remove_stream_manager(env: &Env, stream_id: u64) {
-    env.storage().persistent().remove(&stream_manager_key(env, stream_id));
-}
-
-// --- Subscription mode (Issue #466) ---
-//
-// A subscription is an auto_renew stream whose renewals draw from a SAC
-// allowance the sender pre-approved once (via the token's `approve`), using
-// `transfer_from`, rather than requiring the sender to be a live signer on
-// whatever transaction happens to trigger the renewal (which the original
-// auto_renew mechanism required, and which — since renewals are normally
-// triggered by a *recipient's* withdraw call — makes genuine unattended
-// auto-renewal impractical). This flag selects that funding path; the rest
-// of a subscription's fields (auto_renew, renew_count, renewals_used) are
-// the ordinary ones already on `Stream`.
-
-fn subscription_key(env: &Env, stream_id: u64) -> (Symbol, u64) {
-    (Symbol::new(env, "sub"), stream_id)
-}
-
-/// Returns whether `stream_id` is a subscription (allowance-funded renewals).
-pub fn is_subscription(env: &Env, stream_id: u64) -> bool {
-    env.storage().persistent().get(&subscription_key(env, stream_id)).unwrap_or(false)
-}
-
-/// Marks `stream_id` as a subscription.
-pub fn set_subscription(env: &Env, stream_id: u64) {
-    env.storage().persistent().set(&subscription_key(env, stream_id), &true);
-}
-
-/// Clears the subscription flag for `stream_id`.
-pub fn remove_subscription(env: &Env, stream_id: u64) {
-    env.storage().persistent().remove(&subscription_key(env, stream_id));
-}
-
 // --- Version tracking ---
 
 /// Stores the contract version string.
@@ -651,47 +567,6 @@ pub fn add_to_whitelist(env: &Env, recipient: &Address) {
 /// Removes a recipient from the whitelist.
 pub fn remove_from_whitelist(env: &Env, recipient: &Address) {
     env.storage().persistent().remove(&whitelist_key(env, recipient));
-}
-
-// --- Sender (creation) whitelist (Issue #469) ---
-//
-// Distinct from the recipient whitelist above: this gates *who may create*
-// streams, not who may receive them.
-
-const SENDER_WHITELIST_ENABLED_KEY: &str = "swl_en";
-
-/// Returns whether sender (creation) whitelisting is enabled.
-pub fn is_sender_whitelist_enabled(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, SENDER_WHITELIST_ENABLED_KEY))
-        .unwrap_or(false)
-}
-
-/// Enables or disables sender (creation) whitelisting.
-pub fn set_sender_whitelist_enabled(env: &Env, enabled: bool) {
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, SENDER_WHITELIST_ENABLED_KEY), &enabled);
-}
-
-fn sender_whitelist_key(env: &Env, sender: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "swl"), sender.clone())
-}
-
-/// Returns whether a sender is on the stream-creation whitelist.
-pub fn is_sender_whitelisted(env: &Env, sender: &Address) -> bool {
-    env.storage().persistent().get(&sender_whitelist_key(env, sender)).unwrap_or(false)
-}
-
-/// Adds a sender to the stream-creation whitelist.
-pub fn add_to_sender_whitelist(env: &Env, sender: &Address) {
-    env.storage().persistent().set(&sender_whitelist_key(env, sender), &true);
-}
-
-/// Removes a sender from the stream-creation whitelist.
-pub fn remove_from_sender_whitelist(env: &Env, sender: &Address) {
-    env.storage().persistent().remove(&sender_whitelist_key(env, sender));
 }
 
 // --- Recipient allowlist (for regulated payment scenarios) ---
@@ -1406,7 +1281,7 @@ pub fn is_sender_promoted(env: &Env, sender: &Address) -> bool {
 // Feature (c): Stream redirect
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Redirect target is stored in Stream.redirect_to_stream_id (no separate storage key needed).
+// Redirect target is stored in Stream.options.redirect_to_stream_id (no separate storage key needed).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Feature (f): Instance TTL extension
@@ -1489,73 +1364,6 @@ pub fn remove_from_blocklist(env: &Env, addr: &Address) {
 /// Returns true if the address is on the blocklist.
 pub fn is_blocked(env: &Env, addr: &Address) -> bool {
     env.storage().persistent().get(&blocklist_key(env, addr)).unwrap_or(false)
-}
-
-// --- Per-asset analytics (Issue #468) ---
-//
-// Raw counters, stored one entry per token so each update touches a single
-// storage slot. `crate::types::AssetAnalytics` (returned to callers) is
-// assembled from these on read.
-
-fn analytics_value_streamed_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "an_val"), token.clone())
-}
-
-fn analytics_created_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "an_cre"), token.clone())
-}
-
-fn analytics_cancelled_key(env: &Env, token: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "an_can"), token.clone())
-}
-
-/// Returns the cumulative amount of `token` ever paid out to recipients.
-pub fn get_analytics_value_streamed(env: &Env, token: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&analytics_value_streamed_key(env, token))
-        .unwrap_or(0)
-}
-
-/// Adds `amount` to the cumulative value-streamed counter for `token`.
-/// No-ops for `amount <= 0`.
-pub fn record_value_streamed(env: &Env, token: &Address, amount: i128) {
-    if amount <= 0 {
-        return;
-    }
-    let key = analytics_value_streamed_key(env, token);
-    let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-    env.storage().persistent().set(&key, &current.saturating_add(amount));
-}
-
-/// Returns the total number of streams ever created using `token`.
-pub fn get_analytics_streams_created(env: &Env, token: &Address) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&analytics_created_key(env, token))
-        .unwrap_or(0)
-}
-
-/// Increments the streams-created counter for `token`.
-pub fn record_stream_created(env: &Env, token: &Address) {
-    let key = analytics_created_key(env, token);
-    let current: u64 = env.storage().persistent().get(&key).unwrap_or(0);
-    env.storage().persistent().set(&key, &current.saturating_add(1));
-}
-
-/// Returns the total number of streams using `token` that were cancelled.
-pub fn get_analytics_streams_cancelled(env: &Env, token: &Address) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&analytics_cancelled_key(env, token))
-        .unwrap_or(0)
-}
-
-/// Increments the streams-cancelled counter for `token`.
-pub fn record_stream_cancelled(env: &Env, token: &Address) {
-    let key = analytics_cancelled_key(env, token);
-    let current: u64 = env.storage().persistent().get(&key).unwrap_or(0);
-    env.storage().persistent().set(&key, &current.saturating_add(1));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1748,4 +1556,91 @@ pub fn remove_stream_tag(env: &Env, stream_id: u64) {
     env.storage()
         .persistent()
         .remove(&stream_tag_key(env, stream_id));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WASM Upgrade Proposal Queue (Issue #497)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn upgrade_proposal_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_prop")
+}
+
+fn upgrade_proposal_expiry_key(env: &Env) -> Symbol {
+    Symbol::new(env, "upg_exp")
+}
+
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_by: Address,
+    pub created_at: u64,
+}
+
+pub fn propose_upgrade(
+    env: &Env,
+    wasm_hash: BytesN<32>,
+    proposed_by: &Address,
+    expiry_ledger: u64,
+) -> Result<(), String> {
+    if get_pending_upgrade_proposal(env).is_some() {
+        return Err("Upgrade proposal already pending".to_string());
+    }
+
+    let proposal = UpgradeProposal {
+        wasm_hash,
+        proposed_by: proposed_by.clone(),
+        created_at: env.ledger().timestamp(),
+    };
+
+    env.storage()
+        .instance()
+        .set(&upgrade_proposal_key(env), &(proposal.wasm_hash.clone(), proposal.proposed_by.clone(), proposal.created_at));
+    env.storage()
+        .instance()
+        .set(&upgrade_proposal_expiry_key(env), &expiry_ledger);
+    Ok(())
+}
+
+pub fn get_pending_upgrade_proposal(env: &Env) -> Option<(BytesN<32>, Address, u64)> {
+    env.storage()
+        .instance()
+        .get(&upgrade_proposal_key(env))
+}
+
+pub fn get_upgrade_proposal_expiry(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&upgrade_proposal_expiry_key(env))
+}
+
+pub fn approve_upgrade_proposal(env: &Env, approver: &Address) -> Result<BytesN<32>, String> {
+    let proposal = get_pending_upgrade_proposal(env)
+        .ok_or("No pending upgrade proposal".to_string())?;
+
+    let expiry = get_upgrade_proposal_expiry(env)
+        .ok_or("Proposal expiry not set".to_string())?;
+
+    if env.ledger().sequence() > expiry {
+        clear_upgrade_proposal(env);
+        return Err("Upgrade proposal expired".to_string());
+    }
+
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_key(env));
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
+
+    Ok(proposal.0)
+}
+
+pub fn clear_upgrade_proposal(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_key(env));
+    env.storage()
+        .instance()
+        .remove(&upgrade_proposal_expiry_key(env));
 }

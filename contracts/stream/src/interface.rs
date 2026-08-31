@@ -6,7 +6,7 @@
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::errors::StreamError;
-use crate::types::{AuditEntry, Stats, Stream, StreamHealth, VestingCurve, VestingTranche, AdminOverrideRequest, OverrideAction, StreamQueryFilter, ProtocolStats, AssetAnalytics};
+use crate::types::{AdminOverrideRequest, AuditEntry, CreateStreamOptions, OverrideAction, ProtocolStats, Stats, Stream, StreamHealth, StreamOptions, StreamQueryFilter, VestingCurve, VestingTranche};
 
 #[contractclient(name = "SoroStreamClient")]
 pub trait SoroStreamInterface {
@@ -32,35 +32,8 @@ pub trait SoroStreamInterface {
         nonce: u64,
         auto_renew: bool,
         lock_until: u64,
-        allow_recipient_termination: bool,
+        options: CreateStreamOptions,
     ) -> Result<u64, StreamError>;
-
-    // ── Issue #466: Subscription mode ───────────────────────────────────────
-
-    /// Creates a subscription: an auto-renewing stream that draws each
-    /// renewal's deposit from the sender's pre-approved SAC allowance to
-    /// this contract, rather than requiring an interactive re-approval.
-    #[allow(clippy::too_many_arguments)]
-    fn create_subscription(
-        env: Env,
-        sender: Address,
-        recipient: Address,
-        token: Address,
-        amount: i128,
-        duration_seconds: u64,
-        cliff_seconds: u64,
-        nonce: u64,
-        renew_count: Option<u32>,
-        lock_until: u64,
-    ) -> Result<u64, StreamError>;
-
-    /// Cancels a subscription: refunds the sender's unused deposit for the
-    /// current cycle, settles the recipient's earned portion, and ends
-    /// future renewals. Only the stream's sender may call this.
-    fn cancel_subscription(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
-
-    /// Returns whether `stream_id` is a subscription.
-    fn is_subscription(env: Env, stream_id: u64) -> bool;
 
     fn create_stream_with_federation(
         env: Env,
@@ -202,6 +175,7 @@ pub trait SoroStreamInterface {
     fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError>;
     fn get_all_stream_ids(env: Env, start: u32, limit: u32) -> Vec<u64>;
     fn get_claimable(env: Env, stream_id: u64) -> Result<i128, StreamError>;
+    fn get_accrued_balance(env: Env, stream_id: u64, recipient: Address) -> Result<i128, StreamError>;
     fn is_participant(env: Env, stream_id: u64, address: Address) -> Result<bool, StreamError>;
     fn get_streams_by_sender(env: Env, sender: Address, start: u32, limit: u32) -> Vec<Stream>;
     fn get_streams_by_recipient(env: Env, recipient: Address, start: u32, limit: u32) -> Vec<Stream>;
@@ -240,11 +214,6 @@ pub trait SoroStreamInterface {
     fn get_stats(env: Env) -> Stats;
     fn get_protocol_stats(env: Env) -> ProtocolStats;
     fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError>;
-
-    /// Returns an incrementally-maintained per-asset analytics snapshot
-    /// (total value streamed, streams created, streams cancelled) for `token`.
-    /// O(1) — no stream scanning required. See Issue #468.
-    fn get_stream_analytics(env: Env, token: Address) -> AssetAnalytics;
 
     fn min_duration(env: Env) -> u64;
     fn set_min_duration(env: Env, admin: Address, seconds: u64);
@@ -347,17 +316,6 @@ pub trait SoroStreamInterface {
     fn revoke_delegate(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
     fn get_delegate(env: Env, stream_id: u64) -> Option<Address>;
 
-    // ── Issue #467: Stream manager delegation ───────────────────────────────
-
-    /// Designates `manager` as the restricted manager for `stream_id`: pause/
-    /// resume/update_stream_rate only — no cancellation or redirection rights.
-    /// Only the stream's sender may call this.
-    fn set_stream_manager(env: Env, sender: Address, stream_id: u64, manager: Address) -> Result<(), StreamError>;
-    /// Revokes the current manager from a stream. Only the sender may call this.
-    fn revoke_stream_manager(env: Env, sender: Address, stream_id: u64) -> Result<(), StreamError>;
-    /// Returns the current manager address for a stream, if one has been set.
-    fn get_stream_manager(env: Env, stream_id: u64) -> Option<Address>;
-
     /// Sets the sliding-window size for the per-sender rate limit, in **ledgers**.
     /// Default: 720 ledgers (~1 hour at 5 s/ledger). Only admin may call this.
     fn set_rate_limit_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), StreamError>;
@@ -375,19 +333,6 @@ pub trait SoroStreamInterface {
     fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
     fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
     fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError>;
-
-    // ── Issue #469: Sender (creation) whitelist ─────────────────────────────
-
-    /// Enables or disables sender (creation) whitelist enforcement. Admin only.
-    fn set_sender_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError>;
-    /// Returns whether sender (creation) whitelist enforcement is enabled.
-    fn is_sender_whitelist_enabled(env: Env) -> bool;
-    /// Adds a sender to the stream-creation whitelist. Admin only.
-    fn add_sender_to_whitelist(env: Env, admin: Address, sender: Address) -> Result<(), StreamError>;
-    /// Removes a sender from the stream-creation whitelist. Admin only.
-    fn remove_sender_from_whitelist(env: Env, admin: Address, sender: Address) -> Result<(), StreamError>;
-    /// Returns whether a sender is on the stream-creation whitelist.
-    fn is_sender_whitelisted(env: Env, sender: Address) -> bool;
 
     fn set_slippage_params(env: Env, sender: Address, stream_id: u64, reference_price: i128, max_slippage_bps: u32) -> Result<(), StreamError>;
 
