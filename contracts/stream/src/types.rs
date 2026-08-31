@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
 /// Vesting release curve applied to a payment stream.
 ///
@@ -455,21 +455,20 @@ pub struct AdminOverrideRequest {
 
 /// Optional filter struct for querying streams efficiently without iterating all records.
 ///
-/// All fields are optional; a `None` value means no filtering on that criterion.
+/// `asset`/`sender`/`recipient` are optional; a `None` value means no filtering on
+/// that criterion. `status` filtering is instead controlled by `filter_by_status`
+/// (rather than `Option<StreamStatus>`) because Soroban's `#[contracttype]` XDR
+/// conversion for `testutils` builds only supports `Option<T>` for SDK-provided
+/// types with infallible XDR conversions — not for user-defined enums like
+/// `StreamStatus`, which convert fallibly.
 /// Multiple filters are combined with AND logic (all must match).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct StreamQueryFilter {
-    /// Optional status filter, as a `StreamStatus` discriminant code
-    /// (`Active`=0, `Cancelled`=1, `Completed`=2, `Paused`=3, `Expired`=4,
-    /// `PendingApproval`=5, `EscrowHold`=6). If set, only streams with this
-    /// status are returned.
-    ///
-    /// Stored as a raw code rather than `Option<StreamStatus>` because
-    /// `Option<T>` for a custom `#[contracttype]` enum does not round-trip
-    /// through `ScVal` in this soroban-sdk version when nested inside another
-    /// `#[contracttype]` struct field.
-    pub status: Option<u32>,
+    /// Whether to filter by status at all. When `false`, `status` is ignored.
+    pub filter_by_status: bool,
+    /// Status to filter by. Only applied when `filter_by_status` is `true`.
+    pub status: StreamStatus,
     /// Optional asset (token) filter. If set, only streams using this token are returned.
     pub asset: Option<Address>,
     /// Optional sender filter. If set, only streams created by this address are returned.
@@ -478,18 +477,16 @@ pub struct StreamQueryFilter {
     pub recipient: Option<Address>,
 }
 
-/// A snapshot of a stream's cumulative withdrawn amount at a point in time.
-///
-/// Recorded periodically (see `checkpoint_stream`) so that accrued-balance
-/// history can be audited or recomputed without replaying every withdrawal
-/// event from the stream's full lifetime.
+/// Less-frequently-varied options for `create_stream`, bundled into a single
+/// struct so the entry point stays within Soroban's 10-parameter contract
+/// function limit.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Checkpoint {
-    /// Ledger sequence number at which this checkpoint was recorded.
-    pub ledger: u32,
-    /// Ledger timestamp at which this checkpoint was recorded.
-    pub timestamp: u64,
-    /// The stream's `total_withdrawn` value at the time of this checkpoint.
-    pub cumulative_withdrawn: i128,
+pub struct StreamCreateOptions {
+    /// Optional limit on the number of auto-renewals (see `Stream::renew_count`).
+    pub renew_count: Option<u32>,
+    /// Whether the recipient is allowed to terminate the stream early.
+    pub allow_recipient_termination: bool,
+    /// Whether the stream's recipient rights are locked to the original recipient.
+    pub non_transferable: bool,
 }
