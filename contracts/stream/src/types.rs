@@ -117,11 +117,6 @@ pub struct StreamOptions {
     pub milestone_release_mode: bool,
     /// Reentrancy guard: true if currently processing a withdrawal to prevent re-entrance.
     pub locked: bool,
-    /// Optional holdback amount kept in escrow until explicitly released (in stroops).
-    /// Deducted from the streaming portion at creation time.
-    pub holdback_amount: i128,
-    /// Whether the holdback has been settled (released to recipient or clawed back to sender).
-    pub holdback_claimed: bool,
 
     // ── Step-vesting (tranche) fields ────────────────────────────────────────
 
@@ -299,6 +294,7 @@ pub struct CreateStreamOptions {
     /// Optional human-readable payment reference (UTF-8, at most 256 bytes).
     pub comment: Option<String>,
 }
+
 
 /// Health status of a stream's on-chain storage entry, based on its TTL.
 ///
@@ -497,18 +493,38 @@ pub struct AssetAnalytics {
 
 /// Optional filter struct for querying streams efficiently without iterating all records.
 ///
-/// All fields are optional; a `None` (or `StatusFilter::Any`) value means no
-/// filtering on that criterion. Multiple filters are combined with AND logic
-/// (all must match).
+/// `asset`/`sender`/`recipient` are optional; a `None` value means no filtering on
+/// that criterion. `status` filtering is instead controlled by `filter_by_status`
+/// (rather than `Option<StreamStatus>`) because Soroban's `#[contracttype]` XDR
+/// conversion for `testutils` builds only supports `Option<T>` for SDK-provided
+/// types with infallible XDR conversions — not for user-defined enums like
+/// `StreamStatus`, which convert fallibly.
+/// Multiple filters are combined with AND logic (all must match).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct StreamQueryFilter {
-    /// Status filter. `StatusFilter::Any` means no filtering on status.
-    pub status: StatusFilter,
+    /// Whether to filter by status at all. When `false`, `status` is ignored.
+    pub filter_by_status: bool,
+    /// Status to filter by. Only applied when `filter_by_status` is `true`.
+    pub status: StreamStatus,
     /// Optional asset (token) filter. If set, only streams using this token are returned.
     pub asset: Option<Address>,
     /// Optional sender filter. If set, only streams created by this address are returned.
     pub sender: Option<Address>,
     /// Optional recipient filter. If set, only streams targeting this address are returned.
     pub recipient: Option<Address>,
+}
+
+/// Less-frequently-varied options for `create_stream`, bundled into a single
+/// struct so the entry point stays within Soroban's 10-parameter contract
+/// function limit.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamCreateOptions {
+    /// Optional limit on the number of auto-renewals (see `Stream::renew_count`).
+    pub renew_count: Option<u32>,
+    /// Whether the recipient is allowed to terminate the stream early.
+    pub allow_recipient_termination: bool,
+    /// Whether the stream's recipient rights are locked to the original recipient.
+    pub non_transferable: bool,
 }
